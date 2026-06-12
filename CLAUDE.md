@@ -249,7 +249,7 @@ indicative; modules may grow long rather than splitting into many tiny files.
 ```
 Theke/
 +-- theke/                    Python package for the CLI
-|   +-- theke.py              all logic (for now; split into more files later?)
+|   +-- __init__.py           all logic (split into more files later?)
 +-- pyproject.toml            package + console-script `theke`, dependencies
 +-- tests/                    pytest suite for the CLI
 +-- gui/                      Delphi desktop GUI (shells out to the CLI)
