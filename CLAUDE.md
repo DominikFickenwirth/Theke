@@ -282,6 +282,14 @@ ALWAYS:
 - All logic in the Python CLI; the Delphi GUI stays a thin shell with no logic.
 - Stages are **idempotent** and re-runnable; state lives in the DB, not memory.
 - ANSI / CP-1252 content only in every text file (see encoding rule on top).
+- **Python formatting:**
+  - Section dividers with the label up front, dashes filling the line:
+    `# -- config ------... (to col 80)`.
+  - Runs of parallel calls (e.g. `parser.add_argument(...)` lines) stay one
+    call per line -- no wrapping, long lines are fine there -- with equal
+    arguments vertically aligned across the run.
+  - Blank lines between logical blocks inside longer functions.
+  - Unused unpacking slots are a bare `_`, not a named placeholder.
 - **Python:** use **venv**, never pip install globally.
 - **Delphi (GUI):** 3 empty lines between methods; nested function names in
   snake_case.

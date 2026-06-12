@@ -14,7 +14,7 @@ from dataclasses import dataclass
 CONFIG_DEFAULT_PATH = "theke.json"
 
 
-# --------------------------------------------------------------------- config
+# -- config ------------------------------------------------------------------
 
 class ConfigError(Exception):
     """Invalid or unreadable configuration."""
@@ -59,7 +59,7 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
     return Config(**data)
 
 
-# ------------------------------------------------------------------------- db
+# -- db -----------------------------------------------------------------------
 # Thin SQLite layer; keep all SQLite specifics here so the backend could be
 # swapped later. Single-user design: one process at a time owns the DB.
 
@@ -117,9 +117,9 @@ def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
     return conn
 
 
-# ------------------------------------------------------------------------ cli
-# Stable grammar and exit codes: the Delphi GUI drives the CLI and parses the
-# --json output (exactly one JSON object on stdout per call).
+# -- cli ----------------------------------------------------------------------
+# Stable grammar and exit codes: the GUI drives the CLI and parses the --json
+# output (exactly one JSON object on stdout per call).
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -142,28 +142,24 @@ COMMANDS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="theke",
-        description="Self-hosted media manager for German public broadcasters")
-    parser.add_argument("--config", metavar="PATH",
-                        help=f"config file (default: {CONFIG_DEFAULT_PATH})")
-    parser.add_argument("--db", metavar="PATH",
-                        help="database file (overrides db_path from config)")
-    parser.add_argument("--json", action="store_true",
-                        help="machine-readable output: one JSON object on stdout")
-    sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="command")
-    for name, (_, help_text, _needs_db) in COMMANDS.items():
+    parser = argparse.ArgumentParser(prog="theke",       description="Self-hosted media manager for German public broadcasters")
+    parser.add_argument("--config", metavar="PATH",      help=f"config file (default: {CONFIG_DEFAULT_PATH})")
+    parser.add_argument("--db",     metavar="PATH",      help="database file (overrides db_path from config)")
+    parser.add_argument("--json",   action="store_true", help="machine-readable output: one JSON object on stdout")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="command")
+    for name, (_, help_text, _) in COMMANDS.items():
         sub.add_parser(name, help=help_text)
     return parser
 
 
 def main(argv=None) -> int:
     """CLI entry point; returns the process exit code."""
+
     try:
         args = build_parser().parse_args(argv)
     except SystemExit as exc:  # argparse handles usage errors and --help
         return EXIT_USAGE if exc.code else EXIT_OK
+
     try:
         cfg = load_config(args.config, overrides={"db_path": args.db})
         handler, _, needs_db = COMMANDS[args.command]
@@ -179,6 +175,7 @@ def main(argv=None) -> int:
         else:
             print(f"error: {exc}", file=sys.stderr)
         return EXIT_LOCKED if isinstance(exc, DbLockedError) else EXIT_ERROR
+
     if args.json:
         print(json.dumps(result))
     else:

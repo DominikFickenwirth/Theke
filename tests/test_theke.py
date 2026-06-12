@@ -5,18 +5,10 @@ import sqlite3
 
 import pytest
 
-from theke import (
-    Config,
-    ConfigError,
-    DbError,
-    DbLockedError,
-    db_connect,
-    load_config,
-    main,
-)
+from theke import *
 
 
-# --------------------------------------------------------------------- config
+# -- config ------------------------------------------------------------------
 
 def write_config(path, data):
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -101,7 +93,7 @@ def test_config_none_override_keeps_file_value(tmp_path):
     assert cfg.db_path == "file.db"
 
 
-# ------------------------------------------------------------------------- db
+# -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [
     ("CREATE TABLE a (x INTEGER)",),
@@ -197,7 +189,7 @@ def test_db_lock_is_released_on_close(tmp_path):
     conn.close()
 
 
-# ------------------------------------------------------------------------ cli
+# -- cli ---------------------------------------------------------------------
 
 def test_cli_config_human_output(tmp_path, capsys):
     db = str(tmp_path / "t.db")
