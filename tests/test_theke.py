@@ -11,21 +11,9 @@ from theke import (
     DbError,
     DbLockedError,
     db_connect,
-    greeting,
     load_config,
     main,
 )
-
-
-# ---------------------------------------------------------------- placeholder
-
-def test_greeting_returns_hallo_welt():
-    assert greeting() == "Hallo Welt"
-
-
-def test_main_prints_greeting(capsys):
-    main()
-    assert capsys.readouterr().out.strip() == "Hallo Welt"
 
 
 # --------------------------------------------------------------------- config
@@ -207,3 +195,68 @@ def test_db_lock_is_released_on_close(tmp_path):
     db_connect(db, migrations=[]).close()
     conn = db_connect(db, migrations=[])
     conn.close()
+
+
+# ------------------------------------------------------------------------ cli
+
+def test_cli_config_human_output(tmp_path, capsys):
+    db = str(tmp_path / "t.db")
+    assert main(["--db", db, "config"]) == 0
+    out = capsys.readouterr().out
+    assert f"db_path = {db}" in out
+
+
+def test_cli_config_json_output(tmp_path, capsys):
+    db = str(tmp_path / "t.db")
+    assert main(["--json", "--db", db, "config"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"db_path": db}
+
+
+def test_cli_db_flag_overrides_config_file(tmp_path, capsys):
+    write_config(tmp_path / "c.json", {"db_path": str(tmp_path / "file.db")})
+    db = str(tmp_path / "cli.db")
+    args = ["--config", str(tmp_path / "c.json"), "--db", db, "--json", "config"]
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["db_path"] == db
+
+
+def test_cli_config_creates_and_initializes_db(tmp_path):
+    db = tmp_path / "t.db"
+    assert main(["--db", str(db), "config"]) == 0
+    assert db.exists()
+
+
+def test_cli_broken_config_human_error(tmp_path, capsys):
+    path = tmp_path / "broken.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert main(["--config", str(path), "config"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "broken.json" in captured.err
+
+
+def test_cli_broken_config_json_error(tmp_path, capsys):
+    path = tmp_path / "broken.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert main(["--json", "--config", str(path), "config"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert "broken.json" in result["error"]
+
+
+def test_cli_locked_db_exits_3(tmp_path, capsys):
+    db = str(tmp_path / "t.db")
+    conn = db_connect(db, migrations=[])
+    try:
+        assert main(["--json", "--db", db, "config"]) == 3
+        assert "error" in json.loads(capsys.readouterr().out)
+    finally:
+        conn.close()
+
+
+def test_cli_unknown_command_exits_2(capsys):
+    assert main(["frobnicate"]) == 2
+
+
+def test_cli_missing_command_exits_2(capsys):
+    assert main([]) == 2

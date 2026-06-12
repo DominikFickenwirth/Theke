@@ -4,9 +4,11 @@ All logic lives in this package module (split into more files later if ever
 needed). Sections: config / DB / CLI.
 """
 
+import argparse
 import dataclasses
 import json
 import sqlite3
+import sys
 from dataclasses import dataclass
 
 CONFIG_DEFAULT_PATH = "theke.json"
@@ -115,17 +117,72 @@ def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
     return conn
 
 
-# ---------------------------------------------------------------- placeholder
+# ------------------------------------------------------------------------ cli
+# Stable grammar and exit codes: the Delphi GUI drives the CLI and parses the
+# --json output (exactly one JSON object on stdout per call).
 
-def greeting() -> str:
-    """Return the placeholder greeting (real stages replace this later)."""
-    return "Hallo Welt"
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_LOCKED = 3
 
 
-def main() -> None:
-    """CLI entry point."""
-    print(greeting())
+def cmd_config(conn, cfg, args) -> dict:
+    """Show the effective configuration (after precedence resolution)."""
+    return dataclasses.asdict(cfg)
+
+
+# Pipeline stages register here: name -> (handler, help text). Each handler
+# gets the open DB connection, the effective Config and the parsed args, and
+# returns the result as a JSON-serializable dict.
+COMMANDS = {
+    "config": (cmd_config, "show the effective configuration"),
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="theke",
+        description="Self-hosted media manager for German public broadcasters")
+    parser.add_argument("--config", metavar="PATH",
+                        help=f"config file (default: {CONFIG_DEFAULT_PATH})")
+    parser.add_argument("--db", metavar="PATH",
+                        help="database file (overrides db_path from config)")
+    parser.add_argument("--json", action="store_true",
+                        help="machine-readable output: one JSON object on stdout")
+    sub = parser.add_subparsers(dest="command", required=True,
+                                metavar="command")
+    for name, (_, help_text) in COMMANDS.items():
+        sub.add_parser(name, help=help_text)
+    return parser
+
+
+def main(argv=None) -> int:
+    """CLI entry point; returns the process exit code."""
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as exc:  # argparse handles usage errors and --help
+        return EXIT_USAGE if exc.code else EXIT_OK
+    try:
+        cfg = load_config(args.config, overrides={"db_path": args.db})
+        conn = db_connect(cfg.db_path)
+        try:
+            result = COMMANDS[args.command][0](conn, cfg, args)
+        finally:
+            conn.close()
+    except (ConfigError, DbError, DbLockedError) as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+        return EXIT_LOCKED if isinstance(exc, DbLockedError) else EXIT_ERROR
+    if args.json:
+        print(json.dumps(result))
+    else:
+        for key, value in result.items():
+            print(f"{key} = {value}")
+    return EXIT_OK
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
