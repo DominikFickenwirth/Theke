@@ -1,10 +1,20 @@
 """Tests for the Theke CLI (config / DB / CLI skeleton)."""
 
 import json
+import sqlite3
 
 import pytest
 
-from theke import Config, ConfigError, greeting, load_config, main
+from theke import (
+    Config,
+    ConfigError,
+    DbError,
+    DbLockedError,
+    db_connect,
+    greeting,
+    load_config,
+    main,
+)
 
 
 # ---------------------------------------------------------------- placeholder
@@ -101,3 +111,99 @@ def test_config_none_override_keeps_file_value(tmp_path):
     write_config(path, {"db_path": "file.db"})
     cfg = load_config(str(path), overrides={"db_path": None})
     assert cfg.db_path == "file.db"
+
+
+# ------------------------------------------------------------------------- db
+
+DUMMY_MIGRATIONS = [
+    ("CREATE TABLE a (x INTEGER)",),
+    ("CREATE TABLE b (y INTEGER)", "CREATE INDEX b_y ON b (y)"),
+]
+
+
+def user_version(conn):
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def table_names(conn):
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    return {row["name"] for row in rows}
+
+
+def test_db_connect_creates_file_and_applies_settings(tmp_path):
+    db = tmp_path / "t.db"
+    conn = db_connect(str(db), migrations=[])
+    try:
+        assert db.exists()
+        assert conn.row_factory is sqlite3.Row
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert user_version(conn) == 0
+    finally:
+        conn.close()
+
+
+def test_db_migrations_apply_and_bump_version(tmp_path):
+    conn = db_connect(str(tmp_path / "t.db"), migrations=DUMMY_MIGRATIONS)
+    try:
+        assert user_version(conn) == 2
+        assert {"a", "b"} <= table_names(conn)
+    finally:
+        conn.close()
+
+
+def test_db_migrations_are_idempotent_across_reconnects(tmp_path):
+    db = str(tmp_path / "t.db")
+    db_connect(db, migrations=DUMMY_MIGRATIONS).close()
+    conn = db_connect(db, migrations=DUMMY_MIGRATIONS)
+    try:
+        assert user_version(conn) == 2
+    finally:
+        conn.close()
+
+
+def test_db_only_new_migrations_run_on_upgrade(tmp_path):
+    db = str(tmp_path / "t.db")
+    db_connect(db, migrations=DUMMY_MIGRATIONS[:1]).close()
+    conn = db_connect(db, migrations=DUMMY_MIGRATIONS)
+    try:
+        assert user_version(conn) == 2
+        assert {"a", "b"} <= table_names(conn)
+    finally:
+        conn.close()
+
+
+def test_db_failing_migration_rolls_back_everything(tmp_path):
+    db = str(tmp_path / "t.db")
+    bad = [("CREATE TABLE a (x INTEGER)",), ("CREATE TABLE b (",)]
+    with pytest.raises(sqlite3.Error):
+        db_connect(db, migrations=bad)
+    conn = db_connect(db, migrations=[])
+    try:
+        assert user_version(conn) == 0
+        assert "a" not in table_names(conn)
+    finally:
+        conn.close()
+
+
+def test_db_newer_than_code_is_error(tmp_path):
+    db = str(tmp_path / "t.db")
+    db_connect(db, migrations=DUMMY_MIGRATIONS).close()
+    with pytest.raises(DbError, match="newer"):
+        db_connect(db, migrations=DUMMY_MIGRATIONS[:1])
+
+
+def test_db_second_connection_is_rejected(tmp_path):
+    db = str(tmp_path / "t.db")
+    conn = db_connect(db, migrations=[])
+    try:
+        with pytest.raises(DbLockedError):
+            db_connect(db, migrations=[])
+    finally:
+        conn.close()
+
+
+def test_db_lock_is_released_on_close(tmp_path):
+    db = str(tmp_path / "t.db")
+    db_connect(db, migrations=[]).close()
+    conn = db_connect(db, migrations=[])
+    conn.close()
