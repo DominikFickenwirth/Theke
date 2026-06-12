@@ -221,10 +221,20 @@ def test_cli_db_flag_overrides_config_file(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["db_path"] == db
 
 
-def test_cli_config_creates_and_initializes_db(tmp_path):
+def test_cli_config_does_not_touch_db(tmp_path):
     db = tmp_path / "t.db"
     assert main(["--db", str(db), "config"]) == 0
-    assert db.exists()
+    assert not db.exists()
+
+
+def test_cli_config_works_while_db_is_locked(tmp_path, capsys):
+    db = str(tmp_path / "t.db")
+    conn = db_connect(db, migrations=[])
+    try:
+        assert main(["--json", "--db", db, "config"]) == 0
+        assert json.loads(capsys.readouterr().out)["db_path"] == db
+    finally:
+        conn.close()
 
 
 def test_cli_broken_config_human_error(tmp_path, capsys):
@@ -244,11 +254,15 @@ def test_cli_broken_config_json_error(tmp_path, capsys):
     assert "broken.json" in result["error"]
 
 
-def test_cli_locked_db_exits_3(tmp_path, capsys):
+def test_cli_locked_db_exits_3(tmp_path, capsys, monkeypatch):
+    import theke
+    monkeypatch.setitem(
+        theke.COMMANDS, "dummy",
+        (lambda conn, cfg, args: {"ok": True}, "db-touching test command", True))
     db = str(tmp_path / "t.db")
     conn = db_connect(db, migrations=[])
     try:
-        assert main(["--json", "--db", db, "config"]) == 3
+        assert main(["--json", "--db", db, "dummy"]) == 3
         assert "error" in json.loads(capsys.readouterr().out)
     finally:
         conn.close()

@@ -132,11 +132,12 @@ def cmd_config(conn, cfg, args) -> dict:
     return dataclasses.asdict(cfg)
 
 
-# Pipeline stages register here: name -> (handler, help text). Each handler
-# gets the open DB connection, the effective Config and the parsed args, and
-# returns the result as a JSON-serializable dict.
+# Pipeline stages register here: name -> (handler, help text, needs_db).
+# Each handler gets the DB connection (open if needs_db, else None), the
+# effective Config and the parsed args, and returns the result as a
+# JSON-serializable dict.
 COMMANDS = {
-    "config": (cmd_config, "show the effective configuration"),
+    "config": (cmd_config, "show the effective configuration", False),
 }
 
 
@@ -152,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="machine-readable output: one JSON object on stdout")
     sub = parser.add_subparsers(dest="command", required=True,
                                 metavar="command")
-    for name, (_, help_text) in COMMANDS.items():
+    for name, (_, help_text, _needs_db) in COMMANDS.items():
         sub.add_parser(name, help=help_text)
     return parser
 
@@ -165,11 +166,13 @@ def main(argv=None) -> int:
         return EXIT_USAGE if exc.code else EXIT_OK
     try:
         cfg = load_config(args.config, overrides={"db_path": args.db})
-        conn = db_connect(cfg.db_path)
+        handler, _, needs_db = COMMANDS[args.command]
+        conn = db_connect(cfg.db_path) if needs_db else None
         try:
-            result = COMMANDS[args.command][0](conn, cfg, args)
+            result = handler(conn, cfg, args)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
     except (ConfigError, DbError, DbLockedError) as exc:
         if args.json:
             print(json.dumps({"error": str(exc)}))
