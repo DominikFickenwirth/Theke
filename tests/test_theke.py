@@ -1,6 +1,6 @@
 """Smoke tests for the phase 1 scaffolding."""
 
-from theke.theke import greeting, main
+from theke import greeting, main
 
 
 def test_greeting_returns_hallo_welt():

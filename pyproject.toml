@@ -15,7 +15,7 @@ dev = [
 ]
 
 [project.scripts]
-theke = "theke.theke:main"
+theke = "theke:main"
 
 [tool.setuptools]
 packages = ["theke"]
