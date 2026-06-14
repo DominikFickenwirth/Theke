@@ -7,9 +7,12 @@ needed). Sections: config / DB / CLI.
 import argparse
 import dataclasses
 import hashlib
+import io
 import json
+import lzma
 import sqlite3
 import sys
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
@@ -25,7 +28,10 @@ class ConfigError(Exception):
 @dataclass
 class Config:
     """Effective configuration; defaults < config file < CLI parameters."""
-    db_path: str = "theke.db"
+    db_path:            str = "theke.db"
+    filmliste_url:      str = "https://liste.mediathekview.de/Filmliste-akt.xz"
+    filmliste_diff_url: str = "https://liste.mediathekview.de/Filmliste-diff.xz"
+    filmliste_id_url:   str = "https://liste.mediathekview.de/filmliste.id"
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
@@ -409,6 +415,91 @@ def full_import(conn, films, meta) -> dict:
         conn.execute("ROLLBACK")
         raise
     return {"imported": imported, "deleted": deleted}
+
+
+def diff_import(conn, films, meta) -> dict:
+    """Import a diff list: upsert the changed/new films, no deletion (a diff
+    cannot express removals; the next full import prunes them)."""
+    conn.execute("BEGIN")
+    try:
+        imported = _upsert_films(conn, films)
+        _store_meta(conn, meta)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"imported": imported}
+
+
+# Network is touched in exactly one place; tests monkeypatch http_get.
+USER_AGENT = "theke"
+
+
+def http_get(url: str) -> bytes:
+    """Fetch a URL and return the raw response bytes."""
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request) as response:
+        return response.read()
+
+
+def can_use_diff(created, now=None) -> bool:
+    """A diff is usable only if the local list was created after today 07:00
+    UTC (MediathekView's FilmListMetaData.canUseDiffList)."""
+    try:
+        stamp = datetime.strptime(
+            created, "%d.%m.%Y, %H:%M").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    now = now or datetime.now(timezone.utc)
+    cutoff = datetime.combine(now.date(), time(7, 0), tzinfo=timezone.utc)
+    return stamp > cutoff
+
+
+def fetch_list_id(cfg):
+    """Server's filmliste.id (hash of the current server list), or None if the
+    small request fails (then we re-download to be safe)."""
+    try:
+        return http_get(cfg.filmliste_id_url).decode("utf-8").strip()
+    except Exception:
+        return None
+
+
+def _load_list(url):
+    """Download, stream-decompress and parse a list; return (meta, films)."""
+    stream = lzma.open(io.BytesIO(http_get(url)), "rt", encoding="utf-8")
+    films = parse_filmliste(stream)
+    return next(films), films  # metadata is the first yield
+
+
+def _do_full(conn, cfg):
+    meta, films = _load_list(cfg.filmliste_url)
+    return {"action": "full", **full_import(conn, films, meta)}
+
+
+def _do_diff(conn, cfg):
+    try:
+        meta, films = _load_list(cfg.filmliste_diff_url)
+    except Exception:
+        return None  # download/parse failed -> caller falls back to full
+    return {"action": "diff", **diff_import(conn, films, meta)}
+
+
+def cmd_mirror(conn, cfg, args) -> dict:
+    """Refresh the film-list mirror (MediathekView update logic):
+    1. no local list or --force        -> full
+    2. local list fresh (after 07:00 UTC) -> diff, else fall back to full
+    3. else compare filmliste.id        -> skip if unchanged, else full
+    """
+    if getattr(args, "force", False) or get_meta(conn, "filmliste_id") is None:
+        return _do_full(conn, cfg)
+    if can_use_diff(get_meta(conn, "filmliste_created")):
+        result = _do_diff(conn, cfg)
+        if result and result["imported"]:
+            return result
+        return _do_full(conn, cfg)  # diff failed or was empty
+    if fetch_list_id(cfg) == get_meta(conn, "filmliste_id"):
+        return {"action": "skip"}
+    return _do_full(conn, cfg)
 
 
 # -- cli ----------------------------------------------------------------------
