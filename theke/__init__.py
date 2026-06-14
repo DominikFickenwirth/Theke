@@ -74,8 +74,34 @@ class DbLockedError(Exception):
 
 
 # One tuple of SQL statements per schema version; each stage appends its own
-# migration when it lands (phase 2 adds the mediathek table as entry 1).
-MIGRATIONS: list[tuple[str, ...]] = []
+# migration when it lands. Entry 1 (phase 2) is the film-list mirror schema.
+MIGRATIONS: list[tuple[str, ...]] = [
+    (
+        """CREATE TABLE mediathek (
+            status           TEXT NOT NULL,
+            mediathek_id     TEXT UNIQUE,
+            sender           TEXT,
+            topic            TEXT,
+            title            TEXT,
+            description      TEXT,
+            date             DATE,
+            duration         INTEGER,
+            size_mb          INTEGER,
+            url_video        TEXT,
+            url_video_small  TEXT,
+            url_video_hd     TEXT,
+            url_subtitle     TEXT,
+            url_website      TEXT,
+            url_history      TEXT,
+            geo              TEXT,
+            language         TEXT DEFAULT '',
+            tmdb_id          TEXT DEFAULT '',
+            imdb_id          TEXT DEFAULT '',
+            match_confidence REAL
+        )""",
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
+    ),
+]
 
 
 def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
@@ -298,6 +324,91 @@ def parse_filmliste(stream, chunk_size=1 << 16):
             last_sender = film["sender"]
             last_thema = film["topic"]
             yield film
+
+
+# Columns written by both the full and the diff import. language/tmdb_id/
+# imdb_id/match_confidence are owned by phase 3 and never touched here, so an
+# ID assignment survives every refresh.
+MIRROR_COLS = [
+    "mediathek_id", "status", "sender", "topic", "title", "description",
+    "date", "duration", "size_mb", "url_video", "url_video_small",
+    "url_video_hd", "url_subtitle", "url_website", "url_history", "geo",
+]
+
+_UPSERT_SQL = (
+    "INSERT INTO mediathek ({cols}) VALUES ({vals}) "
+    "ON CONFLICT(mediathek_id) DO UPDATE SET {sets}"
+).format(
+    cols=", ".join(MIRROR_COLS),
+    vals=", ".join(":" + c for c in MIRROR_COLS),
+    sets=", ".join(f"{c}=excluded.{c}" for c in MIRROR_COLS if c != "mediathek_id"),
+)
+
+
+def get_meta(conn, key):
+    """Read a value from the meta table, or None if the key is absent."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(conn, key, value):
+    """Upsert a single key/value into the meta table."""
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+
+def _upsert_films(conn, films, collect=False, batch=5000) -> int:
+    """Upsert film rows in batches; with collect, also record their ids in the
+    imported_ids temp table (so the full import can prune what vanished)."""
+    count = 0
+    rows = []
+
+    def flush():
+        nonlocal count
+        if not rows:
+            return
+        conn.executemany(_UPSERT_SQL, rows)
+        if collect:
+            conn.executemany(
+                "INSERT OR IGNORE INTO imported_ids (mediathek_id) VALUES (?)",
+                [(r["mediathek_id"],) for r in rows])
+        count += len(rows)
+        rows.clear()
+
+    for film in films:
+        rows.append(film)
+        if len(rows) >= batch:
+            flush()
+    flush()
+    return count
+
+
+def _store_meta(conn, meta):
+    set_meta(conn, "filmliste_id", meta.get("id", ""))
+    set_meta(conn, "filmliste_created", meta.get("erstellt_am", ""))
+
+
+def full_import(conn, films, meta) -> dict:
+    """Import a complete list: upsert every film, then delete entries that
+    vanished from the source. All in one transaction, so an abort rolls back
+    cleanly and a re-run is idempotent."""
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DROP TABLE IF EXISTS imported_ids")
+        conn.execute(
+            "CREATE TEMP TABLE imported_ids (mediathek_id TEXT PRIMARY KEY)")
+        imported = _upsert_films(conn, films, collect=True)
+        deleted = conn.execute(
+            "DELETE FROM mediathek WHERE mediathek_id NOT IN "
+            "(SELECT mediathek_id FROM imported_ids)").rowcount
+        _store_meta(conn, meta)
+        conn.execute("DROP TABLE imported_ids")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"imported": imported, "deleted": deleted}
 
 
 # -- cli ----------------------------------------------------------------------

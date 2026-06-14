@@ -31,7 +31,8 @@ the **wishlist** as automation on the same machinery.
 
 1. **Scaffolding** -- config, DB layer, CLI skeleton.
 2. **Film list mirror** -- download the film list and import into SQLite table
-   `mediathek`, with a hash over "sender+topic+title+url" as `mediathek_id`.
+   `mediathek`, keyed by `mediathek_id` = MediathekView's own film identity
+   (SHA-256 over sender+thema+url+website, each UTF-16LE-encoded).
    Standalone: a locally searchable Mediathek DB.
 3. **Enrichment + matching** -- add TMDB/IMDB IDs and language codes, fuzzy match
    with confidence scores. On refresh, existing ID assignments must **not** be
@@ -111,9 +112,14 @@ thin layer in the DB unit so the backend could be swapped later; do not scatter
 SQLite specifics across the code. Field lists are indicative.
 
 - **mediathek** -- mirror of the film list, refreshed periodically.
+  `mediathek_id` is MediathekView's identity (SHA-256 over
+  sender+thema+url+website, UTF-16LE); `status` is one character
+  ('0' new, '1' old). language/tmdb_id/imdb_id/match_confidence are filled by
+  phase 3 and preserved across refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
-  url_video, url_video_hd, url_subtitle, language, tmdb_id, imdb_id,
-  match_confidence`
+  size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
+  url_history, geo, language, tmdb_id, imdb_id, match_confidence`
+  Plus a `meta` key/value table (filmliste_id, filmliste_created).
 - **queue** -- the single acquisition table = review queue + download record.
   Lifecycle: `proposed -> approved -> downloading -> done / failed / cancelled`.
   `status, id, mediathek_id, source (match/search/wishlist), language,
