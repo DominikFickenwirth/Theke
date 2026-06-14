@@ -277,10 +277,9 @@ def test_cli_missing_command_exits_2(capsys):
 # -- mirror: conversions -----------------------------------------------------
 
 def test_film_id_matches_utf16le_sha256_spec():
-    import hashlib
-    parts = ("ARD", "Tatort", "http://v/1.mp4", "http://w/1")
-    expected = hashlib.sha256("".join(parts).encode("utf-16-le")).hexdigest()
-    assert film_id(*parts) == expected
+    # sha256("ARDTatorthttp://v/1.mp4http://w/1".encode("utf-16-le"))
+    assert film_id("ARD", "Tatort", "http://v/1.mp4", "http://w/1") == \
+        "e149d5775b9318a7f9f8b5d731c28f8f027443f1c010999ca0d19f9393afdf70"
 
 
 def test_film_id_is_order_sensitive():
@@ -288,8 +287,9 @@ def test_film_id_is_order_sensitive():
 
 
 def test_decode_rel_url_relative():
-    base = "http://example.com/path/video.mp4"
-    assert decode_rel_url(base, "20|small.mp4") == base[:20] + "small.mp4"
+    # first 20 chars of base ("http://example.com/p") + the suffix
+    assert decode_rel_url("http://example.com/path/video.mp4", "20|small.mp4") \
+        == "http://example.com/psmall.mp4"
 
 
 def test_decode_rel_url_empty_is_empty():
@@ -344,9 +344,8 @@ def test_parse_date_missing_time_defaults_midnight():
 
 
 def test_parse_date_falls_back_to_epoch_utc():
-    expected = datetime.fromtimestamp(1700000000, timezone.utc).strftime(
-        "%Y-%m-%d %H:%M:%S")
-    assert parse_date("", "", "1700000000") == expected
+    # epoch 1700000000 as UTC wall clock
+    assert parse_date("", "", "1700000000") == "2023-11-14 22:13:20"
 
 
 def test_parse_date_all_empty_is_none():
@@ -425,12 +424,12 @@ def test_parse_field_inheritance_for_sender_and_topic():
 
 
 def test_parse_film_id_uses_inherited_sender_and_topic():
-    import hashlib
     rows = [make_x(sender="ARD", thema="Sport", url="u", website="w"),
             make_x(url="u", website="w")]            # inherits ARD / Sport
     _, films = parse(mv_text(["", "", "", "", ""], rows))
-    expected = hashlib.sha256("ARDSportuw".encode("utf-16-le")).hexdigest()
-    assert films[1]["mediathek_id"] == expected
+    # id of the second film == sha256("ARDSportuw".encode("utf-16-le"))
+    assert films[1]["mediathek_id"] == \
+        "693ce7b99d4ac82947edbc4f97530825b8eddf69c13f81828388abaafb8250a1"
 
 
 def test_parse_status_new_and_old():
@@ -442,17 +441,19 @@ def test_parse_status_new_and_old():
 
 
 def test_parse_decodes_hd_and_small_urls():
-    base = "http://example.com/path/video.mp4"
-    row = make_x(url=base, url_hd="20|hd.mp4", url_klein="")
+    row = make_x(url="http://example.com/path/video.mp4", url_hd="20|hd.mp4",
+                 url_klein="")
     _, films = parse(mv_text(["", "", "", "", ""], [row]))
-    assert films[0]["url_video_hd"] == base[:20] + "hd.mp4"
+    # first 20 chars of the base url ("http://example.com/p") + the suffix
+    assert films[0]["url_video_hd"] == "http://example.com/phd.mp4"
     assert films[0]["url_video_small"] == ""
 
 
 def test_parse_large_entry_across_chunk_boundary():
-    row = make_x(sender="ARD", titel="X" * 5000, url="u")
+    big = "X" * 5000  # one piece of test data, used as input and expectation
+    row = make_x(sender="ARD", titel=big, url="u")
     _, films = parse(mv_text(["", "", "", "", ""], [row]), chunk_size=8)
-    assert films[0]["title"] == "X" * 5000
+    assert films[0]["title"] == big
     assert films[0]["sender"] == "ARD"
 
 

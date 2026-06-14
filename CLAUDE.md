@@ -297,6 +297,11 @@ ALWAYS:
   - Blank lines between logical blocks inside longer functions.
   - Unused unpacking slots are a bare `_`, not a named placeholder.
 - **Python:** use **venv**, never pip install globally.
+- **Tests:** the expected value is always **hard-coded / pre-calculated**, never
+  computed in the test (a test that recomputes the result with the same logic
+  proves nothing). Compute hashes, dates, etc. once and paste the literal, with
+  a comment noting how it was derived. Only exception: relational assertions
+  that do not need a concrete value (e.g. "id of A differs from id of B").
 - **Delphi (GUI):** 3 empty lines between methods; nested function names in
   snake_case.
 - **Language:** comments and variable names in English. README.md is the **only**
