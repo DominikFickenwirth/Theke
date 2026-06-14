@@ -1,7 +1,9 @@
 """Tests for the Theke CLI (config / DB / CLI skeleton)."""
 
+import io
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -266,3 +268,191 @@ def test_cli_unknown_command_exits_2(capsys):
 
 def test_cli_missing_command_exits_2(capsys):
     assert main([]) == 2
+
+
+# -- mirror: conversions -----------------------------------------------------
+
+def test_film_id_matches_utf16le_sha256_spec():
+    import hashlib
+    parts = ("ARD", "Tatort", "http://v/1.mp4", "http://w/1")
+    expected = hashlib.sha256("".join(parts).encode("utf-16-le")).hexdigest()
+    assert film_id(*parts) == expected
+
+
+def test_film_id_is_order_sensitive():
+    assert film_id("a", "b", "c", "d") != film_id("b", "a", "c", "d")
+
+
+def test_decode_rel_url_relative():
+    base = "http://example.com/path/video.mp4"
+    assert decode_rel_url(base, "20|small.mp4") == base[:20] + "small.mp4"
+
+
+def test_decode_rel_url_empty_is_empty():
+    assert decode_rel_url("http://x/y.mp4", "") == ""
+
+
+def test_decode_rel_url_without_pipe_is_verbatim():
+    assert decode_rel_url("http://x/y.mp4", "http://full/sub.vtt") == \
+        "http://full/sub.vtt"
+
+
+def test_decode_rel_url_broken_length_is_verbatim():
+    # a non-numeric prefix is not the relative scheme -> keep as given
+    assert decode_rel_url("http://x/y.mp4", "abc|tail") == "abc|tail"
+
+
+def test_parse_duration_hhmmss():
+    assert parse_duration("01:02:03") == 3723
+
+
+def test_parse_duration_short_fields():
+    assert parse_duration("00:00:30") == 30
+
+
+def test_parse_duration_empty_is_none():
+    assert parse_duration("") is None
+
+
+def test_parse_duration_garbage_is_none():
+    assert parse_duration("nonsense") is None
+
+
+def test_to_int_plain():
+    assert to_int("42") == 42
+
+
+def test_to_int_empty_is_none():
+    assert to_int("") is None
+
+
+def test_to_int_garbage_is_none():
+    assert to_int("12x") is None
+
+
+def test_parse_date_prefers_datum_zeit():
+    assert parse_date("14.06.2026", "20:15:00", "1700000000") == \
+        "2026-06-14 20:15:00"
+
+
+def test_parse_date_missing_time_defaults_midnight():
+    assert parse_date("14.06.2026", "", "") == "2026-06-14 00:00:00"
+
+
+def test_parse_date_falls_back_to_epoch_utc():
+    expected = datetime.fromtimestamp(1700000000, timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    assert parse_date("", "", "1700000000") == expected
+
+
+def test_parse_date_all_empty_is_none():
+    assert parse_date("", "", "") is None
+
+
+def test_parse_date_garbage_is_none():
+    assert parse_date("not-a-date", "xx", "nope") is None
+
+
+# -- mirror: parse_filmliste -------------------------------------------------
+
+# Column-name header (second "Filmliste"); content is ignored by the parser.
+_COLNAMES = ["Sender", "Thema", "Titel", "Datum", "Zeit", "Dauer"]
+
+
+def make_x(**vals):
+    """Build a 20-field MV film row, fields addressed by their MV name."""
+    row = [""] * len(FIELDS)
+    for key, value in vals.items():
+        row[FIELDS.index(key)] = value
+    return row
+
+
+def mv_text(meta, films):
+    """Render the MV format: a flat object with duplicate keys."""
+    parts = ['"Filmliste":' + json.dumps(meta),
+             '"Filmliste":' + json.dumps(_COLNAMES)]
+    for film in films:
+        parts.append('"X":' + json.dumps(film))
+    return "{" + ",".join(parts) + "}"
+
+
+def parse(text, **kw):
+    gen = parse_filmliste(io.StringIO(text), **kw)
+    return next(gen), list(gen)  # (metadata, films)
+
+
+def test_parse_yields_metadata_first():
+    meta_in = ["loaded", "12.06.2026, 09:00", "3.1", "MServer", "idhash"]
+    meta, films = parse(mv_text(meta_in, [make_x(sender="ARD", titel="A")]))
+    assert meta["erstellt_am"] == "12.06.2026, 09:00"
+    assert meta["id"] == "idhash"
+    assert len(films) == 1
+
+
+def test_parse_incomplete_metadata_yields_empty_strings():
+    meta, _ = parse(mv_text(["only-loaded"], []))
+    assert meta["erstellt_am"] == ""
+    assert meta["id"] == ""
+
+
+def test_parse_maps_columns_to_db_fields():
+    row = make_x(sender="ARD", thema="Tatort", titel="Der Fall",
+                 beschreibung="desc", geo="DE", url="http://v/1.mp4",
+                 website="http://w/1")
+    _, films = parse(mv_text(["", "", "", "", ""], [row]))
+    f = films[0]
+    assert f["sender"] == "ARD"
+    assert f["topic"] == "Tatort"
+    assert f["title"] == "Der Fall"
+    assert f["description"] == "desc"
+    assert f["geo"] == "DE"
+    assert f["url_video"] == "http://v/1.mp4"
+    assert f["url_website"] == "http://w/1"
+
+
+def test_parse_field_inheritance_for_sender_and_topic():
+    rows = [make_x(sender="ARD", thema="Sport", titel="1"),
+            make_x(titel="2"),                       # inherit ARD / Sport
+            make_x(sender="ZDF", titel="3"),         # inherit Sport only
+            make_x(thema="News", titel="4")]         # inherit ZDF, new topic
+    _, films = parse(mv_text(["", "", "", "", ""], rows))
+    assert [f["sender"] for f in films] == ["ARD", "ARD", "ZDF", "ZDF"]
+    assert [f["topic"] for f in films] == ["Sport", "Sport", "Sport", "News"]
+
+
+def test_parse_film_id_uses_inherited_sender_and_topic():
+    import hashlib
+    rows = [make_x(sender="ARD", thema="Sport", url="u", website="w"),
+            make_x(url="u", website="w")]            # inherits ARD / Sport
+    _, films = parse(mv_text(["", "", "", "", ""], rows))
+    expected = hashlib.sha256("ARDSportuw".encode("utf-16-le")).hexdigest()
+    assert films[1]["mediathek_id"] == expected
+
+
+def test_parse_status_new_and_old():
+    rows = [make_x(titel="new", neu="true"),
+            make_x(titel="old", neu="false"),
+            make_x(titel="blank")]
+    _, films = parse(mv_text(["", "", "", "", ""], rows))
+    assert [f["status"] for f in films] == ["0", "1", "1"]
+
+
+def test_parse_decodes_hd_and_small_urls():
+    base = "http://example.com/path/video.mp4"
+    row = make_x(url=base, url_hd="20|hd.mp4", url_klein="")
+    _, films = parse(mv_text(["", "", "", "", ""], [row]))
+    assert films[0]["url_video_hd"] == base[:20] + "hd.mp4"
+    assert films[0]["url_video_small"] == ""
+
+
+def test_parse_large_entry_across_chunk_boundary():
+    row = make_x(sender="ARD", titel="X" * 5000, url="u")
+    _, films = parse(mv_text(["", "", "", "", ""], [row]), chunk_size=8)
+    assert films[0]["title"] == "X" * 5000
+    assert films[0]["sender"] == "ARD"
+
+
+def test_parse_metadata_only_no_films():
+    meta, films = parse(mv_text(["", "x", "", "", "theid"], []))
+    assert meta["id"] == "theid"
+    assert films == []
