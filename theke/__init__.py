@@ -517,12 +517,14 @@ def cmd_config(conn, cfg, args) -> dict:
     return dataclasses.asdict(cfg)
 
 
-# Pipeline stages register here: name -> (handler, help text, needs_db).
+# Pipeline stages register here: name -> (handler, help text, needs_db, args).
 # Each handler gets the DB connection (open if needs_db, else None), the
 # effective Config and the parsed args, and returns the result as a
-# JSON-serializable dict.
+# JSON-serializable dict. args is a list of (flags, kwargs) for add_argument.
 COMMANDS = {
-    "config": (cmd_config, "show the effective configuration", False),
+    "config": (cmd_config, "show the effective configuration",  False, []),
+    "mirror": (cmd_mirror, "refresh the film-list mirror",      True,
+               [(("--force",), {"action": "store_true", "help": "always download the full list"})]),
 }
 
 
@@ -532,8 +534,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db",     metavar="PATH",      help="database file (overrides db_path from config)")
     parser.add_argument("--json",   action="store_true", help="machine-readable output: one JSON object on stdout")
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
-    for name, (_, help_text, _) in COMMANDS.items():
-        sub.add_parser(name, help=help_text)
+    for name, (_, help_text, _, arg_specs) in COMMANDS.items():
+        command_parser = sub.add_parser(name, help=help_text)
+        for flags, kwargs in arg_specs:
+            command_parser.add_argument(*flags, **kwargs)
     return parser
 
 
@@ -547,7 +551,7 @@ def main(argv=None) -> int:
 
     try:
         cfg = load_config(args.config, overrides={"db_path": args.db})
-        handler, _, needs_db = COMMANDS[args.command]
+        handler, _, needs_db, _ = COMMANDS[args.command]
         conn = db_connect(cfg.db_path) if needs_db else None
         try:
             result = handler(conn, cfg, args)
