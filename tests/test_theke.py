@@ -2,8 +2,10 @@
 
 import io
 import json
+import lzma
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -204,7 +206,8 @@ def test_cli_config_json_output(tmp_path, capsys):
     db = str(tmp_path / "t.db")
     assert main(["--json", "--db", db, "config"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result == {"db_path": db}
+    assert result["db_path"] == db
+    assert result["filmliste_url"].endswith(".xz")  # mirror keys present too
 
 
 def test_cli_db_flag_overrides_config_file(tmp_path, capsys):
@@ -581,5 +584,200 @@ def test_get_meta_missing_key_is_none(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert get_meta(conn, "nope") is None
+    finally:
+        conn.close()
+
+
+# -- mirror: diff import + update decision ------------------------------------
+
+NOON_UTC = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def test_can_use_diff_after_cutoff():
+    assert can_use_diff("14.06.2026, 08:00", now=NOON_UTC) is True
+
+
+def test_can_use_diff_before_cutoff():
+    assert can_use_diff("14.06.2026, 06:30", now=NOON_UTC) is False
+
+
+def test_can_use_diff_at_cutoff_is_false():
+    assert can_use_diff("14.06.2026, 07:00", now=NOON_UTC) is False
+
+
+def test_can_use_diff_previous_day_is_false():
+    assert can_use_diff("13.06.2026, 23:00", now=NOON_UTC) is False
+
+
+def test_can_use_diff_garbage_is_false():
+    assert can_use_diff("not a date", now=NOON_UTC) is False
+
+
+def test_can_use_diff_none_is_false():
+    assert can_use_diff(None, now=NOON_UTC) is False
+
+
+def test_diff_import_merges_without_deleting(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        a = dict(sender="ARD", thema="T", url="a", website="w")
+        full_import(conn, *reversed(make_list([make_x(titel="A", **a),
+                                               make_x(sender="ZDF", titel="B",
+                                                      url="b")])))
+        meta, films = make_list([make_x(titel="A2", **a),         # update A
+                                 make_x(sender="ARTE", titel="C",  # new
+                                        url="c")])
+        result = diff_import(conn, films, meta)
+        assert result["imported"] == 2
+        rows = {r["title"] for r in film_rows(conn)}
+        assert rows == {"A2", "B", "C"}             # B (not in diff) survives
+    finally:
+        conn.close()
+
+
+def test_diff_import_preserves_phase3_ids(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        a = dict(sender="ARD", thema="T", url="a", website="w")
+        full_import(conn, *reversed(make_list([make_x(titel="A", **a)])))
+        conn.execute("UPDATE mediathek SET tmdb_id='77'")
+        diff_import(conn, *reversed(make_list([make_x(titel="A2", **a)])))
+        row = film_rows(conn)[0]
+        assert row["title"] == "A2"
+        assert row["tmdb_id"] == "77"
+    finally:
+        conn.close()
+
+
+# -- mirror: cmd_mirror decision (mocked network) ----------------------------
+
+CFG = SimpleNamespace(filmliste_url="FULL", filmliste_diff_url="DIFF",
+                      filmliste_id_url="ID")
+
+
+def xz_list(rows, list_id="id", created="01.01.2020, 00:00"):
+    text = mv_text(["", created, "", "", list_id], rows)
+    return lzma.compress(text.encode("utf-8"))
+
+
+def install_http(monkeypatch, mapping):
+    import theke
+
+    def fake_get(url):
+        value = mapping.get(url)
+        if value is None:
+            raise RuntimeError(f"unexpected url: {url}")
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+
+
+def recent_created():
+    return f"{datetime.now(timezone.utc):%d.%m.%Y}, 23:59"
+
+
+def args(force=False):
+    return SimpleNamespace(force=force)
+
+
+def test_cmd_mirror_full_on_empty_db(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
+                                                       url="a")], "id1")})
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+        assert result["imported"] == 1
+        assert get_meta(conn, "filmliste_id") == "id1"
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_force_redownloads_full(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
+                                                       url="a")], "id1",
+                                               recent_created())})
+    conn = open_db(tmp_path)
+    try:
+        cmd_mirror(conn, CFG, args())                 # seed local list
+        result = cmd_mirror(conn, CFG, args(force=True))
+        assert result["action"] == "full"             # despite fresh local list
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_skip_when_id_matches_and_too_old(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        full_import(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        install_http(monkeypatch, {"ID": b"id1\n"})
+        result = cmd_mirror(conn, CFG, args())
+        assert result == {"action": "skip"}
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_full_when_id_changed(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        full_import(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        install_http(monkeypatch, {"ID": b"id2",
+                                   "FULL": xz_list([make_x(sender="ARD",
+                                                           titel="A", url="a")],
+                                                   "id2")})
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+        assert get_meta(conn, "filmliste_id") == "id2"
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_full_when_id_unreachable(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        full_import(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        install_http(monkeypatch, {"ID": RuntimeError("boom"),
+                                   "FULL": xz_list([make_x(sender="ARD",
+                                                           titel="A", url="a")],
+                                                   "id2")})
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        full_import(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
+                                                      url="a")], created="x")))
+        set_meta(conn, "filmliste_created", recent_created())
+        install_http(monkeypatch, {"DIFF": xz_list([make_x(sender="ZDF",
+                                                           titel="B", url="b")],
+                                                   "id2", recent_created())})
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "diff"
+        assert result["imported"] == 1
+        assert {r["title"] for r in film_rows(conn)} == {"A", "B"}
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        full_import(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
+                                                      url="a")], created="x")))
+        set_meta(conn, "filmliste_created", recent_created())
+        install_http(monkeypatch, {
+            "DIFF": xz_list([], "id2", recent_created()),
+            "FULL": xz_list([make_x(sender="ARD", titel="A", url="a"),
+                             make_x(sender="ZDF", titel="B", url="b")], "id2"),
+        })
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+        assert result["imported"] == 2
     finally:
         conn.close()
