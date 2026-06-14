@@ -255,7 +255,8 @@ def test_cli_locked_db_exits_3(tmp_path, capsys, monkeypatch):
     import theke
     monkeypatch.setitem(
         theke.COMMANDS, "dummy",
-        (lambda conn, cfg, args: {"ok": True}, "db-touching test command", True))
+        (lambda conn, cfg, args: {"ok": True}, "db-touching test command",
+         True, []))
     db = str(tmp_path / "t.db")
     conn = db_connect(db, migrations=[])
     try:
@@ -779,5 +780,60 @@ def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
         result = cmd_mirror(conn, CFG, args())
         assert result["action"] == "full"
         assert result["imported"] == 2
+    finally:
+        conn.close()
+
+
+# -- mirror: theke mirror CLI end to end -------------------------------------
+
+def one_film(list_id="id1", created="01.01.2020, 00:00"):
+    return xz_list([make_x(sender="ARD", titel="A", url="a")], list_id, created)
+
+
+def test_cli_mirror_full_json(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    assert main(["--json", "--db", db, "mirror"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["action"] == "full"
+    assert result["imported"] == 1
+    assert result["deleted"] == 0
+
+
+def test_cli_mirror_human_output(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    assert main(["--db", db, "mirror"]) == 0
+    assert "action = full" in capsys.readouterr().out
+
+
+def test_cli_mirror_force_redownloads(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    # fresh local list: without --force the next run would attempt a diff (whose
+    # URL is not mocked); --force must take the full path instead.
+    install_http(monkeypatch, {Config().filmliste_url: one_film(
+        created=recent_created())})
+    assert main(["--db", db, "mirror"]) == 0
+    capsys.readouterr()
+    assert main(["--json", "--db", db, "mirror", "--force"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "full"
+
+
+def test_cli_mirror_skip_on_unchanged_id(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film(list_id="id1")})
+    assert main(["--db", db, "mirror"]) == 0          # full, stores id1
+    capsys.readouterr()
+    install_http(monkeypatch, {Config().filmliste_id_url: b"id1\n"})
+    assert main(["--json", "--db", db, "mirror"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"action": "skip"}
+
+
+def test_cli_mirror_locked_db_exits_3(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    conn = db_connect(db, migrations=[])
+    try:
+        assert main(["--json", "--db", db, "mirror"]) == 3
     finally:
         conn.close()
