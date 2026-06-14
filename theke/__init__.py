@@ -6,10 +6,12 @@ needed). Sections: config / DB / CLI.
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import sqlite3
 import sys
 from dataclasses import dataclass
+from datetime import datetime, time, timezone
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -115,6 +117,187 @@ def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
         conn.close()
         raise
     return conn
+
+
+# -- mirror -------------------------------------------------------------------
+# Download the MediathekView film list and import it into the mediathek table.
+# The list is an XZ-compressed, flat JSON object with duplicate keys
+# ("Filmliste" twice, then many "X"); each "X" is a 20-field array.
+
+# Field order of an "X" array, exactly as in the MV format (DatenFilm). The
+# rtmp_* slots are dead legacy fields and never become columns.
+FIELDS = [
+    "sender", "thema", "titel", "datum", "zeit", "dauer", "groesse_mb",
+    "beschreibung", "url", "website", "url_untertitel", "url_rtmp",
+    "url_klein", "url_rtmp_klein", "url_hd", "url_rtmp_hd", "datum_l",
+    "url_history", "geo", "neu",
+]
+
+
+def film_id(sender, thema, url, website) -> str:
+    """Film identity exactly like MediathekView's DatenFilm.getSha256():
+    SHA-256 over sender + thema + url + website, each UTF-16LE-encoded."""
+    digest = hashlib.sha256()
+    for part in (sender, thema, url, website):
+        digest.update(part.encode("utf-16-le"))
+    return digest.hexdigest()
+
+
+def decode_rel_url(base: str, encoded: str) -> str:
+    """Decode MV's relative URL scheme "offset|suffix" = base[:offset] + suffix.
+    Empty -> empty; no "|" (or non-numeric offset) -> taken verbatim."""
+    if not encoded:
+        return ""
+    sep = encoded.find("|")
+    if sep == -1:
+        return encoded
+    try:
+        cut = int(encoded[:sep])
+    except ValueError:
+        return encoded
+    return base[:cut] + encoded[sep + 1:]
+
+
+def parse_duration(value: str):
+    """"HH:MM:SS" -> seconds, or None if absent/unparseable."""
+    try:
+        hours, minutes, seconds = (int(p) for p in value.split(":"))
+        return hours * 3600 + minutes * 60 + seconds
+    except (ValueError, AttributeError):
+        return None
+
+
+def to_int(value: str):
+    """Parse an integer field, or None if absent/unparseable."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_date(datum: str, zeit: str, datum_l: str):
+    """Broadcast time as ISO "YYYY-MM-DD HH:MM:SS".
+
+    The German wall-clock strings are authoritative and timezone-free; the
+    datum_l epoch is only a fallback (read as UTC) when no date string exists.
+    Converting datum_l to the right wall clock would need the Europe/Berlin
+    zone, unavailable in the stdlib on Windows.
+    """
+    if datum:
+        try:
+            stamp = datetime.strptime(
+                f"{datum} {zeit or '00:00:00'}", "%d.%m.%Y %H:%M:%S")
+            return stamp.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    if datum_l:
+        try:
+            return datetime.fromtimestamp(
+                int(datum_l), timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, OverflowError, OSError):
+            pass
+    return None
+
+
+def _build_film(values, last_sender, last_thema) -> dict:
+    """Turn one "X" array into a DB-shaped row dict (column names already)."""
+    raw = dict(zip(FIELDS, values))
+    sender = raw.get("sender") or last_sender
+    thema = raw.get("thema") or last_thema
+    url = raw.get("url", "")
+    return {
+        "mediathek_id":    film_id(sender, thema, url, raw.get("website", "")),
+        "status":          "0" if raw.get("neu") == "true" else "1",
+        "sender":          sender,
+        "topic":           thema,
+        "title":           raw.get("titel", ""),
+        "description":     raw.get("beschreibung", ""),
+        "date":            parse_date(raw.get("datum", ""), raw.get("zeit", ""), raw.get("datum_l", "")),
+        "duration":        parse_duration(raw.get("dauer", "")),
+        "size_mb":         to_int(raw.get("groesse_mb", "")),
+        "url_video":       url,
+        "url_video_small": decode_rel_url(url, raw.get("url_klein", "")),
+        "url_video_hd":    decode_rel_url(url, raw.get("url_hd", "")),
+        "url_subtitle":    decode_rel_url(url, raw.get("url_untertitel", "")),
+        "url_website":     raw.get("website", ""),
+        "url_history":     decode_rel_url(url, raw.get("url_history", "")),
+        "geo":             raw.get("geo", ""),
+    }
+
+
+def parse_filmliste(stream, chunk_size=1 << 16):
+    """Stream the decompressed MV film list.
+
+    Yields the metadata dict first, then one DB-shaped dict per film. We
+    raw_decode one member value at a time over a refilled buffer so memory
+    stays flat for the ~500k films. sender/thema inherit from the previous
+    film when their field is empty.
+    """
+    decoder = json.JSONDecoder()
+    buf = ""
+    pos = 0
+
+    def refill():
+        nonlocal buf, pos
+        chunk = stream.read(chunk_size)
+        if not chunk:
+            return False
+        buf = buf[pos:] + chunk
+        pos = 0
+        return True
+
+    def seek(stops):
+        # advance past whitespace and any char in `stops`; refill as needed.
+        nonlocal pos
+        while True:
+            while pos < len(buf) and (buf[pos].isspace() or buf[pos] in stops):
+                pos += 1
+            if pos < len(buf):
+                return True
+            if not refill():
+                return False
+
+    def decode():
+        # raw_decode one JSON value at pos, refilling while it looks incomplete.
+        nonlocal pos
+        while True:
+            try:
+                value, pos = decoder.raw_decode(buf, pos)
+                return value
+            except json.JSONDecodeError:
+                if not refill():
+                    raise
+
+    if not seek(""):
+        return
+    pos += 1  # consume the opening '{'
+
+    metadata = None
+    seen_filmliste = 0
+    last_sender = ""
+    last_thema = ""
+    while seek(","):
+        if buf[pos] == "}":
+            break
+        key = decode()
+        seek(":")
+        value = decode()
+        if key == "Filmliste":
+            seen_filmliste += 1
+            if seen_filmliste == 1:  # first = metadata, second = column names
+                metadata = {
+                    "erstellt_am": value[1] if len(value) > 1 else "",
+                    "id":          value[4] if len(value) > 4 else "",
+                }
+                yield metadata
+        elif key == "X":
+            if metadata is None:  # malformed list without a header
+                metadata = {"erstellt_am": "", "id": ""}
+                yield metadata
+            film = _build_film(value, last_sender, last_thema)
+            last_sender = film["sender"]
+            last_thema = film["topic"]
+            yield film
 
 
 # -- cli ----------------------------------------------------------------------
