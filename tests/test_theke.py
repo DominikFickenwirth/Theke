@@ -456,3 +456,130 @@ def test_parse_metadata_only_no_films():
     meta, films = parse(mv_text(["", "x", "", "", "theid"], []))
     assert meta["id"] == "theid"
     assert films == []
+
+
+# -- mirror: migration + full import -----------------------------------------
+
+def open_db(tmp_path):
+    return db_connect(str(tmp_path / "theke.db"))  # uses real MIGRATIONS
+
+
+def make_list(rows, list_id="theid", created="01.01.2026, 00:00"):
+    return parse(mv_text(["", created, "", "", list_id], rows))
+
+
+def film_rows(conn):
+    return conn.execute("SELECT * FROM mediathek ORDER BY title").fetchall()
+
+
+def test_migration_creates_mediathek_and_meta(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        assert {"mediathek", "meta"} <= table_names(conn)
+        assert user_version(conn) == 1
+    finally:
+        conn.close()
+
+
+def test_full_import_inserts_rows(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        meta, films = make_list([
+            make_x(sender="ARD", thema="T", titel="A", url="http://v/a",
+                   website="http://w/a", dauer="00:01:00", neu="true",
+                   datum="14.06.2026", zeit="20:15:00"),
+            make_x(sender="ZDF", titel="B", url="http://v/b"),
+        ])
+        result = full_import(conn, films, meta)
+        assert result["imported"] == 2
+        rows = film_rows(conn)
+        assert [r["title"] for r in rows] == ["A", "B"]
+        assert rows[0]["sender"] == "ARD"
+        assert rows[0]["status"] == "0"
+        assert rows[0]["duration"] == 60
+        assert rows[0]["date"] == "2026-06-14 20:15:00"
+        assert rows[1]["status"] == "1"
+    finally:
+        conn.close()
+
+
+def test_full_import_is_idempotent(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        rows = [make_x(sender="ARD", titel="A", url="u"),
+                make_x(sender="ZDF", titel="B", url="v")]
+        full_import(conn, make_list(rows)[1], make_list(rows)[0])
+        meta, films = make_list(rows)
+        result = full_import(conn, films, meta)
+        assert result["imported"] == 2
+        assert len(film_rows(conn)) == 2
+    finally:
+        conn.close()
+
+
+def test_full_import_updates_changed_film(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        base = dict(sender="ARD", thema="T", url="u", website="w")
+        full_import(conn, *reversed(make_list([make_x(titel="old", **base)])))
+        meta, films = make_list([make_x(titel="new", **base)])
+        full_import(conn, films, meta)
+        rows = film_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["title"] == "new"
+    finally:
+        conn.close()
+
+
+def test_full_import_preserves_phase3_ids(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        base = dict(sender="ARD", thema="T", url="u", website="w")
+        meta, films = make_list([make_x(titel="old", **base)])
+        full_import(conn, films, meta)
+        conn.execute("UPDATE mediathek SET tmdb_id='123', imdb_id='tt9', "
+                     "language='de', match_confidence=0.9")
+        meta, films = make_list([make_x(titel="new", **base)])
+        full_import(conn, films, meta)
+        row = film_rows(conn)[0]
+        assert row["title"] == "new"          # mirror column updated
+        assert row["tmdb_id"] == "123"        # phase-3 assignment preserved
+        assert row["imdb_id"] == "tt9"
+        assert row["language"] == "de"
+        assert row["match_confidence"] == 0.9
+    finally:
+        conn.close()
+
+
+def test_full_import_deletes_vanished(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        both = [make_x(sender="ARD", titel="A", url="a"),
+                make_x(sender="ZDF", titel="B", url="b")]
+        full_import(conn, *reversed(make_list(both)))
+        meta, films = make_list([make_x(sender="ARD", titel="A", url="a")])
+        result = full_import(conn, films, meta)
+        assert result["deleted"] == 1
+        assert [r["title"] for r in film_rows(conn)] == ["A"]
+    finally:
+        conn.close()
+
+
+def test_full_import_sets_meta(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        meta, films = make_list([make_x(sender="ARD", titel="A", url="a")],
+                                list_id="abc123", created="02.03.2026, 07:30")
+        full_import(conn, films, meta)
+        assert get_meta(conn, "filmliste_id") == "abc123"
+        assert get_meta(conn, "filmliste_created") == "02.03.2026, 07:30"
+    finally:
+        conn.close()
+
+
+def test_get_meta_missing_key_is_none(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        assert get_meta(conn, "nope") is None
+    finally:
+        conn.close()
