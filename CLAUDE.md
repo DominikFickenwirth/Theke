@@ -108,9 +108,8 @@ re-runs are idempotent. Every stage is callable individually.
 
 ## Data model
 
-A **single SQLite file** (`theke.db`) holds all tables. Keep DB access behind a
-thin layer in the DB unit so the backend could be swapped later; do not scatter
-SQLite specifics across the code. Field lists are indicative.
+A **single SQLite file** (`theke.db`) holds all tables. Field lists are
+indicative.
 
 - **mediathek** -- mirror of the film list, refreshed periodically.
   `mediathek_id` is MediathekView's identity (SHA-256 over

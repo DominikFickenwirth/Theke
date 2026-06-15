@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import logging
 import lzma
 import sqlite3
 import sys
@@ -17,6 +18,11 @@ from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
 CONFIG_DEFAULT_PATH = "theke.json"
+
+# Progress and diagnostics go to this logger; main() routes it to stderr so the
+# stdout result (the single JSON object) stays clean. Tests capture it via
+# pytest's caplog, so no progress argument needs to be threaded through the code.
+log = logging.getLogger("theke")
 
 
 # -- config ------------------------------------------------------------------
@@ -364,15 +370,9 @@ _UPSERT_SQL = (
 )
 
 
-# Progress is reported through a callback so the logic stays decoupled from I/O
-# (tests pass a collector). The CLI wires it to stderr; stdout stays the result.
-def _noop(_msg):
-    pass
-
-
-def _upsert_films(conn, films, batch=5000, progress=_noop) -> int:
-    """Upsert film rows in batches; return the number of rows written. Reports a
-    running count to `progress` every 50k rows so a big import shows progress."""
+def _upsert_films(conn, films, batch=5000) -> int:
+    """Upsert film rows in batches; return the number of rows written. Logs a
+    running count every 50k rows so a big import shows progress."""
     count = 0
     reported = 0
     rows = []
@@ -386,7 +386,7 @@ def _upsert_films(conn, films, batch=5000, progress=_noop) -> int:
         rows.clear()
         if count - reported >= 50000:
             reported = count
-            progress(f"imported {count} films")
+            log.info("imported %d films", count)
 
     for film in films:
         rows.append(film)
@@ -401,15 +401,15 @@ def _store_meta(conn, meta):
     db_set_meta(conn, "filmliste_created", meta.get("erstellt_am", ""))
 
 
-def import_films(conn, films, meta, progress=_noop) -> dict:
+def import_films(conn, films, meta) -> dict:
     """Import a list (full or diff alike): upsert the new/changed films and store
     the list metadata in one transaction, so an abort rolls back cleanly and a
     re-run is idempotent. Entries no longer in the source are kept -- the mirror
     only grows or updates, never deletes."""
-    progress("importing into the database")
+    log.info("importing into the database")
     conn.execute("BEGIN")
     try:
-        imported = _upsert_films(conn, films, progress=progress)
+        imported = _upsert_films(conn, films)
         _store_meta(conn, meta)
         conn.execute("COMMIT")
     except BaseException:
@@ -451,42 +451,42 @@ def fetch_list_id(cfg):
         return None
 
 
-def _load_list(url, progress=_noop):
+def _load_list(url):
     """Download, stream-decompress and parse a list; return (meta, films)."""
-    progress(f"downloading {url.rsplit('/', 1)[-1]}")
+    log.info("downloading %s", url.rsplit("/", 1)[-1])
     raw = http_get(url)
-    progress(f"download done ({len(raw) / (1 << 20):.1f} MB), unpacking")
+    log.info("download done (%.1f MB), unpacking", len(raw) / (1 << 20))
     stream = lzma.open(io.BytesIO(raw), "rt", encoding="utf-8")
     films = parse_filmliste(stream)
     return next(films), films  # metadata is the first yield
 
 
-def _do_full(conn, cfg, progress=_noop):
-    meta, films = _load_list(cfg.filmliste_url, progress)
-    return {"action": "full", **import_films(conn, films, meta, progress)}
+def _do_full(conn, cfg):
+    meta, films = _load_list(cfg.filmliste_url)
+    return {"action": "full", **import_films(conn, films, meta)}
 
 
-def _do_diff(conn, cfg, progress=_noop):
+def _do_diff(conn, cfg):
     try:
-        meta, films = _load_list(cfg.filmliste_diff_url, progress)
+        meta, films = _load_list(cfg.filmliste_diff_url)
     except Exception:
         return None  # download/parse failed -> caller falls back to full
-    return {"action": "diff", **import_films(conn, films, meta, progress)}
+    return {"action": "diff", **import_films(conn, films, meta)}
 
 
-def cmd_mirror(conn, cfg, args: argparse.Namespace, progress=_noop) -> dict:
+def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
     """Refresh the film-list mirror (MediathekView update logic)"""
     if args.force or db_get_meta(conn, "filmliste_id") is None:
-        return _do_full(conn, cfg, progress)
-    progress("checking the server list id")
+        return _do_full(conn, cfg)
+    log.info("checking the server list id")
     if fetch_list_id(cfg) == db_get_meta(conn, "filmliste_id"):
         return {"action": "skip"}
     if can_use_diff(db_get_meta(conn, "filmliste_created")):
-        result = _do_diff(conn, cfg, progress)
+        result = _do_diff(conn, cfg)
         if result and result["imported"]:
             return result
-        return _do_full(conn, cfg, progress)  # diff failed or was empty
-    return _do_full(conn, cfg, progress)
+        return _do_full(conn, cfg)  # diff failed or was empty
+    return _do_full(conn, cfg)
 
 
 # -- cli ----------------------------------------------------------------------
@@ -522,14 +522,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _stderr_progress(msg):
-    """Plain-text progress sink: one line per step on stderr, flushed live, so it
-    never pollutes the stdout result (the single JSON object in --json mode)."""
-    print(f"-> {msg}", file=sys.stderr, flush=True)
+def _setup_logging():
+    """Route the theke logger to stderr, one prefixed line per record flushed
+    live, so a long stage stays visible without polluting the stdout result (the
+    single JSON object in --json mode). Rebuilt on every call so the handler
+    always binds the current sys.stderr (which pytest's capsys swaps per test)."""
+    log.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("-> %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
 
 
 def main(argv=None) -> int:
     """CLI entry point; returns the process exit code."""
+    _setup_logging()
 
     try:
         args = build_parser().parse_args(argv)
@@ -543,7 +550,7 @@ def main(argv=None) -> int:
                 result = cmd_config(cfg)
             case "mirror":
                 conn = db_connect(cfg.db_path)
-                try:     result = cmd_mirror(conn, cfg, args, _stderr_progress)
+                try:     result = cmd_mirror(conn, cfg, args)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 

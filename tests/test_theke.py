@@ -2,6 +2,7 @@
 
 import io
 import json
+import logging
 import lzma
 import sqlite3
 from datetime import datetime, timezone
@@ -797,17 +798,17 @@ def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_cmd_mirror_reports_progress(tmp_path, monkeypatch):
+def test_cmd_mirror_reports_progress(tmp_path, monkeypatch, caplog):
     install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
                                                        url="a")], "id1")})
     conn = open_db(tmp_path)
-    msgs = []
     try:
-        cmd_mirror(conn, CFG, args(), progress=msgs.append)
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_mirror(conn, CFG, args())
     finally:
         conn.close()
-    assert any("download" in m for m in msgs)        # download phase reported
-    assert any("import" in m for m in msgs)          # import phase reported
+    assert any("download" in m for m in caplog.messages)  # download phase logged
+    assert any("import" in m for m in caplog.messages)    # import phase logged
 
 
 # -- mirror: theke mirror CLI end to end -------------------------------------
