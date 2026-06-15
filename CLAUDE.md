@@ -219,6 +219,10 @@ check the naming convention against current Jellyfin docs.
     and the Docker entrypoint (smoke test in phase 9, `theke run` from phase 10).
     Must offer a **machine-readable mode** (`--json`, stable exit codes, stable
     command grammar) so the GUI can drive and parse it.
+    - **stdout vs stderr:** stdout carries only the result (the single JSON object
+      in `--json` mode); progress and diagnostics go to **stderr** as plain text,
+      so a long stage (e.g. `mirror`, ~30 s) stays visible without polluting the
+      parseable result. The GUI reads the two streams separately.
   - **Desktop GUI** (Delphi): thin presentation shell for the test phase and
     non-technical users; runs every action as a CLI call and renders the JSON.
   - On the PC the CLI ships as a **PyInstaller-frozen `.exe`** bundled with the

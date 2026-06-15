@@ -797,6 +797,19 @@ def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_cmd_mirror_reports_progress(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
+                                                       url="a")], "id1")})
+    conn = open_db(tmp_path)
+    msgs = []
+    try:
+        cmd_mirror(conn, CFG, args(), progress=msgs.append)
+    finally:
+        conn.close()
+    assert any("download" in m for m in msgs)        # download phase reported
+    assert any("import" in m for m in msgs)          # import phase reported
+
+
 # -- mirror: theke mirror CLI end to end -------------------------------------
 
 def one_film(list_id="id1", created="01.01.2020, 00:00"):
@@ -810,6 +823,18 @@ def test_cli_mirror_full_json(tmp_path, capsys, monkeypatch):
     result = json.loads(capsys.readouterr().out)
     assert result["action"] == "full"
     assert result["imported"] == 1
+
+
+def test_cli_mirror_progress_goes_to_stderr_not_stdout(tmp_path, capsys, monkeypatch):
+    # The --json contract: stdout is exactly one JSON object; progress (the work
+    # visible during the ~30 s) must land on stderr instead.
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    assert main(["--json", "--db", db, "mirror"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["action"] == "full"  # one parseable object
+    assert captured.out.strip().count("\n") == 0          # ... and only that
+    assert "-> downloading" in captured.err               # progress on stderr
 
 
 def test_cli_mirror_human_output(tmp_path, capsys, monkeypatch):

@@ -364,18 +364,29 @@ _UPSERT_SQL = (
 )
 
 
-def _upsert_films(conn, films, batch=5000) -> int:
-    """Upsert film rows in batches; return the number of rows written."""
+# Progress is reported through a callback so the logic stays decoupled from I/O
+# (tests pass a collector). The CLI wires it to stderr; stdout stays the result.
+def _noop(_msg):
+    pass
+
+
+def _upsert_films(conn, films, batch=5000, progress=_noop) -> int:
+    """Upsert film rows in batches; return the number of rows written. Reports a
+    running count to `progress` every 50k rows so a big import shows progress."""
     count = 0
+    reported = 0
     rows = []
 
     def flush():
-        nonlocal count
+        nonlocal count, reported
         if not rows:
             return
         conn.executemany(_UPSERT_SQL, rows)
         count += len(rows)
         rows.clear()
+        if count - reported >= 50000:
+            reported = count
+            progress(f"imported {count} films")
 
     for film in films:
         rows.append(film)
@@ -390,14 +401,15 @@ def _store_meta(conn, meta):
     db_set_meta(conn, "filmliste_created", meta.get("erstellt_am", ""))
 
 
-def import_films(conn, films, meta) -> dict:
+def import_films(conn, films, meta, progress=_noop) -> dict:
     """Import a list (full or diff alike): upsert the new/changed films and store
     the list metadata in one transaction, so an abort rolls back cleanly and a
     re-run is idempotent. Entries no longer in the source are kept -- the mirror
     only grows or updates, never deletes."""
+    progress("importing into the database")
     conn.execute("BEGIN")
     try:
-        imported = _upsert_films(conn, films)
+        imported = _upsert_films(conn, films, progress=progress)
         _store_meta(conn, meta)
         conn.execute("COMMIT")
     except BaseException:
@@ -439,38 +451,42 @@ def fetch_list_id(cfg):
         return None
 
 
-def _load_list(url):
+def _load_list(url, progress=_noop):
     """Download, stream-decompress and parse a list; return (meta, films)."""
-    stream = lzma.open(io.BytesIO(http_get(url)), "rt", encoding="utf-8")
+    progress(f"downloading {url.rsplit('/', 1)[-1]}")
+    raw = http_get(url)
+    progress(f"download done ({len(raw) / (1 << 20):.1f} MB), unpacking")
+    stream = lzma.open(io.BytesIO(raw), "rt", encoding="utf-8")
     films = parse_filmliste(stream)
     return next(films), films  # metadata is the first yield
 
 
-def _do_full(conn, cfg):
-    meta, films = _load_list(cfg.filmliste_url)
-    return {"action": "full", **import_films(conn, films, meta)}
+def _do_full(conn, cfg, progress=_noop):
+    meta, films = _load_list(cfg.filmliste_url, progress)
+    return {"action": "full", **import_films(conn, films, meta, progress)}
 
 
-def _do_diff(conn, cfg):
+def _do_diff(conn, cfg, progress=_noop):
     try:
-        meta, films = _load_list(cfg.filmliste_diff_url)
+        meta, films = _load_list(cfg.filmliste_diff_url, progress)
     except Exception:
         return None  # download/parse failed -> caller falls back to full
-    return {"action": "diff", **import_films(conn, films, meta)}
+    return {"action": "diff", **import_films(conn, films, meta, progress)}
 
 
-def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
+def cmd_mirror(conn, cfg, args: argparse.Namespace, progress=_noop) -> dict:
     """Refresh the film-list mirror (MediathekView update logic)"""
     if args.force or db_get_meta(conn, "filmliste_id") is None:
-        return _do_full(conn, cfg)
+        return _do_full(conn, cfg, progress)
+    progress("checking the server list id")
     if fetch_list_id(cfg) == db_get_meta(conn, "filmliste_id"):
         return {"action": "skip"}
     if can_use_diff(db_get_meta(conn, "filmliste_created")):
-        result = _do_diff(conn, cfg)
+        result = _do_diff(conn, cfg, progress)
         if result and result["imported"]:
             return result
-        return _do_full(conn, cfg)  # diff failed or was empty
-    return _do_full(conn, cfg)
+        return _do_full(conn, cfg, progress)  # diff failed or was empty
+    return _do_full(conn, cfg, progress)
 
 
 # -- cli ----------------------------------------------------------------------
@@ -497,10 +513,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("config", help="show the effective configuration")
 
-    mirror = sub.add_parser("mirror", help="refresh the film-list mirror")
+    mirror = sub.add_parser("mirror", help="refresh the film-list mirror (~30 s)",
+                            description="Refresh the film-list mirror; a full "
+                                        "download and import takes about 30 "
+                                        "seconds. Progress is printed to stderr.")
     mirror.add_argument("--force", action="store_true", help="always download the full list")
 
     return parser
+
+
+def _stderr_progress(msg):
+    """Plain-text progress sink: one line per step on stderr, flushed live, so it
+    never pollutes the stdout result (the single JSON object in --json mode)."""
+    print(f"-> {msg}", file=sys.stderr, flush=True)
 
 
 def main(argv=None) -> int:
@@ -518,7 +543,7 @@ def main(argv=None) -> int:
                 result = cmd_config(cfg)
             case "mirror":
                 conn = db_connect(cfg.db_path)
-                try:     result = cmd_mirror(conn, cfg, args)
+                try:     result = cmd_mirror(conn, cfg, args, _stderr_progress)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 
