@@ -31,11 +31,13 @@ the **wishlist** as automation on the same machinery.
 
 1. **Scaffolding** -- config, DB layer, CLI skeleton.
 2. **Film list mirror** -- download the film list and import into SQLite table
-   `mediathek`, with a hash over "sender+topic+title+url" as `mediathek_id`.
+   `mediathek`, keyed by `mediathek_id` = MediathekView's own film identity
+   (SHA-256 over sender+thema+url+website, each UTF-16LE-encoded).
    Standalone: a locally searchable Mediathek DB.
 3. **Enrichment + matching** -- add TMDB/IMDB IDs and language codes, fuzzy match
    with confidence scores. On refresh, existing ID assignments must **not** be
-   lost; deleted entries shall be deleted.
+   lost; entries that vanish from the source are kept (the mirror only grows or
+   updates, never deletes).
 4. **DB search** -- read-only query/browse of the enriched catalog. A pick by ID
    becomes a review-queue entry (once phase 5 exists), not a download.
 5. **Review queue + gate** -- staging of proposals/picks and the approval gate.
@@ -111,9 +113,14 @@ thin layer in the DB unit so the backend could be swapped later; do not scatter
 SQLite specifics across the code. Field lists are indicative.
 
 - **mediathek** -- mirror of the film list, refreshed periodically.
+  `mediathek_id` is MediathekView's identity (SHA-256 over
+  sender+thema+url+website, UTF-16LE); `status` is one character
+  ('0' new, '1' old). language/tmdb_id/imdb_id/match_confidence are filled by
+  phase 3 and preserved across refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
-  url_video, url_video_hd, url_subtitle, language, tmdb_id, imdb_id,
-  match_confidence`
+  size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
+  url_history, geo, language, tmdb_id, imdb_id, match_confidence`
+  Plus a `meta` key/value table (filmliste_id, filmliste_created).
 - **queue** -- the single acquisition table = review queue + download record.
   Lifecycle: `proposed -> approved -> downloading -> done / failed / cancelled`.
   `status, id, mediathek_id, source (match/search/wishlist), language,
@@ -212,6 +219,10 @@ check the naming convention against current Jellyfin docs.
     and the Docker entrypoint (smoke test in phase 9, `theke run` from phase 10).
     Must offer a **machine-readable mode** (`--json`, stable exit codes, stable
     command grammar) so the GUI can drive and parse it.
+    - **stdout vs stderr:** stdout carries only the result (the single JSON object
+      in `--json` mode); progress and diagnostics go to **stderr** as plain text,
+      so a long stage (e.g. `mirror`, ~30 s) stays visible without polluting the
+      parseable result. The GUI reads the two streams separately.
   - **Desktop GUI** (Delphi): thin presentation shell for the test phase and
     non-technical users; runs every action as a CLI call and renders the JSON.
   - On the PC the CLI ships as a **PyInstaller-frozen `.exe`** bundled with the
@@ -260,11 +271,12 @@ Theke/
 
 ## Development and deployment
 
-- **Development** locally on Windows: CLI in a Python venv, GUI in the Delphi
-  IDE. Everything runs natively, scheduler included -- no Docker for dev/debug.
+- **Development** locally on Windows: CLI in a Python venv, GUI possibly in a
+  different language. Everything runs natively, scheduler included -- no Docker
+  for dev/debug.
 - **Delivery is split:** the **CLI** ships as a **Docker container** on the
   **NAS** (phase 9; runs `theke run` once phase 10 exists), and on the **PC** the
-  same CLI ships as a **PyInstaller `.exe`** bundled with the Delphi GUI. The GUI
+  same CLI ships as a **PyInstaller `.exe`** bundled with the GUI. The GUI
   targets the PC only and is not part of the container.
 - From the start, **all paths and secrets via CLI parameters or config file**
   (media folders, DB path, TMDB API key) -- nothing hard-coded, keeping the move
@@ -279,8 +291,8 @@ ALWAYS:
   enough, no sprawling comment blocks inside functions.
 - **Files may grow long** -- prefer a few clear, longer units over many tiny
   ones. No file/folder sprawl.
-- All logic in the Python CLI; the Delphi GUI stays a thin shell with no logic.
-- Stages are **idempotent** and re-runnable; state lives in the DB, not memory.
+- put logic in the Python CLI; the GUI stays a thin shell with no logic.
+- keep Stages **idempotent** and re-runnable; state lives in the DB, not memory.
 - ANSI / CP-1252 content only in every text file (see encoding rule on top).
 - **Python formatting:**
   - Section dividers with the label up front, dashes filling the line:
@@ -291,13 +303,21 @@ ALWAYS:
   - Blank lines between logical blocks inside longer functions.
   - Unused unpacking slots are a bare `_`, not a named placeholder.
 - **Python:** use **venv**, never pip install globally.
-- **Delphi (GUI):** 3 empty lines between methods; nested function names in
-  snake_case.
+- **Tests:** the expected value is always **hard-coded / pre-calculated**, never
+  computed in the test (a test that recomputes the result with the same logic
+  proves nothing). Compute hashes, dates, etc. once and paste the literal, with
+  a comment noting how it was derived. Only exception: relational assertions
+  that do not need a concrete value (e.g. "id of A differs from id of B").
 - **Language:** comments and variable names in English. README.md is the **only**
   German file.
 
 KEEP IN MIND:
 - All paths, URLs and settings **must be configurable**, never hard-coded.
+- **Command wiring** lives in two explicit places: a subparser in
+  `build_parser` (its flags inline) and a `case` in `main`. Global options
+  (e.g. `--config`) and the command name are always on `args` and read directly;
+  subcommand flags exist only under their own command, so read them only in
+  that command's handler (e.g. `args.force` in `cmd_mirror`).
 
 NEVER:
 - Spell out problems that no longer exist (or never applied). Describe the design

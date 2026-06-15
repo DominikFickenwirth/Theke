@@ -1,7 +1,11 @@
 """Tests for the Theke CLI (config / DB / CLI skeleton)."""
 
+import io
 import json
+import lzma
 import sqlite3
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -202,7 +206,8 @@ def test_cli_config_json_output(tmp_path, capsys):
     db = str(tmp_path / "t.db")
     assert main(["--json", "--db", db, "config"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result == {"db_path": db}
+    assert result["db_path"] == db
+    assert result["filmliste_url"].endswith(".xz")  # mirror keys present too
 
 
 def test_cli_db_flag_overrides_config_file(tmp_path, capsys):
@@ -248,13 +253,11 @@ def test_cli_broken_config_json_error(tmp_path, capsys):
 
 def test_cli_locked_db_exits_3(tmp_path, capsys, monkeypatch):
     import theke
-    monkeypatch.setitem(
-        theke.COMMANDS, "dummy",
-        (lambda conn, cfg, args: {"ok": True}, "db-touching test command", True))
+    monkeypatch.setattr(theke, "cmd_mirror", lambda conn, cfg, args: {"ok": True})
     db = str(tmp_path / "t.db")
     conn = db_connect(db, migrations=[])
     try:
-        assert main(["--json", "--db", db, "dummy"]) == 3
+        assert main(["--json", "--db", db, "mirror"]) == 3
         assert "error" in json.loads(capsys.readouterr().out)
     finally:
         conn.close()
@@ -266,3 +269,608 @@ def test_cli_unknown_command_exits_2(capsys):
 
 def test_cli_missing_command_exits_2(capsys):
     assert main([]) == 2
+
+
+# -- mirror: conversions -----------------------------------------------------
+
+def test_film_id_matches_utf16le_sha256_spec():
+    # sha256("ARDTatorthttp://v/1.mp4http://w/1".encode("utf-16-le"))
+    assert film_id("ARD", "Tatort", "http://v/1.mp4", "http://w/1") == \
+        "e149d5775b9318a7f9f8b5d731c28f8f027443f1c010999ca0d19f9393afdf70"
+
+
+def test_film_id_is_order_sensitive():
+    assert film_id("a", "b", "c", "d") != film_id("b", "a", "c", "d")
+
+
+def test_decode_rel_url_relative():
+    # first 20 chars of base ("http://example.com/p") + the suffix
+    assert decode_rel_url("http://example.com/path/video.mp4", "20|small.mp4") \
+        == "http://example.com/psmall.mp4"
+
+
+def test_decode_rel_url_empty_is_empty():
+    assert decode_rel_url("http://x/y.mp4", "") == ""
+
+
+def test_decode_rel_url_without_pipe_is_verbatim():
+    assert decode_rel_url("http://x/y.mp4", "http://full/sub.vtt") == \
+        "http://full/sub.vtt"
+
+
+def test_decode_rel_url_broken_length_is_verbatim():
+    # a non-numeric prefix is not the relative scheme -> keep as given
+    assert decode_rel_url("http://x/y.mp4", "abc|tail") == "abc|tail"
+
+
+def test_parse_duration_hhmmss():
+    assert parse_duration("01:02:03") == 3723
+
+
+def test_parse_duration_short_fields():
+    assert parse_duration("00:00:30") == 30
+
+
+def test_parse_duration_empty_is_none():
+    assert parse_duration("") is None
+
+
+def test_parse_duration_garbage_is_none():
+    assert parse_duration("nonsense") is None
+
+
+def test_to_int_plain():
+    assert to_int("42") == 42
+
+
+def test_to_int_empty_is_none():
+    assert to_int("") is None
+
+
+def test_to_int_garbage_is_none():
+    assert to_int("12x") is None
+
+
+def test_parse_date_prefers_datum_zeit():
+    assert parse_date("14.06.2026", "20:15:00", "1700000000") == \
+        "2026-06-14 20:15:00"
+
+
+def test_parse_date_missing_time_defaults_midnight():
+    assert parse_date("14.06.2026", "", "") == "2026-06-14 00:00:00"
+
+
+def test_parse_date_falls_back_to_epoch_utc():
+    # epoch 1700000000 as UTC wall clock
+    assert parse_date("", "", "1700000000") == "2023-11-14 22:13:20"
+
+
+def test_parse_date_all_empty_is_none():
+    assert parse_date("", "", "") is None
+
+
+def test_parse_date_garbage_is_none():
+    assert parse_date("not-a-date", "xx", "nope") is None
+
+
+# -- mirror: parse_filmliste -------------------------------------------------
+
+# Column-name header (second "Filmliste"); content is ignored by the parser.
+_COLNAMES = ["Sender", "Thema", "Titel", "Datum", "Zeit", "Dauer"]
+
+
+def make_x(**vals):
+    """Build a 20-field MV film row, fields addressed by their MV name."""
+    row = [""] * len(FIELDS)
+    for key, value in vals.items():
+        row[FIELDS.index(key)] = value
+    return row
+
+
+def mv_text(meta, films):
+    """Render the MV format: a flat object with duplicate keys."""
+    parts = ['"Filmliste":' + json.dumps(meta),
+             '"Filmliste":' + json.dumps(_COLNAMES)]
+    for film in films:
+        parts.append('"X":' + json.dumps(film))
+    return "{" + ",".join(parts) + "}"
+
+
+def parse(text, **kw):
+    gen = parse_filmliste(io.StringIO(text), **kw)
+    return next(gen), list(gen)  # (metadata, films)
+
+
+def test_parse_yields_metadata_first():
+    meta_in = ["loaded", "12.06.2026, 09:00", "3.1", "MServer", "idhash"]
+    meta, films = parse(mv_text(meta_in, [make_x(sender="ARD", titel="A")]))
+    assert meta["erstellt_am"] == "12.06.2026, 09:00"
+    assert meta["id"] == "idhash"
+    assert len(films) == 1
+
+
+def test_parse_incomplete_metadata_yields_empty_strings():
+    meta, _ = parse(mv_text(["only-loaded"], []))
+    assert meta["erstellt_am"] == ""
+    assert meta["id"] == ""
+
+
+def test_parse_maps_columns_to_db_fields():
+    row = make_x(sender="ARD", thema="Tatort", titel="Der Fall",
+                 beschreibung="desc", geo="DE", url="http://v/1.mp4",
+                 website="http://w/1")
+    _, films = parse(mv_text(["", "", "", "", ""], [row]))
+    f = films[0]
+    assert f["sender"] == "ARD"
+    assert f["topic"] == "Tatort"
+    assert f["title"] == "Der Fall"
+    assert f["description"] == "desc"
+    assert f["geo"] == "DE"
+    assert f["url_video"] == "http://v/1.mp4"
+    assert f["url_website"] == "http://w/1"
+
+
+def test_parse_field_inheritance_for_sender_and_topic():
+    rows = [make_x(sender="ARD", thema="Sport", titel="1"),
+            make_x(titel="2"),                       # inherit ARD / Sport
+            make_x(sender="ZDF", titel="3"),         # inherit Sport only
+            make_x(thema="News", titel="4")]         # inherit ZDF, new topic
+    _, films = parse(mv_text(["", "", "", "", ""], rows))
+    assert [f["sender"] for f in films] == ["ARD", "ARD", "ZDF", "ZDF"]
+    assert [f["topic"] for f in films] == ["Sport", "Sport", "Sport", "News"]
+
+
+def test_parse_film_id_uses_inherited_sender_and_topic():
+    rows = [make_x(sender="ARD", thema="Sport", url="u", website="w"),
+            make_x(url="u", website="w")]            # inherits ARD / Sport
+    _, films = parse(mv_text(["", "", "", "", ""], rows))
+    # id of the second film == sha256("ARDSportuw".encode("utf-16-le"))
+    assert films[1]["mediathek_id"] == \
+        "693ce7b99d4ac82947edbc4f97530825b8eddf69c13f81828388abaafb8250a1"
+
+
+def test_parse_status_new_and_old():
+    rows = [make_x(titel="new", neu="true"),
+            make_x(titel="old", neu="false"),
+            make_x(titel="blank")]
+    _, films = parse(mv_text(["", "", "", "", ""], rows))
+    assert [f["status"] for f in films] == ["0", "1", "1"]
+
+
+def test_parse_decodes_hd_and_small_urls():
+    row = make_x(url="http://example.com/path/video.mp4", url_hd="20|hd.mp4",
+                 url_klein="")
+    _, films = parse(mv_text(["", "", "", "", ""], [row]))
+    # first 20 chars of the base url ("http://example.com/p") + the suffix
+    assert films[0]["url_video_hd"] == "http://example.com/phd.mp4"
+    assert films[0]["url_video_small"] == ""
+
+
+def test_parse_large_entry_across_chunk_boundary():
+    big = "X" * 5000  # one piece of test data, used as input and expectation
+    row = make_x(sender="ARD", titel=big, url="u")
+    _, films = parse(mv_text(["", "", "", "", ""], [row]), chunk_size=8)
+    assert films[0]["title"] == big
+    assert films[0]["sender"] == "ARD"
+
+
+def test_parse_metadata_only_no_films():
+    meta, films = parse(mv_text(["", "x", "", "", "theid"], []))
+    assert meta["id"] == "theid"
+    assert films == []
+
+
+# -- mirror: migration + full import -----------------------------------------
+
+def open_db(tmp_path):
+    return db_connect(str(tmp_path / "theke.db"))  # uses real MIGRATIONS
+
+
+def make_list(rows, list_id="theid", created="01.01.2026, 00:00"):
+    return parse(mv_text(["", created, "", "", list_id], rows))
+
+
+def film_rows(conn):
+    return conn.execute("SELECT * FROM mediathek ORDER BY title").fetchall()
+
+
+def test_migration_creates_mediathek_and_meta(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        assert {"mediathek", "meta"} <= table_names(conn)
+        assert user_version(conn) == 1
+    finally:
+        conn.close()
+
+
+def test_full_import_inserts_rows(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        meta, films = make_list([
+            make_x(sender="ARD", thema="T", titel="A", url="http://v/a",
+                   website="http://w/a", dauer="00:01:00", neu="true",
+                   datum="14.06.2026", zeit="20:15:00"),
+            make_x(sender="ZDF", titel="B", url="http://v/b"),
+        ])
+        result = import_films(conn, films, meta)
+        assert result["imported"] == 2
+        rows = film_rows(conn)
+        assert [r["title"] for r in rows] == ["A", "B"]
+        assert rows[0]["sender"] == "ARD"
+        assert rows[0]["status"] == "0"
+        assert rows[0]["duration"] == 60
+        assert rows[0]["date"] == "2026-06-14 20:15:00"
+        assert rows[1]["status"] == "1"
+    finally:
+        conn.close()
+
+
+def test_full_import_is_idempotent(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        rows = [make_x(sender="ARD", titel="A", url="u"),
+                make_x(sender="ZDF", titel="B", url="v")]
+        import_films(conn, make_list(rows)[1], make_list(rows)[0])
+        meta, films = make_list(rows)
+        result = import_films(conn, films, meta)
+        assert result["imported"] == 2
+        assert len(film_rows(conn)) == 2
+    finally:
+        conn.close()
+
+
+def test_full_import_updates_changed_film(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        base = dict(sender="ARD", thema="T", url="u", website="w")
+        import_films(conn, *reversed(make_list([make_x(titel="old", **base)])))
+        meta, films = make_list([make_x(titel="new", **base)])
+        import_films(conn, films, meta)
+        rows = film_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["title"] == "new"
+    finally:
+        conn.close()
+
+
+def test_full_import_preserves_phase3_ids(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        base = dict(sender="ARD", thema="T", url="u", website="w")
+        meta, films = make_list([make_x(titel="old", **base)])
+        import_films(conn, films, meta)
+        conn.execute("UPDATE mediathek SET tmdb_id='123', imdb_id='tt9', "
+                     "language='de', match_confidence=0.9")
+        meta, films = make_list([make_x(titel="new", **base)])
+        import_films(conn, films, meta)
+        row = film_rows(conn)[0]
+        assert row["title"] == "new"          # mirror column updated
+        assert row["tmdb_id"] == "123"        # phase-3 assignment preserved
+        assert row["imdb_id"] == "tt9"
+        assert row["language"] == "de"
+        assert row["match_confidence"] == 0.9
+    finally:
+        conn.close()
+
+
+def test_import_keeps_vanished(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        both = [make_x(sender="ARD", titel="A", url="a"),
+                make_x(sender="ZDF", titel="B", url="b")]
+        import_films(conn, *reversed(make_list(both)))
+        meta, films = make_list([make_x(sender="ARD", titel="A", url="a")])
+        import_films(conn, films, meta)                  # B no longer listed
+        assert [r["title"] for r in film_rows(conn)] == ["A", "B"]  # B kept
+    finally:
+        conn.close()
+
+
+def test_full_import_sets_meta(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        meta, films = make_list([make_x(sender="ARD", titel="A", url="a")],
+                                list_id="abc123", created="02.03.2026, 07:30")
+        import_films(conn, films, meta)
+        assert db_get_meta(conn, "filmliste_id") == "abc123"
+        assert db_get_meta(conn, "filmliste_created") == "02.03.2026, 07:30"
+    finally:
+        conn.close()
+
+
+def test_get_meta_missing_key_is_none(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        assert db_get_meta(conn, "nope") is None
+    finally:
+        conn.close()
+
+
+# -- mirror: diff import + update decision ------------------------------------
+
+NOON_UTC = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def test_can_use_diff_after_cutoff():
+    assert can_use_diff("14.06.2026, 08:00", now=NOON_UTC) is True
+
+
+def test_can_use_diff_before_cutoff():
+    assert can_use_diff("14.06.2026, 06:30", now=NOON_UTC) is False
+
+
+def test_can_use_diff_at_cutoff_is_false():
+    assert can_use_diff("14.06.2026, 07:00", now=NOON_UTC) is False
+
+
+def test_can_use_diff_previous_day_is_false():
+    assert can_use_diff("13.06.2026, 23:00", now=NOON_UTC) is False
+
+
+def test_can_use_diff_garbage_is_false():
+    assert can_use_diff("not a date", now=NOON_UTC) is False
+
+
+def test_can_use_diff_none_is_false():
+    assert can_use_diff(None, now=NOON_UTC) is False
+
+
+def test_diff_import_merges_without_deleting(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        a = dict(sender="ARD", thema="T", url="a", website="w")
+        import_films(conn, *reversed(make_list([make_x(titel="A", **a),
+                                               make_x(sender="ZDF", titel="B",
+                                                      url="b")])))
+        meta, films = make_list([make_x(titel="A2", **a),         # update A
+                                 make_x(sender="ARTE", titel="C",  # new
+                                        url="c")])
+        result = import_films(conn, films, meta)
+        assert result["imported"] == 2
+        rows = {r["title"] for r in film_rows(conn)}
+        assert rows == {"A2", "B", "C"}             # B (not in diff) survives
+    finally:
+        conn.close()
+
+
+def test_diff_import_preserves_phase3_ids(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        a = dict(sender="ARD", thema="T", url="a", website="w")
+        import_films(conn, *reversed(make_list([make_x(titel="A", **a)])))
+        conn.execute("UPDATE mediathek SET tmdb_id='77'")
+        import_films(conn, *reversed(make_list([make_x(titel="A2", **a)])))
+        row = film_rows(conn)[0]
+        assert row["title"] == "A2"
+        assert row["tmdb_id"] == "77"
+    finally:
+        conn.close()
+
+
+# -- mirror: cmd_mirror decision (mocked network) ----------------------------
+
+CFG = SimpleNamespace(filmliste_url="FULL", filmliste_diff_url="DIFF",
+                      filmliste_id_url="ID")
+
+
+def xz_list(rows, list_id="id", created="01.01.2020, 00:00"):
+    text = mv_text(["", created, "", "", list_id], rows)
+    return lzma.compress(text.encode("utf-8"))
+
+
+def install_http(monkeypatch, mapping):
+    import theke
+
+    def fake_get(url):
+        value = mapping.get(url)
+        if value is None:
+            raise RuntimeError(f"unexpected url: {url}")
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+
+
+def recent_created():
+    return f"{datetime.now(timezone.utc):%d.%m.%Y}, 23:59"
+
+
+def args(force=False):
+    return SimpleNamespace(force=force)
+
+
+def test_cmd_mirror_full_on_empty_db(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
+                                                       url="a")], "id1")})
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+        assert result["imported"] == 1
+        assert db_get_meta(conn, "filmliste_id") == "id1"
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_force_redownloads_full(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
+                                                       url="a")], "id1",
+                                               recent_created())})
+    conn = open_db(tmp_path)
+    try:
+        cmd_mirror(conn, CFG, args())                 # seed local list
+        result = cmd_mirror(conn, CFG, args(force=True))
+        assert result["action"] == "full"             # despite fresh local list
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_skip_when_id_unchanged(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        install_http(monkeypatch, {"ID": b"id1\n"})
+        result = cmd_mirror(conn, CFG, args())
+        assert result == {"action": "skip"}
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_skip_when_fresh_but_id_unchanged(tmp_path, monkeypatch):
+    # Fresh local list (can_use_diff is true), but the server id is unchanged:
+    # the id check must skip *before* a diff is fetched. Only "ID" is mocked, so
+    # any diff/full download attempt would raise on the unmapped url.
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, [], {"id": "id1", "erstellt_am": recent_created()})
+        install_http(monkeypatch, {"ID": b"id1\n"})
+        result = cmd_mirror(conn, CFG, args())
+        assert result == {"action": "skip"}
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_full_when_id_changed(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        install_http(monkeypatch, {"ID": b"id2",
+                                   "FULL": xz_list([make_x(sender="ARD",
+                                                           titel="A", url="a")],
+                                                   "id2")})
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+        assert db_get_meta(conn, "filmliste_id") == "id2"
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_full_when_id_unreachable(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        install_http(monkeypatch, {"ID": RuntimeError("boom"),
+                                   "FULL": xz_list([make_x(sender="ARD",
+                                                           titel="A", url="a")],
+                                                   "id2")})
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
+                                                      url="a")], created="x")))
+        db_set_meta(conn, "filmliste_created", recent_created())
+        install_http(monkeypatch, {"ID": b"id2",  # differs from stored -> no skip
+                                    "DIFF": xz_list([make_x(sender="ZDF",
+                                                           titel="B", url="b")],
+                                                   "id2", recent_created())})
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "diff"
+        assert result["imported"] == 1
+        assert {r["title"] for r in film_rows(conn)} == {"A", "B"}
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
+                                                      url="a")], created="x")))
+        db_set_meta(conn, "filmliste_created", recent_created())
+        install_http(monkeypatch, {
+            "ID": b"id2",  # differs from stored -> no skip
+            "DIFF": xz_list([], "id2", recent_created()),
+            "FULL": xz_list([make_x(sender="ARD", titel="A", url="a"),
+                             make_x(sender="ZDF", titel="B", url="b")], "id2"),
+        })
+        result = cmd_mirror(conn, CFG, args())
+        assert result["action"] == "full"
+        assert result["imported"] == 2
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_reports_progress(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
+                                                       url="a")], "id1")})
+    conn = open_db(tmp_path)
+    msgs = []
+    try:
+        cmd_mirror(conn, CFG, args(), progress=msgs.append)
+    finally:
+        conn.close()
+    assert any("download" in m for m in msgs)        # download phase reported
+    assert any("import" in m for m in msgs)          # import phase reported
+
+
+# -- mirror: theke mirror CLI end to end -------------------------------------
+
+def one_film(list_id="id1", created="01.01.2020, 00:00"):
+    return xz_list([make_x(sender="ARD", titel="A", url="a")], list_id, created)
+
+
+def test_cli_mirror_full_json(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    assert main(["--json", "--db", db, "mirror"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["action"] == "full"
+    assert result["imported"] == 1
+
+
+def test_cli_mirror_progress_goes_to_stderr_not_stdout(tmp_path, capsys, monkeypatch):
+    # The --json contract: stdout is exactly one JSON object; progress (the work
+    # visible during the ~30 s) must land on stderr instead.
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    assert main(["--json", "--db", db, "mirror"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["action"] == "full"  # one parseable object
+    assert captured.out.strip().count("\n") == 0          # ... and only that
+    assert "-> downloading" in captured.err               # progress on stderr
+
+
+def test_cli_mirror_human_output(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    assert main(["--db", db, "mirror"]) == 0
+    assert "action = full" in capsys.readouterr().out
+
+
+def test_cli_mirror_force_redownloads(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    # fresh local list: without --force the next run would attempt a diff (whose
+    # URL is not mocked); --force must take the full path instead.
+    install_http(monkeypatch, {Config().filmliste_url: one_film(
+        created=recent_created())})
+    assert main(["--db", db, "mirror"]) == 0
+    capsys.readouterr()
+    assert main(["--json", "--db", db, "mirror", "--force"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "full"
+
+
+def test_cli_mirror_skip_on_unchanged_id(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film(list_id="id1")})
+    assert main(["--db", db, "mirror"]) == 0          # full, stores id1
+    capsys.readouterr()
+    install_http(monkeypatch, {Config().filmliste_id_url: b"id1\n"})
+    assert main(["--json", "--db", db, "mirror"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"action": "skip"}
+
+
+def test_cli_mirror_locked_db_exits_3(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "t.db")
+    install_http(monkeypatch, {Config().filmliste_url: one_film()})
+    conn = db_connect(db, migrations=[])
+    try:
+        assert main(["--json", "--db", db, "mirror"]) == 3
+    finally:
+        conn.close()
