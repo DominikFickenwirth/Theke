@@ -266,11 +266,12 @@ Theke/
 
 ## Development and deployment
 
-- **Development** locally on Windows: CLI in a Python venv, GUI in the Delphi
-  IDE. Everything runs natively, scheduler included -- no Docker for dev/debug.
+- **Development** locally on Windows: CLI in a Python venv, GUI possibly in a
+  different language. Everything runs natively, scheduler included -- no Docker
+  for dev/debug.
 - **Delivery is split:** the **CLI** ships as a **Docker container** on the
   **NAS** (phase 9; runs `theke run` once phase 10 exists), and on the **PC** the
-  same CLI ships as a **PyInstaller `.exe`** bundled with the Delphi GUI. The GUI
+  same CLI ships as a **PyInstaller `.exe`** bundled with the GUI. The GUI
   targets the PC only and is not part of the container.
 - From the start, **all paths and secrets via CLI parameters or config file**
   (media folders, DB path, TMDB API key) -- nothing hard-coded, keeping the move
@@ -285,8 +286,8 @@ ALWAYS:
   enough, no sprawling comment blocks inside functions.
 - **Files may grow long** -- prefer a few clear, longer units over many tiny
   ones. No file/folder sprawl.
-- All logic in the Python CLI; the Delphi GUI stays a thin shell with no logic.
-- Stages are **idempotent** and re-runnable; state lives in the DB, not memory.
+- put logic in the Python CLI; the GUI stays a thin shell with no logic.
+- keep Stages **idempotent** and re-runnable; state lives in the DB, not memory.
 - ANSI / CP-1252 content only in every text file (see encoding rule on top).
 - **Python formatting:**
   - Section dividers with the label up front, dashes filling the line:
@@ -302,13 +303,16 @@ ALWAYS:
   proves nothing). Compute hashes, dates, etc. once and paste the literal, with
   a comment noting how it was derived. Only exception: relational assertions
   that do not need a concrete value (e.g. "id of A differs from id of B").
-- **Delphi (GUI):** 3 empty lines between methods; nested function names in
-  snake_case.
 - **Language:** comments and variable names in English. README.md is the **only**
   German file.
 
 KEEP IN MIND:
 - All paths, URLs and settings **must be configurable**, never hard-coded.
+- **Command wiring** lives in two explicit places: a subparser in
+  `build_parser` (its flags inline) and a `case` in `main`. Global options
+  (e.g. `--config`) and the command name are always on `args` and read directly;
+  subcommand flags exist only under their own command, so read them only in
+  that command's handler (e.g. `args.force` in `cmd_mirror`).
 
 NEVER:
 - Spell out problems that no longer exist (or never applied). Describe the design

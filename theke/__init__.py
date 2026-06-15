@@ -151,6 +151,19 @@ def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
     return conn
 
 
+def db_get_meta(conn, key):
+    """Read a value from the meta table, or None if the key is absent."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def db_set_meta(conn, key, value):
+    """Upsert a single key/value into the meta table."""
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+
 # -- mirror -------------------------------------------------------------------
 # Download the MediathekView film list and import it into the mediathek table.
 # The list is an XZ-compressed, flat JSON object with duplicate keys
@@ -351,19 +364,6 @@ _UPSERT_SQL = (
 )
 
 
-def get_meta(conn, key):
-    """Read a value from the meta table, or None if the key is absent."""
-    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else None
-
-
-def set_meta(conn, key, value):
-    """Upsert a single key/value into the meta table."""
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
-
-
 def _upsert_films(conn, films, collect=False, batch=5000) -> int:
     """Upsert film rows in batches; with collect, also record their ids in the
     imported_ids temp table (so the full import can prune what vanished)."""
@@ -391,8 +391,8 @@ def _upsert_films(conn, films, collect=False, batch=5000) -> int:
 
 
 def _store_meta(conn, meta):
-    set_meta(conn, "filmliste_id", meta.get("id", ""))
-    set_meta(conn, "filmliste_created", meta.get("erstellt_am", ""))
+    db_set_meta(conn, "filmliste_id",      meta.get("id", ""))
+    db_set_meta(conn, "filmliste_created", meta.get("erstellt_am", ""))
 
 
 def full_import(conn, films, meta) -> dict:
@@ -442,12 +442,12 @@ def http_get(url: str) -> bytes:
         return response.read()
 
 
-def can_use_diff(created, now=None) -> bool:
+def can_use_diff(lastcreated, now=None) -> bool:
     """A diff is usable only if the local list was created after today 07:00
     UTC (MediathekView's FilmListMetaData.canUseDiffList)."""
     try:
         stamp = datetime.strptime(
-            created, "%d.%m.%Y, %H:%M").replace(tzinfo=timezone.utc)
+            lastcreated, "%d.%m.%Y, %H:%M").replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return False
     now = now or datetime.now(timezone.utc)
@@ -484,20 +484,20 @@ def _do_diff(conn, cfg):
     return {"action": "diff", **diff_import(conn, films, meta)}
 
 
-def cmd_mirror(conn, cfg, args) -> dict:
+def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
     """Refresh the film-list mirror (MediathekView update logic):
-    1. no local list or --force        -> full
+    1. no local list or --force           -> full
     2. local list fresh (after 07:00 UTC) -> diff, else fall back to full
-    3. else compare filmliste.id        -> skip if unchanged, else full
+    3. else compare filmliste.id          -> skip if unchanged, else full
     """
-    if getattr(args, "force", False) or get_meta(conn, "filmliste_id") is None:
+    if args.force or db_get_meta(conn, "filmliste_id") is None:
         return _do_full(conn, cfg)
-    if can_use_diff(get_meta(conn, "filmliste_created")):
+    if can_use_diff(db_get_meta(conn, "filmliste_created")):
         result = _do_diff(conn, cfg)
         if result and result["imported"]:
             return result
         return _do_full(conn, cfg)  # diff failed or was empty
-    if fetch_list_id(cfg) == get_meta(conn, "filmliste_id"):
+    if fetch_list_id(cfg) == db_get_meta(conn, "filmliste_id"):
         return {"action": "skip"}
     return _do_full(conn, cfg)
 
@@ -512,20 +512,9 @@ EXIT_USAGE = 2
 EXIT_LOCKED = 3
 
 
-def cmd_config(conn, cfg, args) -> dict:
+def cmd_config(cfg) -> dict:
     """Show the effective configuration (after precedence resolution)."""
     return dataclasses.asdict(cfg)
-
-
-# Pipeline stages register here: name -> (handler, help text, needs_db, args).
-# Each handler gets the DB connection (open if needs_db, else None), the
-# effective Config and the parsed args, and returns the result as a
-# JSON-serializable dict. args is a list of (flags, kwargs) for add_argument.
-COMMANDS = {
-    "config": (cmd_config, "show the effective configuration",  False, []),
-    "mirror": (cmd_mirror, "refresh the film-list mirror",      True,
-               [(("--force",), {"action": "store_true", "help": "always download the full list"})]),
-}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -534,10 +523,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db",     metavar="PATH",      help="database file (overrides db_path from config)")
     parser.add_argument("--json",   action="store_true", help="machine-readable output: one JSON object on stdout")
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
-    for name, (_, help_text, _, arg_specs) in COMMANDS.items():
-        command_parser = sub.add_parser(name, help=help_text)
-        for flags, kwargs in arg_specs:
-            command_parser.add_argument(*flags, **kwargs)
+
+    sub.add_parser("config", help="show the effective configuration")
+
+    mirror = sub.add_parser("mirror", help="refresh the film-list mirror")
+    mirror.add_argument("--force", action="store_true", help="always download the full list")
+
     return parser
 
 
@@ -551,13 +542,15 @@ def main(argv=None) -> int:
 
     try:
         cfg = load_config(args.config, overrides={"db_path": args.db})
-        handler, _, needs_db, _ = COMMANDS[args.command]
-        conn = db_connect(cfg.db_path) if needs_db else None
-        try:
-            result = handler(conn, cfg, args)
-        finally:
-            if conn is not None:
-                conn.close()
+        match args.command:
+            case "config":
+                result = cmd_config(cfg)
+            case "mirror":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_mirror(conn, cfg, args)
+                finally: conn.close()
+            case _: raise DbError(f"unhandled command: {args.command}")
+
     except (ConfigError, DbError, DbLockedError) as exc:
         if args.json:
             print(json.dumps({"error": str(exc)}))
