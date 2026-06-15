@@ -460,20 +460,16 @@ def _do_diff(conn, cfg):
 
 
 def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
-    """Refresh the film-list mirror (MediathekView update logic):
-    1. no local list or --force           -> full
-    2. local list fresh (after 07:00 UTC) -> diff, else fall back to full
-    3. else compare filmliste.id          -> skip if unchanged, else full
-    """
+    """Refresh the film-list mirror (MediathekView update logic)"""
     if args.force or db_get_meta(conn, "filmliste_id") is None:
         return _do_full(conn, cfg)
+    if fetch_list_id(cfg) == db_get_meta(conn, "filmliste_id"):
+        return {"action": "skip"}
     if can_use_diff(db_get_meta(conn, "filmliste_created")):
         result = _do_diff(conn, cfg)
         if result and result["imported"]:
             return result
         return _do_full(conn, cfg)  # diff failed or was empty
-    if fetch_list_id(cfg) == db_get_meta(conn, "filmliste_id"):
-        return {"action": "skip"}
     return _do_full(conn, cfg)
 
 

@@ -706,10 +706,24 @@ def test_cmd_mirror_force_redownloads_full(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_cmd_mirror_skip_when_id_matches_and_too_old(tmp_path, monkeypatch):
+def test_cmd_mirror_skip_when_id_unchanged(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        install_http(monkeypatch, {"ID": b"id1\n"})
+        result = cmd_mirror(conn, CFG, args())
+        assert result == {"action": "skip"}
+    finally:
+        conn.close()
+
+
+def test_cmd_mirror_skip_when_fresh_but_id_unchanged(tmp_path, monkeypatch):
+    # Fresh local list (can_use_diff is true), but the server id is unchanged:
+    # the id check must skip *before* a diff is fetched. Only "ID" is mocked, so
+    # any diff/full download attempt would raise on the unmapped url.
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, [], {"id": "id1", "erstellt_am": recent_created()})
         install_http(monkeypatch, {"ID": b"id1\n"})
         result = cmd_mirror(conn, CFG, args())
         assert result == {"action": "skip"}
@@ -752,7 +766,8 @@ def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
         import_films(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
                                                       url="a")], created="x")))
         db_set_meta(conn, "filmliste_created", recent_created())
-        install_http(monkeypatch, {"DIFF": xz_list([make_x(sender="ZDF",
+        install_http(monkeypatch, {"ID": b"id2",  # differs from stored -> no skip
+                                    "DIFF": xz_list([make_x(sender="ZDF",
                                                            titel="B", url="b")],
                                                    "id2", recent_created())})
         result = cmd_mirror(conn, CFG, args())
@@ -770,6 +785,7 @@ def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
                                                       url="a")], created="x")))
         db_set_meta(conn, "filmliste_created", recent_created())
         install_http(monkeypatch, {
+            "ID": b"id2",  # differs from stored -> no skip
             "DIFF": xz_list([], "id2", recent_created()),
             "FULL": xz_list([make_x(sender="ARD", titel="A", url="a"),
                              make_x(sender="ZDF", titel="B", url="b")], "id2"),
