@@ -492,7 +492,7 @@ def test_full_import_inserts_rows(tmp_path):
                    datum="14.06.2026", zeit="20:15:00"),
             make_x(sender="ZDF", titel="B", url="http://v/b"),
         ])
-        result = full_import(conn, films, meta)
+        result = import_films(conn, films, meta)
         assert result["imported"] == 2
         rows = film_rows(conn)
         assert [r["title"] for r in rows] == ["A", "B"]
@@ -510,9 +510,9 @@ def test_full_import_is_idempotent(tmp_path):
     try:
         rows = [make_x(sender="ARD", titel="A", url="u"),
                 make_x(sender="ZDF", titel="B", url="v")]
-        full_import(conn, make_list(rows)[1], make_list(rows)[0])
+        import_films(conn, make_list(rows)[1], make_list(rows)[0])
         meta, films = make_list(rows)
-        result = full_import(conn, films, meta)
+        result = import_films(conn, films, meta)
         assert result["imported"] == 2
         assert len(film_rows(conn)) == 2
     finally:
@@ -523,9 +523,9 @@ def test_full_import_updates_changed_film(tmp_path):
     conn = open_db(tmp_path)
     try:
         base = dict(sender="ARD", thema="T", url="u", website="w")
-        full_import(conn, *reversed(make_list([make_x(titel="old", **base)])))
+        import_films(conn, *reversed(make_list([make_x(titel="old", **base)])))
         meta, films = make_list([make_x(titel="new", **base)])
-        full_import(conn, films, meta)
+        import_films(conn, films, meta)
         rows = film_rows(conn)
         assert len(rows) == 1
         assert rows[0]["title"] == "new"
@@ -538,11 +538,11 @@ def test_full_import_preserves_phase3_ids(tmp_path):
     try:
         base = dict(sender="ARD", thema="T", url="u", website="w")
         meta, films = make_list([make_x(titel="old", **base)])
-        full_import(conn, films, meta)
+        import_films(conn, films, meta)
         conn.execute("UPDATE mediathek SET tmdb_id='123', imdb_id='tt9', "
                      "language='de', match_confidence=0.9")
         meta, films = make_list([make_x(titel="new", **base)])
-        full_import(conn, films, meta)
+        import_films(conn, films, meta)
         row = film_rows(conn)[0]
         assert row["title"] == "new"          # mirror column updated
         assert row["tmdb_id"] == "123"        # phase-3 assignment preserved
@@ -553,16 +553,15 @@ def test_full_import_preserves_phase3_ids(tmp_path):
         conn.close()
 
 
-def test_full_import_deletes_vanished(tmp_path):
+def test_import_keeps_vanished(tmp_path):
     conn = open_db(tmp_path)
     try:
         both = [make_x(sender="ARD", titel="A", url="a"),
                 make_x(sender="ZDF", titel="B", url="b")]
-        full_import(conn, *reversed(make_list(both)))
+        import_films(conn, *reversed(make_list(both)))
         meta, films = make_list([make_x(sender="ARD", titel="A", url="a")])
-        result = full_import(conn, films, meta)
-        assert result["deleted"] == 1
-        assert [r["title"] for r in film_rows(conn)] == ["A"]
+        import_films(conn, films, meta)                  # B no longer listed
+        assert [r["title"] for r in film_rows(conn)] == ["A", "B"]  # B kept
     finally:
         conn.close()
 
@@ -572,7 +571,7 @@ def test_full_import_sets_meta(tmp_path):
     try:
         meta, films = make_list([make_x(sender="ARD", titel="A", url="a")],
                                 list_id="abc123", created="02.03.2026, 07:30")
-        full_import(conn, films, meta)
+        import_films(conn, films, meta)
         assert db_get_meta(conn, "filmliste_id") == "abc123"
         assert db_get_meta(conn, "filmliste_created") == "02.03.2026, 07:30"
     finally:
@@ -620,13 +619,13 @@ def test_diff_import_merges_without_deleting(tmp_path):
     conn = open_db(tmp_path)
     try:
         a = dict(sender="ARD", thema="T", url="a", website="w")
-        full_import(conn, *reversed(make_list([make_x(titel="A", **a),
+        import_films(conn, *reversed(make_list([make_x(titel="A", **a),
                                                make_x(sender="ZDF", titel="B",
                                                       url="b")])))
         meta, films = make_list([make_x(titel="A2", **a),         # update A
                                  make_x(sender="ARTE", titel="C",  # new
                                         url="c")])
-        result = diff_import(conn, films, meta)
+        result = import_films(conn, films, meta)
         assert result["imported"] == 2
         rows = {r["title"] for r in film_rows(conn)}
         assert rows == {"A2", "B", "C"}             # B (not in diff) survives
@@ -638,9 +637,9 @@ def test_diff_import_preserves_phase3_ids(tmp_path):
     conn = open_db(tmp_path)
     try:
         a = dict(sender="ARD", thema="T", url="a", website="w")
-        full_import(conn, *reversed(make_list([make_x(titel="A", **a)])))
+        import_films(conn, *reversed(make_list([make_x(titel="A", **a)])))
         conn.execute("UPDATE mediathek SET tmdb_id='77'")
-        diff_import(conn, *reversed(make_list([make_x(titel="A2", **a)])))
+        import_films(conn, *reversed(make_list([make_x(titel="A2", **a)])))
         row = film_rows(conn)[0]
         assert row["title"] == "A2"
         assert row["tmdb_id"] == "77"
@@ -710,7 +709,7 @@ def test_cmd_mirror_force_redownloads_full(tmp_path, monkeypatch):
 def test_cmd_mirror_skip_when_id_matches_and_too_old(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
-        full_import(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
         install_http(monkeypatch, {"ID": b"id1\n"})
         result = cmd_mirror(conn, CFG, args())
         assert result == {"action": "skip"}
@@ -721,7 +720,7 @@ def test_cmd_mirror_skip_when_id_matches_and_too_old(tmp_path, monkeypatch):
 def test_cmd_mirror_full_when_id_changed(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
-        full_import(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
         install_http(monkeypatch, {"ID": b"id2",
                                    "FULL": xz_list([make_x(sender="ARD",
                                                            titel="A", url="a")],
@@ -736,7 +735,7 @@ def test_cmd_mirror_full_when_id_changed(tmp_path, monkeypatch):
 def test_cmd_mirror_full_when_id_unreachable(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
-        full_import(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
+        import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
         install_http(monkeypatch, {"ID": RuntimeError("boom"),
                                    "FULL": xz_list([make_x(sender="ARD",
                                                            titel="A", url="a")],
@@ -750,7 +749,7 @@ def test_cmd_mirror_full_when_id_unreachable(tmp_path, monkeypatch):
 def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
-        full_import(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
+        import_films(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
                                                       url="a")], created="x")))
         db_set_meta(conn, "filmliste_created", recent_created())
         install_http(monkeypatch, {"DIFF": xz_list([make_x(sender="ZDF",
@@ -767,7 +766,7 @@ def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
 def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
-        full_import(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
+        import_films(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
                                                       url="a")], created="x")))
         db_set_meta(conn, "filmliste_created", recent_created())
         install_http(monkeypatch, {
@@ -795,7 +794,6 @@ def test_cli_mirror_full_json(tmp_path, capsys, monkeypatch):
     result = json.loads(capsys.readouterr().out)
     assert result["action"] == "full"
     assert result["imported"] == 1
-    assert result["deleted"] == 0
 
 
 def test_cli_mirror_human_output(tmp_path, capsys, monkeypatch):

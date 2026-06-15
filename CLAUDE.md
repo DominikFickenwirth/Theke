@@ -36,7 +36,8 @@ the **wishlist** as automation on the same machinery.
    Standalone: a locally searchable Mediathek DB.
 3. **Enrichment + matching** -- add TMDB/IMDB IDs and language codes, fuzzy match
    with confidence scores. On refresh, existing ID assignments must **not** be
-   lost; deleted entries shall be deleted.
+   lost; entries that vanish from the source are kept (the mirror only grows or
+   updates, never deletes).
 4. **DB search** -- read-only query/browse of the enriched catalog. A pick by ID
    becomes a review-queue entry (once phase 5 exists), not a download.
 5. **Review queue + gate** -- staging of proposals/picks and the approval gate.

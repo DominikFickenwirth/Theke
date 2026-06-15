@@ -345,9 +345,9 @@ def parse_filmliste(stream, chunk_size=1 << 16):
             yield film
 
 
-# Columns written by both the full and the diff import. language/tmdb_id/
-# imdb_id/match_confidence are owned by phase 3 and never touched here, so an
-# ID assignment survives every refresh.
+# Columns written on every import. language/tmdb_id/imdb_id/match_confidence are
+# owned by phase 3 and never touched here, so an ID assignment survives every
+# refresh.
 MIRROR_COLS = [
     "mediathek_id", "status", "sender", "topic", "title", "description",
     "date", "duration", "size_mb", "url_video", "url_video_small",
@@ -364,9 +364,8 @@ _UPSERT_SQL = (
 )
 
 
-def _upsert_films(conn, films, collect=False, batch=5000) -> int:
-    """Upsert film rows in batches; with collect, also record their ids in the
-    imported_ids temp table (so the full import can prune what vanished)."""
+def _upsert_films(conn, films, batch=5000) -> int:
+    """Upsert film rows in batches; return the number of rows written."""
     count = 0
     rows = []
 
@@ -375,10 +374,6 @@ def _upsert_films(conn, films, collect=False, batch=5000) -> int:
         if not rows:
             return
         conn.executemany(_UPSERT_SQL, rows)
-        if collect:
-            conn.executemany(
-                "INSERT OR IGNORE INTO imported_ids (mediathek_id) VALUES (?)",
-                [(r["mediathek_id"],) for r in rows])
         count += len(rows)
         rows.clear()
 
@@ -395,31 +390,11 @@ def _store_meta(conn, meta):
     db_set_meta(conn, "filmliste_created", meta.get("erstellt_am", ""))
 
 
-def full_import(conn, films, meta) -> dict:
-    """Import a complete list: upsert every film, then delete entries that
-    vanished from the source. All in one transaction, so an abort rolls back
-    cleanly and a re-run is idempotent."""
-    conn.execute("BEGIN")
-    try:
-        conn.execute("DROP TABLE IF EXISTS imported_ids")
-        conn.execute(
-            "CREATE TEMP TABLE imported_ids (mediathek_id TEXT PRIMARY KEY)")
-        imported = _upsert_films(conn, films, collect=True)
-        deleted = conn.execute(
-            "DELETE FROM mediathek WHERE mediathek_id NOT IN "
-            "(SELECT mediathek_id FROM imported_ids)").rowcount
-        _store_meta(conn, meta)
-        conn.execute("DROP TABLE imported_ids")
-        conn.execute("COMMIT")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    return {"imported": imported, "deleted": deleted}
-
-
-def diff_import(conn, films, meta) -> dict:
-    """Import a diff list: upsert the changed/new films, no deletion (a diff
-    cannot express removals; the next full import prunes them)."""
+def import_films(conn, films, meta) -> dict:
+    """Import a list (full or diff alike): upsert the new/changed films and store
+    the list metadata in one transaction, so an abort rolls back cleanly and a
+    re-run is idempotent. Entries no longer in the source are kept -- the mirror
+    only grows or updates, never deletes."""
     conn.execute("BEGIN")
     try:
         imported = _upsert_films(conn, films)
@@ -473,7 +448,7 @@ def _load_list(url):
 
 def _do_full(conn, cfg):
     meta, films = _load_list(cfg.filmliste_url)
-    return {"action": "full", **full_import(conn, films, meta)}
+    return {"action": "full", **import_films(conn, films, meta)}
 
 
 def _do_diff(conn, cfg):
@@ -481,7 +456,7 @@ def _do_diff(conn, cfg):
         meta, films = _load_list(cfg.filmliste_diff_url)
     except Exception:
         return None  # download/parse failed -> caller falls back to full
-    return {"action": "diff", **diff_import(conn, films, meta)}
+    return {"action": "diff", **import_films(conn, films, meta)}
 
 
 def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
@@ -551,7 +526,7 @@ def main(argv=None) -> int:
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 
-    except (ConfigError, DbError, DbLockedError) as exc:
+    except Exception as exc:  # any failure becomes one clean error, never a traceback
         if args.json:
             print(json.dumps({"error": str(exc)}))
         else:
