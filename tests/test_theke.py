@@ -430,12 +430,14 @@ def test_parse_film_id_uses_inherited_sender_and_topic():
         "693ce7b99d4ac82947edbc4f97530825b8eddf69c13f81828388abaafb8250a1"
 
 
-def test_parse_status_new_and_old():
+def test_parse_status_always_unclassified():
+    # mirror marks every row status '0' (unclassified); the source 'neu' flag no
+    # longer drives status -- classify flips it to '1'.
     rows = [make_x(titel="new", neu="true"),
             make_x(titel="old", neu="false"),
             make_x(titel="blank")]
     _, films = parse(mv_text(["", "", "", "", ""], rows))
-    assert [f["status"] for f in films] == ["0", "1", "1"]
+    assert [f["status"] for f in films] == ["0", "0", "0"]
 
 
 def test_parse_decodes_hd_and_small_urls():
@@ -501,7 +503,7 @@ def test_full_import_inserts_rows(tmp_path):
         assert rows[0]["status"] == "0"
         assert rows[0]["duration"] == 60
         assert rows[0]["date"] == "2026-06-14 20:15:00"
-        assert rows[1]["status"] == "1"
+        assert rows[1]["status"] == "0"   # every mirrored row is unclassified
     finally:
         conn.close()
 

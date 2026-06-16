@@ -258,7 +258,7 @@ def _build_film(values, last_sender, last_thema) -> dict:
     url = raw.get("url", "")
     return {
         "mediathek_id":    film_id(sender, thema, url, raw.get("website", "")),
-        "status":          "0" if raw.get("neu") == "true" else "1",
+        "status":          "0",
         "sender":          sender,
         "topic":           thema,
         "title":           raw.get("titel", ""),
