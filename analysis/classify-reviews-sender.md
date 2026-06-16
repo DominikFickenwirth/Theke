@@ -710,3 +710,47 @@ stark.
 
 Kein neuer Befund, aber HR ist der staerkste Beleg fuer Befund 7 (anteilig) und
 Befund 5.
+
+## ARTE.DE / ARTE.FR
+
+### Kernbefund
+
+ARTE ist ein **Sonderfall**: ARTE-Sender stehen in `ARTE_LANG`, daher wird Pass 4
+uebersprungen -- `series_name` bleibt **per Design NULL** (die echte Serie steckt
+im Titel, der 2. Pass hebt sie spaeter), `language` kommt aus dem Sender,
+`category` aus der `ARTE_CAT`/`ARTE_SUB`-Taxonomie ueber das `Ober - Unter`-Topic.
+Befunde 1/3/7/9 (alle `series_name`-Verschmutzung) sind damit gegenstandslos.
+
+Fuer **ARTE.DE** funktioniert das hervorragend: 14.081/14.485 Zeilen (97 %)
+bekommen die Taxonomie-Kategorie mit Confidence 0.9. Aber:
+
+### Befund 11 -- ARTE-Taxonomie nur deutsch; fremdsprachige ARTE-Kanaele fallen durch
+
+`ARTE_CAT`/`ARTE_SUB` mappen ausschliesslich **deutsche** Topic-Labels (`Kino`,
+`Geschichte`, `Entdeckung der Welt`, `Filme`, `Serien`, ...). **ARTE.FR** liefert
+dieselbe Taxonomie auf Franzoesisch (`Cinéma`, `Histoire`,
+`Voyages et découvertes`, `Séries`, ...) -- die matchen nicht:
+
+```
+ARTE.DE  "Geschichte - Das 20. Jahrhundert"        -> category="Doku"   (0.9)
+ARTE.FR  "Histoire - XXe siècle"                    -> category="unklar" (0.2, Dauer-Prior)
+ARTE.FR  "Info et société - Décryptages"            -> category="Beitrag/Episode"
+```
+
+Nur **457** ARTE.FR-Zeilen (3 %) bekommen eine Taxonomie-Kategorie, und das auch
+nur, weil die Marke `ARTE Concert` sprachgleich ist. Die uebrigen ~14.600
+ARTE.FR-Zeilen fallen auf den Dauer-Prior (Beitrag/Episode/unklar/Clip) mit
+Confidence 0.2/0.5 zurueck. Fix: franzoesische (und EN/ES/IT/PL, siehe naechster
+Abschnitt) Taxonomie-Labels in `ARTE_CAT`/`ARTE_SUB` ergaenzen.
+
+### Treffen die uebrigen Befunde zu?
+
+| Befund | ARTE.DE/FR | |
+|--------|-----------|--|
+| 1/3/7/9 series_name | **n. a.** | `series_name` per Design NULL. |
+| 4 "Film von" | nein (1) | |
+| 5 Episoden ohne Klammern | nein (18) | `episode` gut (4.251 via `(n/m)`). |
+| 6 Datum "vom" | nein (0) | |
+| 8 Beschreibungs-Metazeile | klein (16 Z. sichtbar) | `lief` u. a. |
+
+Beobachtung: Flag `U` (Untertitel) 8.420x -- ARTE-typisch (OmU), wirkt korrekt.
