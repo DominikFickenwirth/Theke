@@ -593,3 +593,51 @@ ist der **Sender-Container `BR` (2.191 Z.)** als `series_name`.
 
 Kein neuer Befund. Der `| Bergfreundinnen`-Fall bestaetigt erneut Offene Frage 4
 (Serie mal vor, mal hinter dem Pipe).
+
+## MDR
+
+### Kernbefund
+
+MDR (20.023 Z., 359 Topics, mitteldeutsch-regional) ist **sehr sauber**: echte
+Programmnamen (`In aller Freundschaft`, `Elefant, Tiger & Co.`, regionale
+News-Magazine in Versalien wie `MDR SACHSENSPIEGEL`). `episode` exzellent (3.998
+via `(S/E)`), keine Rubrik-Topics.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | MDR | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **nein** | nur Strand `Kurzfilme im MDR` (78). |
+| 3 Schreibvarianten (Case) | **klein** (96 Z.) | `#hinREISEND`/`#hinreisend`. |
+| 4 "Film von" | **nein** (0) | |
+| 5 Episoden ohne Klammern | **nein** (13 Z.) | |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **klein** (35 Z.) | nur `... | ARD Wissen`. |
+| 8 Beschreibungs-Metazeile | **nein** (2 Z.) | feuert nur 5x. |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+Keine neuen Befunde.
+
+## PHOENIX
+
+### Kernbefund
+
+PHOENIX (17.021 Z., 122 Topics, Ereignis-/Politiksender). Zwei Auffaelligkeiten:
+ein Format-Rubrik-Topic **`Dokumentationen` (1.086 Z.)** als `series_name`, und
+**systematische Versalien-/Kleinschreib-Dubletten** (Befund 3 ausgepraegt).
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | PHOENIX | Belege |
+|--------|---------|--------|
+| 1 series_name=Format/Genre | **ja** | `Dokumentationen` 1.086, `Beitrag` 44, `Dokumentation` 20. |
+| 3 Schreibvarianten (Case) | **ja, stark** (6 Gruppen, 1.539 Z.) | Versalien vs. Kleinschreibung: `PHOENIX RUNDE`/`phoenix runde` (31/830), `UNTER DEN LINDEN`/`unter den linden`, `PRESSECLUB`/`Presseclub`, `INTERNATIONALER FRÜHSCHOPPEN`/`internationaler frühschoppen`. |
+| 4 "Film von" | **nein** (0) | |
+| 5 Episoden ohne Klammern | **ja, klein** (50 Z.) | |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **nein** (0) | |
+| 8 Beschreibungs-Metazeile | **nein** (4 Z.) | |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+Kein neuer Befund. PHOENIX ist ein starker Beleg, dass Befund 3 (Case-Folding)
+gross angelegt Dubletten aufloesen wuerde.
