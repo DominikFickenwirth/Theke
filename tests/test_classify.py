@@ -55,7 +55,7 @@ def test_classify_migration_upgrades_v1_db(tmp_path):
 
 
 # -- pure classify(): expected values are hand-derived from the sender ---------
-# conventions (analysis/EXTRACTION_SCHEMA.md), not produced by the extractor.
+# broadcaster conventions, not produced by the extractor.
 
 def test_classify_returns_exactly_the_classify_columns():
     r = classify("ARD", "Tatort", "Der Fall", "", 5400)

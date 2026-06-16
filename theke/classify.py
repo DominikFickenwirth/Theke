@@ -1,8 +1,8 @@
 # -- metadata extraction (phase 3, part 1) ----------------------------------
 # Pure, deterministic: one mediathek row -> structured metadata, following the
-# per-sender conventions documented in analysis/EXTRACTION_SCHEMA.md. Ported
-# from the validated prototype (analysis/extract.py). Conservative: a field
-# stays None when no convention applies.
+# per-sender broadcaster conventions reverse-engineered for phase 3 (see git
+# history). Conservative: a field stays None when no convention applies. Run
+# `theke classify --dry-run` to re-measure per-sender coverage after a change.
 import re
 
 CATWORD = (r'Spielfilm|Fernsehfilm|TV-Film|Dokumentarfilm|Dokumentation|Dokudrama'
