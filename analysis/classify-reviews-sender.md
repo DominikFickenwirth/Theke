@@ -354,3 +354,55 @@ duerfte bei anderen Sendern wiederkehren.
 - `analysis/_audit_ard.py` -- ARD-Audit: Befund-1-6-Recurrence + Befunde 7-9
   (Pipe-Topics, Beschreibungs-Metazeile, Marker/Case-Varianten).
   Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/_audit_ard.py`.
+
+## SRF
+
+> Ab hier laeuft das Audit ueber das generische `analysis/_audit_sender.py`
+> (siehe Anhang). Die Befunde 1-9 sind der etablierte Katalog (Definitionen in
+> Abschnitt 3Sat/ARD); pro Sender wird ihr Zutreffen geprueft und Neues ab 10
+> nummeriert.
+
+### Kernbefund
+
+SRF (102.286 Z., 895 Topics) wird massiv von **Clip-Sammeltopics** dominiert:
+allein `Sport-Clip` hat **41.657** Zeilen, alle Clip/Flash/Videos-Sammeltopics
+zusammen **48.996 (48 %)**. Das ist Befund 1 in Reinform und im groessten
+Massstab: `series_name="Sport-Clip"` / `"Sportflash"` / `"SRF News Videos"` /
+`"Paris 2024 Clips"` sind Format-/Clip-Rubriken, keine Serien. Routing-Loesung
+wie gehabt: -> `category` (meist `Clip`), `series_name=NULL`.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | SRF | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **ja, dominant** | 48.996 Z. Clip/Flash/Videos-Sammeltopics; `Film` 83. |
+| 2 category mischt Format/Genre | strukturell ja | Topics liefern kaum Genre. |
+| 3 Schreibvarianten (Case) | **nein** | 1 Gruppe, 6 Z. |
+| 4 "Film von"-Credit | **kaum** (5 Z.) | SRF nicht in `TITLE_META_SENDERS`. |
+| 5 Episoden ohne Klammern | **ja** (439 Z.) | |
+| 6 Datum "vom" | **nein** (0 Z.) | |
+| 7 Pipe-Suffix | **nein** (0 Z.) | |
+| 8 Beschreibungs-Metazeile | **ja, winzig** | Metazeile feuert nur 65x, davon ~56 Müll-`country` (`zur Women’s EURO`, `der FIFA erzählt den Weg zur WM`) -- hohe Fehlerquote, kleine Menge. |
+| 9 Marker im Topic | **ja, Suffix-Variante** | siehe Befund 10. |
+
+### Befund 10 -- Barrierefreiheits-Marker als Suffix ohne Klammern (" in Gebärdensprache")
+
+Verwandt mit Befund 9, aber mechanisch anders: SRF haengt den Marker **ohne
+Klammern** als Suffix an, daher greift weder `take_parens` (sucht Klammern) noch
+sonst etwas:
+
+```
+topic="Tagesschau in Gebärdensprache" (1689)
+  -> series_name="Tagesschau in Gebärdensprache"   (statt "Tagesschau", flag S)
+```
+
+**6.239 Zeilen** tragen das Suffix ` in Gebärdensprache` (Tagesschau 1689,
+Schweiz aktuell 1097, Boerse 839, ...); das Flag `S` ist dabei nur **1x** gesetzt.
+Doppelschaden wie Befund 9: Abspaltung vom Basis-`series_name` plus fehlendes
+Flag. Fix-Ansatz: Marker-Erkennung nicht nur in Klammern, sondern auch als
+Titel-/Topic-Suffix (` in Gebärdensprache`, ` mit Gebärdensprache`).
+
+### Anhang (SRF)
+
+- `analysis/_audit_sender.py "SRF"` -- generisches Sender-Audit (alle Sender
+  ab hier). Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/_audit_sender.py "SRF"`.
