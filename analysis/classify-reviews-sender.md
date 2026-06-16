@@ -1,941 +1,205 @@
-# Phase 3 Heuristik-Review
+# Phase 3 Heuristik-Review -- Befunde pro Sender
 
-> Sichtung der `theke classify`-Ergebnisse fuer die Sender in
-> `build/theke.db` (19.277 Zeilen, 377 verschiedene Topics). Nur Ueberblick und
-> Befunde -- noch keine Code-Aenderung. Reproduktion siehe Abschnitt "Anhang".
+> Sichtung der `theke classify`-Ergebnisse je Sender in `build/theke.db`.
+> **Befund-Definitionen, Loesungen und die Sender x Befund-Matrix:**
+> siehe `classify-reviews-summary.md`. Hier nur die *zutreffenden* Befunde je
+> Sender mit Zahlen; nicht genannte Befunde treffen nicht (nennenswert) zu.
+> Audit-Skripte im Anhang.
 
-## 3sat
+## Befund-Legende (Kurzform)
 
-### Kernbefund
+- **B1** `series_name` ist Format/Genre/Container statt Serie (Topic woertlich uebernommen).
+- **B2** `category` vermischt Format und Genre (ein Feld, zwei Konzepte).
+- **B3** Schreibvarianten (Case/Diakritika/Abk./Tippfehler) zersplittern denselben `series_name`.
+- **B4** `- Film von <Regie>`-Credit bleibt im `clean_title` (bare "Film" nicht in `CATWORD`).
+- **B5** Episoden-Notation ohne Klammern (`n/m`, `Teil n`, `Staffel n, Folge m`) nicht erkannt.
+- **B6** Metazeile-Falschtreffer auf Sendedatum (`... CATWORD vom DD. Monat YYYY`).
+- **B7** Pipe-Suffix im Topic bleibt im `series_name` (`PIPESUF` laeuft nur auf dem Titel).
+- **B8** Beschreibungs-Metazeile zieht Satzfragmente -> falsche category/country/year @ conf 0.9 (Sender ausserhalb `TITLE_META_SENDERS`).
+- **B9** Klammer-Marker im Topic (`(Gebärdensprache)`/`(ÖGS)`) nicht erkannt -> `series_name` verschmutzt, Flag fehlt.
+- **B10** Barrierefreiheits-Marker als **Suffix** ohne Klammern (` in Gebärdensprache`, ` in Einfacher Sprache`); teils Vokabel-Luecke in `MARKERS`.
+- **B11** ARTE-Taxonomie (`ARTE_CAT`/`ARTE_SUB`) nur deutsch -> fremdsprachige ARTE-Kanaele fallen durch.
 
-`classify` setzt fuer jeden Nicht-ARTE-Sender blind `series_name = topic`
-(`classify.py:112-115`, Pass 4). Bei 3Sat ist `topic` aber nur in ~63 % der
-Faelle ein echter Serientitel. Der Rest sind **Format-** oder **Genre-Rubriken**,
-die faelschlich als Serie landen.
+`TITLE_META_SENDERS` = {ZDF, 3Sat} (Metazeile aus dem Titel); alle anderen aus
+der Beschreibung. ARTE-Sender: `series_name` per Design NULL, `category` aus der
+Taxonomie.
 
-**~7.125 von 19.277 Zeilen (37 %) tragen einen falschen `series_name`.**
+---
 
-Beispiel (das vom Sichten bekannte):
+## 3sat -- 19.277 Z. / 377 Topics
 
-```
-topic="Film"  title="Der andere Blick: Die Beschuetzer"
-  -> clean_title="Der andere Blick: Die Beschuetzer"
-     series_name="Film"      <-- falsch, muss NULL sein
-     category="Beitrag/Episode"
-```
+`series_name` nur zu **63 %** eine echte Serie; Rest sind Rubriken. Routing
+noetig (Format->category, Genre->genre, Serie->series_name).
 
-Die echte Serie ("Der andere Blick") steckt hier im `clean_title` vor dem
-Doppelpunkt -- genau das Material, das der geplante **2. Durchlauf** (Vergleich
-mehrerer Datensaetze) spaeter nach `series_name` hebt. Damit das funktioniert,
-**muss `series_name` jetzt NULL bleiben** statt mit der Rubrik gefuellt zu werden.
+- **B1** 7.125 (37 %): format 1.682 / genre 4.872 / strand 266 / sender 305 (`3sat`); 1.076 davon per Doppelpunkt-Muster (`Der andere Blick: ...`) im 2. Pass rueckgewinnbar. Wortlisten der Buckets -> summary (Loesung B1). `series_name == category` bei format-Topics.
+- **B2** Kronzeuge: Genre-Signal (`Natur`, `Reise`, ...) geht heute verloren.
+- **B3** `nano`/`NANO`, `makro`/`MAKRO`, `Grimme Preis`/`Grimme-Preis`, Tippfehler `Insepktor Jury`, Apostroph-Varianten.
+- **B4** 174 (`Film von`; 0 davon mit `, Land Jahr` -> reiner Credit).
+- **B5** 176 (+42 mit `n/m` im `clean_title`). Vorsicht: `3 1/2 Stunden` ist ein Titel.
+- **B6** 18 (alle `Slowenien Magazin vom <Datum>`).
+- Klein: country-Tippfehler/Spacing 11 (`Grossbritanien`, `.../ Deutschland`).
 
-### Befund 1 -- `series_name` enthaelt Format/Genre statt Serie
+## ARD -- 154.478 Z. / 1.758 Topics
 
-Die 3Sat-Topics zerfallen in drei Klassen. Vorschlag, das Topic je nach Klasse
-unterschiedlich zu routen statt es immer in `series_name` zu schreiben:
+Topics fast immer echte Programmnamen; Hauptlast bei Pipe-Suffix und Case.
 
-```
-3Sat-Topic --+--> Format-Wort       --> category (Format),  series_name=NULL, genre=NULL
-             +--> Genre-Rubrik       --> genre,              series_name=NULL
-             +--> echter Programmtitel --> series_name        (der lange Tail)
-```
+- **B7** 12.176: `buten un binnen | regionalmagazin`, `hr Retro | hessenschau`, `... | ARD Wissen`. (Serie mal vor, mal hinter dem Pipe.)
+- **B3** ~9.074 (reine Case): `aktuell`/`Aktuell (18 Uhr)`, `tagesschau`/`Tagesschau`, `ZAPP`/`Zapp`, `NACHTCAFÉ`/`NACHTCAFé`.
+- **B5** 911 (inkl. roem. `Teil III`).
+- **B9** 812 (`tagesschau (mit Gebärdensprache)`).
+- **B8** 43 sichtbar (`von`, `· Deutschland`, `über den Klimawandel aus dem Jahr`); conf 0.9 trotz Muell.
+- **B1** ~1.529: `Filme in der ARD` 1.069, `Film` 375, `Dokumentarfilm` 82. **B4** 10.
 
-#### Mengengeruest
+## SRF -- 102.286 Z. / 895 Topics
 
-| Bucket  | Zeilen | Anteil | Topics | series_name heute |
-|---------|-------:|-------:|-------:|-------------------|
-| format  |  1.682 |  8,7 % |   5    | falsch (= category) |
-| genre   |  4.872 | 25,3 % |  20    | falsch (Rubrik)     |
-| strand  |    266 |  1,4 % |  10    | falsch (Programmslot, Graubereich) |
-| sender  |    305 |  1,6 % |   1    | falsch ("3sat")     |
-| series  | 12.152 | 63,0 % | 341    | korrekt             |
+Von Clip-Sammeltopics dominiert.
 
-Von den ~7.125 zu korrigierenden Zeilen haben **1.076** das Doppelpunkt-Muster
-`Serie: Episode` im `clean_title` -- diese Serie kann der 2. Pass spaeter
-zurueckgewinnen. Der Rest sind echte Einzelfilme/-beitraege ohne Serienbezug,
-fuer die `series_name=NULL` schlicht korrekt ist.
+- **B1 dominant** 48.996 (48 %): `Sport-Clip` 41.657, `Sportflash`, `SRF News Videos`, `*Clips`.
+- **B10** 6.239: Suffix ` in Gebärdensprache` (`Tagesschau in Gebärdensprache` 1.689, ...); Flag `S` nur **1x** gesetzt.
+- **B5** 439. **B8** winzig, aber hohe Fehlerquote (Metazeile feuert 65x, ~56 Muell-country).
 
-#### Bucket "format" (5 Topics, -> spaeter Spalte `category`)
-
-`Film`, `Spielfilm`, `Fernsehfilm`, `Dokumentarfilm`, `Dokumentation`
+## ZDF -- 94.875 Z. / 1.448 Topics
 
-Doppelt falsch: hier ist heute `series_name == category` (z. B. "Good Bye,
-Lenin!" hat `series_name="Spielfilm"` **und** `category="Spielfilm"`). Diese
-Topics matchen bereits `CATWORD` in `classify.py` -- der Format-Teil ist also
-schon erkannt, nur eben zusaetzlich faelschlich als Serie dupliziert.
-
-#### Bucket "genre" (20 Topics, -> spaeter Spalte `genre`)
+Schwester von 3Sat (in `TITLE_META_SENDERS`, gleiche Genre-Rubriken) -- B1-B6 wie dort.
 
-`Reise`, `Natur`, `Musik`, `Tiere`, `Geschichte`, `Politik und Gesellschaft`,
-`Esskulturen`, `Kulturdoku`, `Kultur`, `Gesellschaft`, `Wissen`, `Buch`,
-`Wissenschaftsdoku`, `Theater`, `Maerchen`, `Kabarett`, `Kabarett & Comedy`,
-`Kabarett / Comedy`, `mehr Kabarett`, `Kulturdoku in 3sat`, `3sat-Kulturdoku`
+- **B1** 5.222 Genre (`Politik` 2.392, `Sport` 1.261, `Nachrichten` 980, + 3Sat-Garnitur) + Strand `ZDFinfo Doku` 3.480.
+- **B3** 6.192: `ZDFinfo Doku`/`doku`, `NANO`/`nano` (1206/246), `Scobel`/`scobel`.
+- **B4** 68. **B5** 170. **B6** 12.
 
-Diese editorialen Themen-Rubriken sammeln voellig unterschiedliche Sendungen
-(unter `Natur` z. B. "Faszinierende Erde: Gletscher", "mareTV: Norderney",
-"Geheimnisvolle Wiesenwelt"). Als Serie unbrauchbar, als Genre-Signal aber
-wertvoll -- heute geht diese Information komplett verloren (siehe Befund 2).
-
-#### Graubereich "strand" (10 Topics) -- Entscheidung offen
+## NDR -- 49.318 Z. / 432 Topics
 
-Programmslots/Sendeplaetze, keine Serien: der Inhalt ist meist ein
-eigenstaendiger Film, dessen Titel im `clean_title` steht.
+Gut klassifiziert: Topics durchweg echte Programm-/Serien-Namen.
 
-`Der Fernsehfilm der Woche`, `ZDF-Fernsehfilm`, `Das kleine Fernsehspiel`,
-`Dokumentarfilmzeit`, `Herzkino`, `Krimisommer`, `3satPublikumspreis`,
-`3satZuschauerpreis`, `Festspielsommer`, `Retro-Serie: Lederstrumpf`
-
-Beispiel: `topic="Herzkino"` -> Film "Das Maedchen mit dem indischen Smaragd".
-"Herzkino" ist weder Serie noch Genre noch Format. Kandidaten:
-`series_name=NULL` (mein Vorschlag) **oder** ein eigenes Feld "strand/slot".
-`Retro-Serie: Lederstrumpf` ist ein Sonderfall -- die echte Serie ("Lederstrumpf")
-steckt nach dem Praefix.
+- **B8** winzig (11; `über den Klimawandel aus dem Jahr`). **B5** 36. **B3** 19.
+- Beobachtung: Editions-Suffixe (`Hamburg Journal` vs `Hamburg Journal 18:00 Uhr`) -- evtl. echte Ausgaben, kein klarer Fehler.
 
-> **Offene Frage 1:** Strands wie Einzelfilme behandeln (`series_name=NULL`) oder
-> als eigene Dimension erfassen?
-
-#### Graubereich "event" (innerhalb "series" belassen) -- Entscheidung offen
-
-Wiederkehrende Marken-Events, die ich vorerst als legitimen `series_name`
-eingestuft habe, aber diskutabel: `Berlinale`, `Buchmesse`, `Grimme Preis`,
-`Wiener Opernball`, `MuVi-Preis`, `Tage der deutschsprachigen Literatur`,
-`3satFestival`, `Festspielsommer`.
-
-> **Offene Frage 2:** Events als Serie zaehlen oder ausnehmen?
-
-### Befund 2 -- `category` vermischt Format und Genre
-
-`category` traegt heute zwei verschiedene Konzepte im selben Feld:
-
-| Konzept | Werte | Quelle im Code |
-|---------|-------|----------------|
-| **Format/Typ** (was es *ist*) | Spielfilm, Fernsehfilm, Dokumentarfilm, Kurzfilm, Magazin, Reportage, Clip, Beitrag/Episode, unklar | Metazeile, CATWORD, Dauer-Prior |
-| **Genre/Thema** (wovon es *handelt*) | Reise, Natur, Musik, Geschichte, ... | 3Sat-Topic-Rubrik (geht heute verloren) |
-
-Heutige `category`-Verteilung fuer 3Sat:
-
-```
-8016  Beitrag/Episode      <- Dauer-Prior (1801-1800s), schwaches Signal
-7212  unklar               <- Dauer-Prior, kein Signal
-2187  Clip
- 886  Fernsehfilm          \
- 660  Spielfilm             |  echte Format-Signale aus Metazeile/CATWORD
- 226  Dokumentarfilm        |
-  35  Kurzfilm             /
- ...  (Magazin, Thriller, Drama, Komoedie, Krimi, ...)
-  20  None
-```
-
-Solange beide Konzepte um ein Feld konkurrieren, geht das Genre-Signal aus dem
-Topic verloren bzw. landet faelschlich in `series_name`. **Eine getrennte Spalte
-`genre` loest Befund 1 und Befund 2 in einem Zug:** ein Topic wird dann sauber
-dreigeteilt geroutet (Format -> `category`, Genre -> `genre`, Serie ->
-`series_name`), nichts kollidiert mehr.
-
-Empfehlung (Schema): neue Spalte `genre` in Tabelle `mediathek` und in
-`CLASSIFY_COLS`. `category` bleibt rein Format/Typ.
-
-### Befund 3 -- Schreibvarianten zersplittern denselben Serientitel
-
-Die Quelle liefert denselben Programmtitel uneinheitlich; jede Variante wird
-heute ein eigener `series_name`. Relevant fuer den 2. Pass (Normalisierung) und
-die spaetere Queue-Deduplizierung:
-
-| Variante A | Variante B | weitere |
-|------------|------------|---------|
-| `nano` (1296) | `NANO` (824) | `NANO Doku`, `NANO Talk` |
-| `makro` (107) | `MAKRO` (54) | |
-| `Schweizweit` (50) | `SCHWEIZWEIT` (57) | |
-| `kinokino` (120) | `KinoKino` (8) | |
-| `Pop Around the Clock` (85) | `Pop around the clock` (2) | |
-| `NETZ NATUR` (8) | `Netz Natur` (2) | |
-| `Museums-Check` (36) | `Museumscheck` (25) | |
-| `Grimme Preis` (23) | `Grimme-Preis` (17) | |
-| `Inspektor Jury` (7) | `Insepktor Jury` (1) | Tippfehler in der Quelle |
-
-Auch Apostroph-Varianten (`Liebesg´schichten`, `Fraueng'schichten` vs.
-`Fraueng´schichten`) und Tippfehler (`Traumfhafte Bahnstrecken der Schweiz`)
-kommen vor. -> Case-/Diakritika-Normalisierung beim Serien-Matching im 2. Pass.
-
-### Befund 4 -- "- Film von <Regisseur>"-Credit bleibt im clean_title
-
-Das bare Wort **"Film"** steht *nicht* in `CATWORD`, nur die Komposita
-(Spielfilm, Fernsehfilm, ...). 3Sat haengt aber an Doku-Beitraege haeufig einen
-Regie-Credit `- Film von <Name>`/`- Dokumentarfilm von <Name>` an -- der wird weder als Metazeile erkannt noch
-abgeschnitten und bleibt im `clean_title` stehen:
-
-```
-title="Schwanger auf Norderney - Film von Birgit Stamerjohanns"
-  -> clean_title="Schwanger auf Norderney - Film von Birgit Stamerjohanns"  <-- Credit-Rest
-```
-
-**174 clean_titles** enthalten "Film von". Anders als bei der echten Metazeile
-ist hier *nichts* zu gewinnen: von 347 "Film von"-Titeln traegt **kein einziger**
-ein nachgestelltes ", Land Jahr" -- es ist reiner Regie-Credit. Also nur
-abschneiden (wie der `PIPESUF`-Suffix), keine country/year-Extraktion.
-Betroffen v. a. `Die Nordreportage`, `Terra X`, `ZDF.reportage`.
-
-### Befund 5 -- Episoden-Notation ohne Klammern wird nicht erkannt
-
-`PART` (`(n/m)`) und `SE_B` (`(Staffel N, Folge M)`) verlangen **Klammern**.
-3Sat schreibt die Staffel/Folge-Angabe aber oft *ohne*:
-
-```
-"Unsere wilde Schweiz 3/4"              -> episode/episode_count NULL, "3/4" bleibt im clean_title
-"Wunderwelt Schweiz 2/4 - Winterliches Graubuenden"
-"Die wilden Philippinen - Teil 1"      -> episode NULL
-"Wilder: Frost, Staffel 3, Folge 3"    -> season/episode NULL
-```
-
-Vorsicht: "3 1/2 Stunden" ist ein Filmtitel!
-
-**176 episodische Titel** liefern weder `season` noch `episode`; bei **42**
-bleibt zusaetzlich die "n/m"-Angabe im `clean_title` stehen. Kandidaten fuer
-zusaetzliche Muster: ` <n>/<m>` (ohne Klammern, am Wortende), `- Teil <n>`,
-`Staffel <n>, Folge <m>` (ohne Klammern).
-
-### Befund 6 -- Metazeile-Falschtreffer auf das Sendedatum
-
-`META` matcht `CATWORD <country> <year>`. Ein Titel `... <CATWORD> vom
-DD. Monat YYYY` triggert das faelschlich: das Sendedatum wird als Land+Jahr
-gelesen.
-
-```
-title="Slowenien Magazin vom 21. September 2023"
-  -> category="Magazin"  country="vom 21. September"  year=2023   (alles falsch)
-```
-
-**18 Zeilen** (alle `Slowenien Magazin`) bekommen so ein `country="vom ..."`.
-Das `year` ist hier ausserdem das **Sende-**, nicht das Produktionsjahr -- ein
-generelleres Problem: `year` aus Metazeile/`(YYYY)` mischt beide Bedeutungen,
-was das spaetere TMDB-Matching stoeren kann. Fix-Ansatz: Metazeile verwerfen,
-wenn der country-Slot mit "vom" beginnt bzw. wie ein Datum aussieht.
-
-### Kleinere Beobachtungen
-
-- **country-Normalisierung:** Quell-Tippfehler `Grossbritanien` (statt
-  Grossbritannien) und Leerzeichen-Artefakte wie `Australien/China/ Deutschland`
-  (zusammen 11 Zeilen). Kosmetisch, erst beim Land-Mapping relevant.
-- **degenerierter clean_title:** die 20 unklassifizierten Zeilen aus Befund 7
-  sind zugleich die einzigen mit `clean_title IS NULL`; sonst keine leeren Titel.
-
-### Empfehlung (Reihenfolge)
-
-1. **classify-State entkoppeln** (Befund 7): nicht mehr `status` recyceln, sonst
-   bleiben 3.873 Zeilen unklassifiziert. Vorbedingung fuer alles Weitere, da
-   sonst Reklassifikation unvollstaendig ist.
-2. **Spalte `genre`** zu `mediathek` + `CLASSIFY_COLS` hinzufuegen; `category`
-   auf Format/Typ reduzieren (Befund 1 + 2).
-3. **Topic-Routing pro Sender**: 3Sat-Topic nach Format / Genre / Serie
-   aufteilen (Format- und Genre-Set kuratiert, analog `ARTE_CAT`/`ARTE_SUB`).
-   Format/Genre/Strand/Sender -> `series_name=NULL`.
-4. **Heuristik-Feinschliff**: `- Film von <Name>`-Credit abschneiden (Befund 4);
-   klammerlose Episoden-Notation `n/m` / `Teil n` / `Staffel n, Folge m` erkennen
-   (Befund 5); Metazeile bei `vom <Datum>` verwerfen (Befund 6).
-5. Strand- und Event-Behandlung klaeren (offene Fragen 1 + 2).
-6. Schreibvarianten + country-Normalisierung erst im 2. Pass (nicht jetzt).
-
-> **Offene Frage 3 (Genre-Quelle):** vom Nutzer bewusst zurueckgestellt -- wir
-> machen erst 3Sat, andere Sender spaeter. Die Wahl zwischen "kuratiertes Set
-> pro Sender" und "Heuristik + kleines Set" faellt, wenn mehr Sender gesichtet
-> sind.
-
-### Anhang -- Reproduktion
-
-- `analysis/_topics_dump.txt` -- alle 377 Topics mit Haeufigkeit + 2
-  Beispiel-Titeln (Basis der Bucket-Einteilung).
-- `analysis/_bucket_3sat.py` -- Bucket-Logik + Mengengeruest (Befund 1).
-- `analysis/_audit_3sat.py` -- Tiefen-Audit der uebrigen Felder (Befund 4-7:
-  clean_title-Reste, country, year, season/episode, language, flags, confidence).
-
-Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/<datei>.py`. Alle drei
-sind temporaere Hilfsdateien (Praefix `_`), kein Bestandteil des CLI.
-
-## ARD
-
-### Kernbefund
-
-ARD ist mit **154.478 Zeilen** der groesste Sender und ein Dachsender mit
-**1.758** verschiedenen Topics. Anders als bei 3Sat sind die Topics fast immer
-**echte Programmnamen** (Nachrichten, Regionalmagazine, Telenovelas, Tatort) --
-der 3Sat-Hauptbefund (Topic = Format/Genre-Rubrik) trifft hier also nur am Rand
-zu. Dafuer treten drei neue Muster auf, alle mit derselben Wurzel:
-
-> **Gemeinsame Ursache (Befund 7 + 9, Teil von 3):** `series_name = topic` wird
-> *woertlich* uebernommen. Die Titel-Reinigungspaesse -- Pass 1 `take_parens`
-> (Klammer-Marker) und der `PIPESUF`-Suffixschnitt -- laufen nur auf dem
-> **Titel**, nie auf dem Topic. Jede Verunreinigung im Topic (Marker, Pipe,
-> Gross-/Kleinschreibung, Untertitel) landet damit ungefiltert im `series_name`.
-
-### Treffen die 3Sat-Befunde 1-6 zu?
-
-| Befund | ARD | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **teilweise**, klein | Format/Strand-Topics ~1.529 Z.: `Filme in der ARD` (1.069), `Film` (375), `Dokumentarfilm` (82). Genre-Rubriken wie bei 3Sat: praktisch keine. |
-| 2 category mischt Format/Genre | **strukturell ja** | Gilt sender-uebergreifend; bei ARD liefern die Topics aber kaum Genre-Signal, die `genre`-Spalte bliebe meist leer. |
-| 3 Schreibvarianten | **ja, stark** | Reine Case-Varianten, 20 Gruppen, **~9.074 Z.** (siehe Befund-Erweiterung unten). |
-| 4 "Film von"-Credit | **kaum** (10 Z.) | ARD ist nicht in `TITLE_META_SENDERS`, zieht Metazeile aus der Beschreibung -- "Film von" im Titel wird gar nicht angefasst. |
-| 5 Episoden ohne Klammern | **ja** (911 Z.) | u. a. `- Teil 2/2`, roemisch `Teil III`, `Teil 5`. |
-| 6 Datum-Falschtreffer "vom" | **nein** (0 Z.) | Date-Titel treffen die Beschreibungs-Metazeile nicht. |
-
-Erweiterung zu **Befund 3**: bei ARD ist die Zersplitterung fast rein
-**Gross-/Kleinschreibung** und damit mechanisch normalisierbar:
-
-```
-aktuell (18 Uhr) (1153)   vs  Aktuell (18 Uhr) (867)
-tagesschau (1654)         vs  Tagesschau (5)
-tagesthemen (986)         vs  Tagesthemen (3)
-ZAPP (325)                vs  Zapp (23)
-NACHTCAFÉ (85)            vs  NACHTCAFé (19)      <- Akzent-Case
-report MÜNCHEN (41)       vs  report München (49)
-```
-
-### Befund 7 -- Pipe-Suffix im Topic bleibt im series_name
-
-`PIPESUF` schneidet einen `| Reihe`-Suffix nur vom **Titel**, nicht vom Topic.
-Da `series_name = topic`, behalten **12.176 Zeilen** den Pipe-Suffix:
-
-```
-series_name="buten un binnen | regionalmagazin"  (1703)  -> sollte "buten un binnen"
-            "hr Retro | hessenschau"             (899)
-            "buten un binnen | sportblitz"       (283)
-            "alpha Lernen | Physik"              (10)
-```
-
-Das zersplittert dieselbe Sendung (`buten un binnen | regionalmagazin / sportblitz
-/ wetter`; `hr Retro | hessenschau / Abendschau / Der Markt`).
-
-> **Offene Frage 4:** Die Serie steht **mal vor, mal hinter** dem Pipe:
-> bei `buten un binnen | regionalmagazin` ist die Serie *vorne*, bei
-> `Auf Spurensuche | ARD Wissen` (23) bzw. `Mein Körper | ARD Wissen` (7) ist
-> `ARD Wissen` die *Dachmarke* und der Show-Titel steht vorne. Blindes Abschneiden
-> des Suffixes waere also nicht immer richtig.
-
-### Befund 8 -- Beschreibungs-Metazeile zieht Satzfragmente (falsche category/country/year bei hoher Confidence)
-
-Weil ARD nicht in `TITLE_META_SENDERS` steht, sucht `META` die
-`CATWORD <country> <year>`-Sequenz in der **Beschreibung** -- also in
-Fliesstext/Credits. Das produziert frei erfundene Felder, und zwar mit
-**Confidence 0.9** (Metazeile gilt als sicher), was den Fehler besonders
-heimtueckisch macht:
-
-```
-title="Deutschland 2050: Die Zukunft und die Klimakrise"
-  -> category="Serie"  country="über den Klimawandel aus dem Jahr"  year=2019   (frei erfunden)
-
-title="Puccini · Magier der Leidenschaft · Doku · ... · SR · 2008"
-  -> category="Dokumentation"  country="von"  year=2008
-```
-
-Sichtbar falsch sind **43 Zeilen** mit Satzfragment-`country` (`von` 12,
-`· Deutschland` 8, `über den Klimawandel aus dem Jahr` 5, ...). Die Dunkelziffer
-bei `category`/`year` ist hoeher, da jede Beschreibung mit einem CATWORD + Jahr
-falsch greifen kann. Fix-Ansatz: Metazeile nur akzeptieren, wenn der
-country-Slot wie ein Land aussieht (Grossbuchstabe, keine Funktionswoerter wie
-`von/über/aus/im`).
-
-### Befund 9 -- Klammer-Marker im Topic nicht erkannt
-
-Pass 1 `take_parens` (Audiodeskription/Gebaerdensprache/OmU -> Flags/Sprache)
-laeuft nur auf dem Titel. Im Topic bleibt der Marker stehen:
-
-```
-topic="tagesschau (mit Gebärdensprache)" (812)
-  -> series_name="tagesschau (mit Gebärdensprache)"   (statt series_name="tagesschau", flag S)
-```
-
-Doppelter Schaden: der `series_name` wird vom regulaeren `tagesschau` (1654)
-abgespalten, **und** das Flag `S` (Gebaerdensprache) wird nicht gesetzt. Bei ARD
-betrifft das nur dieses eine Topic (812 Z.), das Muster ist aber generisch und
-duerfte bei anderen Sendern wiederkehren.
-
-### Anhang (ARD)
-
-- `analysis/_audit_ard.py` -- ARD-Audit: Befund-1-6-Recurrence + Befunde 7-9
-  (Pipe-Topics, Beschreibungs-Metazeile, Marker/Case-Varianten).
-  Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/_audit_ard.py`.
-
-## SRF
-
-> Ab hier laeuft das Audit ueber das generische `analysis/_audit_sender.py`
-> (siehe Anhang). Die Befunde 1-9 sind der etablierte Katalog (Definitionen in
-> Abschnitt 3Sat/ARD); pro Sender wird ihr Zutreffen geprueft und Neues ab 10
-> nummeriert.
-
-### Kernbefund
-
-SRF (102.286 Z., 895 Topics) wird massiv von **Clip-Sammeltopics** dominiert:
-allein `Sport-Clip` hat **41.657** Zeilen, alle Clip/Flash/Videos-Sammeltopics
-zusammen **48.996 (48 %)**. Das ist Befund 1 in Reinform und im groessten
-Massstab: `series_name="Sport-Clip"` / `"Sportflash"` / `"SRF News Videos"` /
-`"Paris 2024 Clips"` sind Format-/Clip-Rubriken, keine Serien. Routing-Loesung
-wie gehabt: -> `category` (meist `Clip`), `series_name=NULL`.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | SRF | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **ja, dominant** | 48.996 Z. Clip/Flash/Videos-Sammeltopics; `Film` 83. |
-| 2 category mischt Format/Genre | strukturell ja | Topics liefern kaum Genre. |
-| 3 Schreibvarianten (Case) | **nein** | 1 Gruppe, 6 Z. |
-| 4 "Film von"-Credit | **kaum** (5 Z.) | SRF nicht in `TITLE_META_SENDERS`. |
-| 5 Episoden ohne Klammern | **ja** (439 Z.) | |
-| 6 Datum "vom" | **nein** (0 Z.) | |
-| 7 Pipe-Suffix | **nein** (0 Z.) | |
-| 8 Beschreibungs-Metazeile | **ja, winzig** | Metazeile feuert nur 65x, davon ~56 Müll-`country` (`zur Women’s EURO`, `der FIFA erzählt den Weg zur WM`) -- hohe Fehlerquote, kleine Menge. |
-| 9 Marker im Topic | **ja, Suffix-Variante** | siehe Befund 10. |
-
-### Befund 10 -- Barrierefreiheits-Marker als Suffix ohne Klammern (" in Gebärdensprache")
-
-Verwandt mit Befund 9, aber mechanisch anders: SRF haengt den Marker **ohne
-Klammern** als Suffix an, daher greift weder `take_parens` (sucht Klammern) noch
-sonst etwas:
-
-```
-topic="Tagesschau in Gebärdensprache" (1689)
-  -> series_name="Tagesschau in Gebärdensprache"   (statt "Tagesschau", flag S)
-```
-
-**6.239 Zeilen** tragen das Suffix ` in Gebärdensprache` (Tagesschau 1689,
-Schweiz aktuell 1097, Boerse 839, ...); das Flag `S` ist dabei nur **1x** gesetzt.
-Doppelschaden wie Befund 9: Abspaltung vom Basis-`series_name` plus fehlendes
-Flag. Fix-Ansatz: Marker-Erkennung nicht nur in Klammern, sondern auch als
-Titel-/Topic-Suffix (` in Gebärdensprache`, ` mit Gebärdensprache`).
-
-### Anhang (SRF)
-
-- `analysis/_audit_sender.py "SRF"` -- generisches Sender-Audit (alle Sender
-  ab hier). Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/_audit_sender.py "SRF"`.
-
-## ZDF
-
-### Kernbefund
-
-ZDF (94.875 Z., 1.448 Topics) ist der Schwester-Sender von 3Sat und verhaelt
-sich auch so: er steht mit in `TITLE_META_SENDERS` (Metazeile aus dem **Titel**)
-und nutzt **dieselben Genre-Rubriken** als Topic. Alle 3Sat-Befunde kehren
-wieder, kein neues Muster. `series_name`-Rubriken: **5.222 Z.** Genre
-(`Politik` 2.392, `Sport` 1.261, `Nachrichten` 980, dann die 3Sat-Garnitur
-`Politik und Gesellschaft`/`Kultur`/`Wissen`/`Musik`/`Geschichte`/...) plus den
-Strand `ZDFinfo Doku` (3.480).
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | ZDF | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **ja** | 5.222 Z. Genre-Rubriken + 3.480 Z. Strand `ZDFinfo Doku`. |
-| 2 category mischt Format/Genre | **ja** | Genre-Rubriken wie bei 3Sat -- `genre`-Spalte gut befüllbar. |
-| 3 Schreibvarianten (Case) | **ja** (7 Gruppen, 6.192 Z.) | `ZDFinfo Doku`/`ZDFinfo doku`, `NANO`/`nano` (1206/246), `Scobel`/`scobel`. |
-| 4 "Film von"-Credit | **ja** (68 Z.) | ZDF in `TITLE_META_SENDERS`, bare "Film" nicht in CATWORD. |
-| 5 Episoden ohne Klammern | **ja** (170 Z.) | season/episode sonst gut (14.114/14.818 via `(S/E)`). |
-| 6 Datum "vom" | **ja** (12 Z.) | `vom 1. Februar`, plus Sport-Fragmente `gegen Norderstedt - DFB-Pokal`. |
-| 7 Pipe-Suffix | **nein** (0 Z.) | |
-| 8 Beschreibungs-Metazeile | **n. a.** | ZDF zieht Metazeile aus dem Titel, nicht der Beschreibung. |
-| 9/10 Marker im Topic | **kaum** (2 Z.) | ZDF setzt Marker im Titel -- Flags `S` 4.083, `A` 3.583 korrekt. |
-
-Keine neuen Befunde: ZDF ist der Modellfall, fuer den die 3Sat-Heuristik
-gebaut wurde. Bestaetigt die Genre-Rubrik-Liste (gemeinsam mit 3Sat) und liefert
-drei haeufige Zusatz-Rubriken (`Politik`, `Sport`, `Nachrichten`) fuers
-kuratierte Genre-Set.
-
-## NDR
-
-### Kernbefund
-
-NDR (49.318 Z., 432 Topics) ist ein **gut klassifizierter** Sender: die Topics
-sind durchweg echte Programm-/Serien-Namen (Regionalmagazine `NDR Info`,
-`Nordmagazin`, `Hamburg Journal`; Serien `Morden im Norden`, `Großstadtrevier`,
-`Die Kanzlei`). **Keine** Format-/Genre-Rubriken als Topic -- Befund 1 entfaellt.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | NDR | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **nein** (0) | keine Rubrik-Topics. |
-| 3 Schreibvarianten (Case) | **nein** (19 Z.) | nur `NDR Talk Show Classics`/`classics`. |
-| 4 "Film von" | **nein** (1) | NDR zieht Metazeile aus der Beschreibung. |
-| 5 Episoden ohne Klammern | **marginal** (36 Z.) | |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **nein** (0) | |
-| 8 Beschreibungs-Metazeile | **ja, winzig** (11 Z.) | `über den Klimawandel aus dem Jahr` u. a.; Metazeile feuert nur 57x. |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-### Kleinere Beobachtung -- Editions-/Zeitslot-Suffixe
-
-Regionalmagazine erscheinen unter Haupt- **und** Ausgaben-Topic
-(`Hamburg Journal` 5.991 vs `Hamburg Journal 18:00 Uhr` 1.129;
-`Nordmagazin` 6.922 vs `Nordmagazin - Land und Leute` 489;
-`Hallo Niedersachsen` 5.425 vs `Niedersachsen 18.00` 1.038). Ob das echte
-getrennte Ausgaben sind oder zu vereinheitlichen waere, ist eine inhaltliche
-Frage fuer den 2. Pass -- kein klarer Fehler. Sonst keine neuen Befunde.
-
-## SWR
-
-### Kernbefund
-
-SWR (37.077 Z., 477 Topics) ist ueberwiegend sauber (Landesschau, SWR Aktuell,
-SWR Retro, Tatort, Die Fallers). Auffaellig sind nur moderate Auspraegungen
-bekannter Befunde, kein neues Muster.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | SWR | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **ja, klein** (~520 Z.) | `Film` 219, `Dokumentarfilm` 80, Rubrik `Doku & Reportage` 221. |
-| 3 Schreibvarianten (Case) | **ja** (4 Gruppen, 1.032 Z.) | `planet schule`/`Planet Schule` (636/61), Akzent-Case `NACHTCAFÉ`/`NACHTCAFé`, `SWR Extra`/`SWR extra`. |
-| 4 "Film von" | **nein** (1) | Metazeile aus Beschreibung. |
-| 5 Episoden ohne Klammern | **ja** (148 Z.) | |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **ja, winzig** (16 Z.) | `Mein Körper | ARD Wissen`, `Auf Spurensuche | ARD Wissen` -- derselbe senderuebergreifende `ARD Wissen`-Strang wie bei ARD (bestaetigt Offene Frage 4: Serie steht *vor* dem Pipe). |
-| 8 Beschreibungs-Metazeile | **ja, winzig** (4 Z.) | |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-Keine neuen Befunde.
-
-## SR
-
-### Kernbefund
-
-SR (23.794 Z., 681 Topics, saarlaendisch-regional). Zwei Auffaelligkeiten:
-ein generischer **Container-Topic `Beiträge` (3.514 Z.)** als `series_name`
-(keine Serie -- Sammelbecken, wie SRFs `Sport-Clip`), und besonders viele
-**Schreibvarianten**.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | SR | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **ja** | Container/Rubrik-Topics: `Beiträge` 3.514, `SR` 748, `aktuell` 700, `SR 3 Videos` 256, `Dokumentationen und Reportagen` 226. CATWORD-Treffer: keine. |
-| 3 Schreibvarianten | **ja, stark** (9 Gruppen, 2.917 Z.) | `das saarlandwetter`/`Das Saarlandwetter` (1796/1), `AUS CHRISTLICHER SICHT`/`aus christlicher sicht` (179/89), `kabarett.com`/`Kabarett.com`. Plus **Abkuerzungs**-Variante: `WimS` (543) == `Wir im Saarland`. |
-| 4 "Film von" | **nein** (2) | |
-| 5 Episoden ohne Klammern | **ja** (95 Z.) | |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **nein** (0) | |
-| 8 Beschreibungs-Metazeile | **nein** | Metazeile feuert nur 2x. |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-Beobachtung: `Wir im Saarland - Service/Kultur/Grenzenlos/...` sind
-Sub-Magazin-Suffixe (wie NDRs Editionen); die Abkuerzung `WimS` waere zusaetzlich
-zu normalisieren (Befund 3, ueber reines Case hinaus). Kein neuer Befund.
-
-## KiKA
-
-### Kernbefund
-
-KiKA (22.827 Z., 639 Topics, Kinderkanal) ist **sehr sauber**: die Topics sind
-durchweg Sendungs-/Serien-Namen (`logo!`, `Die Pfefferkörner`, `Schloss
-Einstein`, `Löwenzahn`). Die KiKA-Spezialregel `LEADC` (fuehrende `NN.` ->
-Episode) greift -- **5.719** Zeilen tragen eine `episode`. Keine Format-/Genre-
-Rubriken, keine Metazeile (Kinderinhalte ohne Land/Jahr).
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | KiKA | Belege |
-|--------|------|--------|
-| 1 series_name=Format/Genre | **nein** (0) | |
-| 3 Schreibvarianten (Case) | **ja, klein** (3 Gruppen, 540 Z.) | `KiKANiNCHEN`/`Kikaninchen` (52/463). |
-| 4 "Film von" | **nein** (0) | |
-| 5 Episoden ohne Klammern | **ja, klein** (89 Z.) | sonst `episode` exzellent (5.719) dank `LEADC`. |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **nein** (0) | |
-| 8 Beschreibungs-Metazeile | **nein** (0) | |
-| 9/10 Marker im Topic | **nein** (0) | Flags `A` 1.217 / `S` 906 sauber aus dem Titel. |
-
-Keine neuen Befunde. KiKA bestaetigt, dass die `LEADC`-Episodenheuristik traegt.
-
-## WDR
-
-### Kernbefund
-
-WDR (22.533 Z., 284 Topics, regional). Ueberwiegend sauber: `WDR aktuell`,
-`Hier und heute`, viele regionale `Lokalzeit`-Ausgaben (Koeln, Dortmund,
-Muensterland, OWL, ...), `Die Maus`, `Tatort`, `Rentnercops`. Die
-`Lokalzeit`-Ausgaben sind echte getrennte Regionalausgaben, kein
-Fragmentierungs-Fehler.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | WDR | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **kaum** (~27 Z.) | `Fernsehfilm` 24, `Sport` 3. |
-| 3 Schreibvarianten (Case) | **klein** (275 Z.) | `planet schule`/`Planet Schule` (270/5) -- derselbe Cross-Sender-Fall wie SWR. |
-| 4 "Film von" | **nein** (2) | |
-| 5 Episoden ohne Klammern | **ja, klein** (86 Z.) | |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **klein** (6 Z.) | `Mein Körper | ARD Wissen` (1) + `Der Germanwings-Absturz | Chronologie eines Verbrechens` (5, hier Pipe als **Untertitel**-Trenner). |
-| 8 Beschreibungs-Metazeile | **klein** (2 Z. sichtbar) | Metazeile feuert 246x. |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-Beobachtung: der `WDR Retro`-Praefix nutzt einen Mittelpunkt-Trenner
-(`WDR Retro <Punkt> Hier und heute`, 955 Z.); fuer den 2. Pass waere er wie ein
-Praefix abzutrennen. Kein neuer Befund.
-
-## BR
-
-### Kernbefund
-
-BR (20.787 Z., 429 Topics, bayerisch-regional). Topics sind ueberwiegend echte
-Sendungen (`Dahoam is Dahoam`, `Frankenschau`, `Watzmann ermittelt`); auffaellig
-ist der **Sender-Container `BR` (2.191 Z.)** als `series_name`.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | BR | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **ja, mittel** | Sender-Container `BR` 2.191; sonst kaum. |
-| 3 Schreibvarianten (Case) | **klein** (128 Z.) | `Auf bairisch g'lacht!`/`Auf Bairisch g'lacht!`, `report München`/`report MÜNCHEN`. |
-| 4 "Film von" | **nein** (7) | |
-| 5 Episoden ohne Klammern | **ja, klein** (56 Z.) | |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **klein** (36 Z.) | `Mein Körper`/`Auf Spurensuche | ARD Wissen`; `... | Bergfreundinnen` (Serie *hinter* dem Pipe). |
-| 8 Beschreibungs-Metazeile | **klein** (9 Z.) | |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-Kein neuer Befund. Der `| Bergfreundinnen`-Fall bestaetigt erneut Offene Frage 4
-(Serie mal vor, mal hinter dem Pipe).
-
-## MDR
-
-### Kernbefund
-
-MDR (20.023 Z., 359 Topics, mitteldeutsch-regional) ist **sehr sauber**: echte
-Programmnamen (`In aller Freundschaft`, `Elefant, Tiger & Co.`, regionale
-News-Magazine in Versalien wie `MDR SACHSENSPIEGEL`). `episode` exzellent (3.998
-via `(S/E)`), keine Rubrik-Topics.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | MDR | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **nein** | nur Strand `Kurzfilme im MDR` (78). |
-| 3 Schreibvarianten (Case) | **klein** (96 Z.) | `#hinREISEND`/`#hinreisend`. |
-| 4 "Film von" | **nein** (0) | |
-| 5 Episoden ohne Klammern | **nein** (13 Z.) | |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **klein** (35 Z.) | nur `... | ARD Wissen`. |
-| 8 Beschreibungs-Metazeile | **nein** (2 Z.) | feuert nur 5x. |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-Keine neuen Befunde.
-
-## PHOENIX
-
-### Kernbefund
-
-PHOENIX (17.021 Z., 122 Topics, Ereignis-/Politiksender). Zwei Auffaelligkeiten:
-ein Format-Rubrik-Topic **`Dokumentationen` (1.086 Z.)** als `series_name`, und
-**systematische Versalien-/Kleinschreib-Dubletten** (Befund 3 ausgepraegt).
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | PHOENIX | Belege |
-|--------|---------|--------|
-| 1 series_name=Format/Genre | **ja** | `Dokumentationen` 1.086, `Beitrag` 44, `Dokumentation` 20. |
-| 3 Schreibvarianten (Case) | **ja, stark** (6 Gruppen, 1.539 Z.) | Versalien vs. Kleinschreibung: `PHOENIX RUNDE`/`phoenix runde` (31/830), `UNTER DEN LINDEN`/`unter den linden`, `PRESSECLUB`/`Presseclub`, `INTERNATIONALER FRÜHSCHOPPEN`/`internationaler frühschoppen`. |
-| 4 "Film von" | **nein** (0) | |
-| 5 Episoden ohne Klammern | **ja, klein** (50 Z.) | |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **nein** (0) | |
-| 8 Beschreibungs-Metazeile | **nein** (4 Z.) | |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-Kein neuer Befund. PHOENIX ist ein starker Beleg, dass Befund 3 (Case-Folding)
-gross angelegt Dubletten aufloesen wuerde.
-
-## ORF
-
-### Kernbefund
-
-ORF (15.771 Z., 1.383 Topics, oesterreichisch). Sehr langer Topic-Tail mit
-echten Sendungen (`Universum`, `Dok 1`, `Die Geschichte <Bundesland>`,
-`Seitenblicke`). Zwei Auffaelligkeiten: **`(ÖGS)`-Marker im Topic** (Befund 9)
-und eine **Beschreibungs-Metazeile mit hoher Fehlerquote** (Befund 8).
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | ORF | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **kaum** | Clip-Rubriken `Vintage Videos` 220, `ZIB Flash` 196. |
-| 3 Schreibvarianten (Case) | **nein** (0) | |
-| 4 "Film von" | **nein** (1) | |
-| 5 Episoden ohne Klammern | **ja** (136 Z.) | |
-| 6 Datum "vom" | **marginal** (1) | |
-| 7 Pipe-Suffix | **nein** (0) | |
-| 8 Beschreibungs-Metazeile | **ja, hohe Fehlerquote** | Metazeile feuert 49x, davon ~43 Müll-`country` (`aus dem Jahr` 26, ...). |
-| 9/10 Marker im Topic | **ja** (277 Z.) | `(ÖGS)` (Oesterr. Gebaerdensprache): `[WETTER] ZIB (ÖGS)`, `Bürgeranwalt (ÖGS)`, ... -> `series_name` traegt `(ÖGS)` und ist vom Basis-Topic abgespalten. Flag `S` ist hier meist gesetzt (269/277, Marker steht offenbar auch im Titel) -- der Schaden ist v. a. der verschmutzte `series_name`. |
-
-Kein neuer Befund. ORF erweitert das Marker-Vokabular um `(ÖGS)`.
-
-## RBB
-
-### Kernbefund
-
-RBB (10.670 Z., 275 Topics, Berlin/Brandenburg) ist **sauber**: echte
-Programmnamen (`rbb24 Abendschau`, `DER TAG in Berlin & Brandenburg`,
-`Die Heiland`, `Polizeiruf 110`). Keine Rubrik-Topics, keine Case-Dubletten.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | RBB | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **kaum** | `Dokumentation und Reportage` 100, Strand `Märchen in der ARD` 36. |
-| 3 Schreibvarianten (Case) | **nein** (0) | |
-| 4 "Film von" | **nein** (2) | |
-| 5 Episoden ohne Klammern | **ja, klein** (68 Z.) | |
-| 6/7/9/10 | **nein** | Pipe nur 1x (Untertitel-Trenner). |
-| 8 Beschreibungs-Metazeile | **klein** (2 Z. sichtbar) | feuert 390x, kaum Müll. |
-
-Keine neuen Befunde.
-
-## HR
-
-### Kernbefund
-
-HR (9.571 Z., 192 Topics, hessisch). Zwei ausgepraegte Befunde: **Pipe-Suffix**
-(`hr Retro | ...`, Befund 7) und **klammerlose Episoden** (Befund 5) jeweils
-stark.
-
-### Treffen die Befunde 1-9 zu?
-
-| Befund | HR | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **kaum** | `Dokus & Reportagen` 170, `Reisen` 97, `Spezial` 54. |
-| 3 Schreibvarianten (Case) | **nein** (0) | |
-| 4 "Film von" | **nein** (0) | |
-| 5 Episoden ohne Klammern | **ja, stark** (990 Z.) | viele `- Teil N` / `- Folge N` ohne Klammern (Podcasts, Ratgeber-Reihen). |
-| 6 Datum "vom" | **nein** (0) | |
-| 7 Pipe-Suffix | **ja, stark** (2.447 Z., ~26 %) | `hr Retro | hessenschau` 1.807, `| Abendschau` 449, `| Archivschätze` 95, ...; Basis `hr Retro` vorne. |
-| 8 Beschreibungs-Metazeile | **nein** (feuert 8x) | |
-| 9/10 Marker im Topic | **nein** (0) | |
-
-Kein neuer Befund, aber HR ist der staerkste Beleg fuer Befund 7 (anteilig) und
-Befund 5.
-
-## ARTE.DE / ARTE.FR
-
-### Kernbefund
-
-ARTE ist ein **Sonderfall**: ARTE-Sender stehen in `ARTE_LANG`, daher wird Pass 4
-uebersprungen -- `series_name` bleibt **per Design NULL** (die echte Serie steckt
-im Titel, der 2. Pass hebt sie spaeter), `language` kommt aus dem Sender,
-`category` aus der `ARTE_CAT`/`ARTE_SUB`-Taxonomie ueber das `Ober - Unter`-Topic.
-Befunde 1/3/7/9 (alle `series_name`-Verschmutzung) sind damit gegenstandslos.
-
-Fuer **ARTE.DE** funktioniert das hervorragend: 14.081/14.485 Zeilen (97 %)
-bekommen die Taxonomie-Kategorie mit Confidence 0.9. Aber:
-
-### Befund 11 -- ARTE-Taxonomie nur deutsch; fremdsprachige ARTE-Kanaele fallen durch
-
-`ARTE_CAT`/`ARTE_SUB` mappen ausschliesslich **deutsche** Topic-Labels (`Kino`,
-`Geschichte`, `Entdeckung der Welt`, `Filme`, `Serien`, ...). **ARTE.FR** liefert
-dieselbe Taxonomie auf Franzoesisch (`Cinéma`, `Histoire`,
-`Voyages et découvertes`, `Séries`, ...) -- die matchen nicht:
-
-```
-ARTE.DE  "Geschichte - Das 20. Jahrhundert"        -> category="Doku"   (0.9)
-ARTE.FR  "Histoire - XXe siècle"                    -> category="unklar" (0.2, Dauer-Prior)
-ARTE.FR  "Info et société - Décryptages"            -> category="Beitrag/Episode"
-```
-
-Nur **457** ARTE.FR-Zeilen (3 %) bekommen eine Taxonomie-Kategorie, und das auch
-nur, weil die Marke `ARTE Concert` sprachgleich ist. Die uebrigen ~14.600
-ARTE.FR-Zeilen fallen auf den Dauer-Prior (Beitrag/Episode/unklar/Clip) mit
-Confidence 0.2/0.5 zurueck. Fix: franzoesische (und EN/ES/IT/PL, siehe naechster
-Abschnitt) Taxonomie-Labels in `ARTE_CAT`/`ARTE_SUB` ergaenzen.
-
-### Treffen die uebrigen Befunde zu?
-
-| Befund | ARTE.DE/FR | |
-|--------|-----------|--|
-| 1/3/7/9 series_name | **n. a.** | `series_name` per Design NULL. |
-| 4 "Film von" | nein (1) | |
-| 5 Episoden ohne Klammern | nein (18) | `episode` gut (4.251 via `(n/m)`). |
-| 6 Datum "vom" | nein (0) | |
-| 8 Beschreibungs-Metazeile | klein (16 Z. sichtbar) | `lief` u. a. |
-
-Beobachtung: Flag `U` (Untertitel) 8.420x -- ARTE-typisch (OmU), wirkt korrekt.
-
-## ARTE.EN / ARTE.ES / ARTE.IT / ARTE.PL
-
-### Kernbefund
-
-Die vier fremdsprachigen ARTE-Kanaele (zusammen 6.903 Z., 114 Topics) sind der
-**Vollfall von Befund 11**: ihre Taxonomie-Labels sind englisch/spanisch/
-italienisch/polnisch (`Politics and society - Investigation and reports`,
-`Política y sociedad - Análisis`, `Serie e fiction - Serie`, `Historia - XX wiek`)
-und matchen die deutsche `ARTE_CAT`/`ARTE_SUB`-Tabelle nicht.
-
-| Sender | Zeilen | Taxonomie-Treffer (0.9) | Quote |
-|--------|-------:|------------------------:|------:|
-| ARTE.EN | 1.751 | 58 | 3 % |
-| ARTE.ES | 1.867 | 49 | 3 % |
-| ARTE.IT | 1.542 | 50 | 3 % |
-| ARTE.PL | 1.743 | 124 | 7 % |
-
-Auch hier sind die Treffer fast nur die sprachgleiche Marke `ARTE Concert`. ~6.700
-Zeilen fallen auf den Dauer-Prior zurueck. `language` (en/es/it/pl aus
-`ARTE_LANG`) ist korrekt, `series_name` per Design NULL.
-
-Sonst keine eigenstaendigen Befunde -- die Loesung ist dieselbe wie bei ARTE.FR:
-fremdsprachige Taxonomie-Labels in `ARTE_CAT`/`ARTE_SUB` ergaenzen (Befund 11).
-
-## tagesschau24
-
-### Kernbefund
-
-tagesschau24 (7.601 Z., nur 8 Topics). Dominiert vom **Sender-Container
-`tagesschau24` (6.661 Z., 88 %)** als `series_name` (keine Serie). Zudem eine
-Marker-Suffix-Variante.
-
-### Treffen die Befunde 1-11 zu?
-
-| Befund | tagesschau24 | Belege |
-|--------|--------------|--------|
-| 1 series_name=Format/Genre | **ja, dominant** | Container `tagesschau24` 6.661. |
-| 10 Marker-Suffix | **ja** (402 Z.) | `tagesschau in Einfacher Sprache` -- Barrierefreiheits-Suffix `in Einfacher Sprache`, splittet von `tagesschau`. **Zusatz:** dieser Marker fehlt auch im `MARKERS`-Vokabular (nur Gebaerdensprache/Audiodeskription/OmU sind dort), wuerde also selbst in Klammern im Titel nicht erkannt. |
-| 3/4/5/6/7/8/9/11 | **nein** | |
-
-Beleg, dass `MARKERS` um `Einfache Sprache` (und `Leichte Sprache`) zu ergaenzen
-waere (Befund 10).
-
-## ZDF-tivi / ZDFinfo / ZDFneo
-
-### Kernbefund
-
-Die drei ZDF-Spartenkanaele (zusammen 12.510 Z., 581 Topics: tivi = Kinder,
-ZDFinfo = Doku, ZDFneo = Serien/Filme) sind **sauber**. Anders als der
-Hauptsender ZDF stehen sie **nicht** in `TITLE_META_SENDERS` -- Metazeile aus der
-Beschreibung, die hier aber kaum feuert (conf 0.9 nur 2x). Topics sind echte
-Serien (`The Rookie`, `Die Biene Maja`, `Death in Paradise`). `episode`
-exzellent: 9.509 via `(S/E)`.
-
-### Treffen die Befunde 1-11 zu?
-
-| Befund | ZDF-Sparten | Belege |
-|--------|-------------|--------|
-| 1 series_name=Format/Genre | **klein** | Strands `ZDFinfo - die Einzeldokus` 379, `Filme` 147. |
-| 3 Schreibvarianten (Case) | **klein** (403 Z.) | `PUR+`/`pur+` (372/17). |
-| 5 Episoden ohne Klammern | **nein** (5 Z.) | `episode` sonst exzellent (9.509). |
-| 4/6/7/8/9/11 | **nein** | Flags `A` 1.008 / `S` 738 sauber. |
-
-Keine neuen Befunde.
-
-## rbtv
-
-### Kernbefund
-
-rbtv (Radio Bremen, 7.109 Z., 56 Topics) ist der **am staerksten von Befund 7
-betroffene Sender ueberhaupt**: 6.100 Zeilen (86 %) haben einen Pipe-Suffix im
-Topic, fast alles `buten un binnen | ...`.
-
-### Treffen die Befunde 1-11 zu?
-
-| Befund | rbtv | Belege |
-|--------|------|--------|
-| 7 Pipe-Suffix | **ja, dominant** (6.100 Z., 86 %) | `buten un binnen | regionalmagazin` 4.932, `| sportblitz` 951, `| wetter` 211. Basis `buten un binnen` vorne. |
-| 10 Marker-Suffix | **klein** (115 Z.) | `buten un binnen um 6 in Gebärdensprache`. |
-| 1 series_name=Format/Genre | **klein** | Strand `Radio Bremen Retro - Filme aus dem Archiv` 101. |
-| 3/4/5/6/8/9/11 | **nein** | |
-
-Kein neuer Befund. rbtv ist das Extrembeispiel fuer Befund 7. (Anmerkung: `rbtv`,
-`Radio Bremen TV` und `RBTV` sind derselbe Sender unter drei Sender-Strings --
-siehe deren Kurz-Abschnitte.)
-
-## DW
-
-### Kernbefund
-
-DW (Deutsche Welle, 6.766 Z., 79 Topics). Topics sind meist echte Formate
-(`Euromaxx`, `Made in Germany`, `Shift`, `DW Nachrichten`), aber es gibt eine
-spuerbare Schicht **Genre-/Themen-Rubriken** als Topic.
-
-### Treffen die Befunde 1-11 zu?
-
-| Befund | DW | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **ja, mittel** | Rubriken `Wirtschaft` 290, `Europa` 133, `THEMEN` 85, `Wissenschaft` 30, `Deutschland` 28, `Nahost` 24, `Kultur` 14, `Sport` 8, `Reise` 2. |
-| 3 Schreibvarianten (Case) | **klein** (51 Z.) | `PopXport`/`Popxport`. |
-| 5 Episoden ohne Klammern | **marginal** (20 Z.) | DW-Inhalte haben praktisch keine Episodennotation (`episode` 0). |
-| 4/6/7/8/9/11 | **nein** | |
-
-Kein neuer Befund; bestaetigt das Genre-Rubrik-Muster (Befund 1) auch ausserhalb
-von ZDF/3Sat.
-
-## Funk.net
-
-### Kernbefund
-
-Funk.net (6.068 Z., 128 Topics, junges Online-Netzwerk) ist **sauber**: die
-Topics sind durchweg Format-/Kanalnamen (`Y-Kollektiv`, `MrWissen2go`, `STRG_F`,
-`Coldmirror`, `Datteltäter`). Keine Rubriken, keine Metazeile (Online-Inhalte
-ohne Land/Jahr/Credits), keine Barrierefreiheits-Marker.
-
-### Treffen die Befunde 1-11 zu?
-
-| Befund | Funk.net | |
-|--------|----------|--|
-| 1/3/4/6/7/8/9/10/11 | **nein** | |
-| 5 Episoden ohne Klammern | klein (58 Z.) | |
-
-Keine Befunde der Erwaehnung wert. Sauberster mittelgrosser Sender.
-
-## ARD-alpha
-
-### Kernbefund
-
-ARD-alpha (2.914 Z., 117 Topics, Bildungssender). Topics sind echte
-Bildungsformate (`alpha-Centauri`, `Planet Wissen`, `Telekolleg`, `GRIPS`).
-Einzige Auffaelligkeit: der **Pipe-Suffix `alpha Lernen | <Fach>`** (Befund 7).
-
-### Treffen die Befunde 1-11 zu?
-
-| Befund | ARD-alpha | Belege |
-|--------|-----------|--------|
-| 7 Pipe-Suffix | **ja** (297 Z., ~10 %) | `alpha Lernen | Physik/Deutsch/Englisch/Biologie/Chemie/Mathe`. Hier traegt der Teil *hinter* dem Pipe (das Fach) die eigentliche Reihe. |
-| 5 Episoden ohne Klammern | klein (64 Z.) | |
-| 1/3/4/6/8/9/10/11 | **nein** | |
-
-Kein neuer Befund; weiterer Beleg fuer Offene Frage 4 (Serie hinter dem Pipe).
-
-## ONE
-
-### Kernbefund
-
-ONE (2.376 Z., 60 Topics, ARD-Seriensender). Topics sind echte Serien
-(`Sturm der Liebe` 1.407, `Rote Rosen` 497, britische Krimis wie `Poirot`,
-`Grantchester`, `Professor T`). `series_name` und `episode` (401 via `(S/E)`)
-sauber.
-
-### Treffen die Befunde 1-11 zu?
-
-| Befund | ONE | Belege |
-|--------|-----|--------|
-| 1 series_name=Format/Genre | **marginal** | Container `ONE` 6. |
-| 5/3/4/6/7/8/9/10/11 | **nein** | `ov` 158 (Originalfassungen britischer Serien) korrekt. |
-
-Kein neuer Befund. **Beobachtung:** 2.279 Zeilen (96 %) haben `category=unklar`
--- ONE sendet ueberwiegend ~45-min-Serienfolgen, fuer die der Dauer-Prior
-(>1.800 s -> `unklar`) kein Signal hat. Das ist keine ONE-Eigenheit, sondern die
-generelle Schwaeche des Dauer-Priors fuer lange Einzelfolgen ohne Metazeile --
-nach Einfuehrung der `genre`-Spalte (Befund 2) und besserem Format-Signal
-relevant.
-
-## Radio Bremen TV
-
-Kurznotiz (20 Zeilen, zu wenig fuer eine Heuristik-Statistik). Inhaltlich
-identisch mit `rbtv`/`RBTV` -- derselbe Sender (Radio Bremen) unter einem
-anderen Sender-String. Topics: `buten un binnen | regionalmagazin` (12),
-`buten un binnen | extra` (3), Einzelnes. Es treten dieselben Muster auf
-(Befund 7 Pipe-Suffix), nur in Mini-Menge.
-
-**Sender-String-Split (Daten-Befund):** `rbtv` (7.109), `Radio Bremen TV` (20)
-und `RBTV` (1) sind derselbe Sender unter drei verschiedenen Sender-Strings der
-Filmliste -- analog Befund 3, aber auf Sender-Ebene. Fuer Suche/Statistik waeren
-sie zu vereinheitlichen.
-
-## RBTV
-
-Kurznotiz (1 Zeile). Einziger Eintrag: `topic="Livestream"` -- ein
-Livestream-Platzhalter, keine echte Sendung. Wie `Radio Bremen TV` derselbe
-Sender (Radio Bremen) unter noch einem weiteren Sender-String (siehe
-Sender-String-Split oben). Nicht aussagekraeftig.
+## SWR -- 37.077 Z. / 477 Topics
+
+- **B3** 1.032: `planet schule`/`Planet Schule` (636/61), Akzent-Case `NACHTCAFÉ`/`é`, `SWR Extra`/`extra`.
+- **B1** ~520: `Film` 219, `Dokumentarfilm` 80, Rubrik `Doku & Reportage` 221.
+- **B5** 148. **B7** 16 (`... | ARD Wissen`). **B8** 4.
+
+## SR -- 23.794 Z. / 681 Topics
+
+- **B1** Container/Rubrik: `Beiträge` 3.514, `SR` 748, `aktuell` 700, `SR 3 Videos` 256, `Dokumentationen und Reportagen` 226.
+- **B3 stark** 2.917: `das saarlandwetter`/`Das ...` (1796/1), `AUS CHRISTLICHER SICHT`/`aus ...` (179/89); + **Abkuerzung** `WimS` (543) == `Wir im Saarland`.
+- **B5** 95.
+
+## KiKA -- 22.827 Z. / 639 Topics
+
+Sehr sauber (Kinderkanal); `LEADC`-Regel liefert 5.719 `episode`.
+
+- **B3** 540: `KiKANiNCHEN`/`Kikaninchen` (52/463). **B5** 89.
+
+## WDR -- 22.533 Z. / 284 Topics
+
+Ueberwiegend sauber; regionale `Lokalzeit`-Ausgaben sind echt getrennt.
+
+- **B3** 275 (`planet schule`). **B7** 6 (`... | ARD Wissen` + Untertitel-Pipe). **B1** ~27 (`Fernsehfilm` 24). **B5** 86. **B8** 2.
+- Beobachtung: `WDR Retro`-Praefix mit Mittelpunkt-Trenner (955 Z.).
+
+## BR -- 20.787 Z. / 429 Topics
+
+- **B1** Sender-Container `BR` 2.191.
+- **B7** 36 (`... | ARD Wissen`; `... | Bergfreundinnen` -- Serie *hinter* dem Pipe).
+- **B3** 128 (`Auf bairisch g'lacht!`, `report München`). **B5** 56. **B8** 9.
+
+## MDR -- 20.023 Z. / 359 Topics
+
+Sehr sauber; `episode` 3.998 via `(S/E)`.
+
+- **B7** 35 (`... | ARD Wissen`). **B3** 96 (`#hinREISEND`). **B5** 13. Strand `Kurzfilme im MDR` 78.
+
+## PHOENIX -- 17.021 Z. / 122 Topics
+
+- **B3 stark** 1.539: Versalien vs Kleinschreibung (`PHOENIX RUNDE`/`phoenix runde` 31/830, `UNTER DEN LINDEN`/`unter den linden`, `PRESSECLUB`/`Presseclub`).
+- **B1** `Dokumentationen` 1.086 (+ `Beitrag` 44). **B5** 50.
+
+## ORF -- 15.771 Z. / 1.383 Topics
+
+- **B9** 277: `(ÖGS)` (oesterr. Gebaerdensprache); Flag `S` hier meist gesetzt (269/277), Schaden v. a. verschmutzter `series_name`.
+- **B8** hohe Fehlerquote (Metazeile feuert 49x, ~43 Muell-country, `aus dem Jahr` 26).
+- **B5** 136. Clip-Rubriken `Vintage Videos` 220, `ZIB Flash` 196.
+
+## RBB -- 10.670 Z. / 275 Topics
+
+Sauber.
+
+- **B1** klein (`Dokumentation und Reportage` 100, Strand `Märchen in der ARD` 36). **B5** 68. **B8** klein (feuert 390x, 2 sichtbar Muell).
+
+## HR -- 9.571 Z. / 192 Topics
+
+- **B7 stark** 2.447 (~26 %): `hr Retro | hessenschau` 1.807, `| Abendschau` 449, `| Archivschätze` 95, ... (Basis `hr Retro` vorne).
+- **B5 stark** 990: viele `- Teil n` / `- Folge n` (Podcasts, Ratgeber).
+- **B1** klein (`Dokus & Reportagen` 170, `Reisen` 97).
+
+## ARTE.DE / ARTE.FR -- 29.553 Z. / 105 Topics
+
+Sonderfall: `series_name` per Design NULL, `category` aus Taxonomie. ARTE.DE
+exzellent (97 % Taxonomie @ conf 0.9).
+
+- **B11** ARTE.FR nur **3 %** Taxonomie-Treffer (457, nur Marke `ARTE Concert`); ~14.600 Z. fallen auf Dauer-Prior. Franzoesische Labels (`Histoire - XXe siècle`, ...) matchen die deutsche Map nicht.
+- Flag `U` 8.420 (OmU, korrekt). **B8** 16.
+
+## ARTE.EN / ARTE.ES / ARTE.IT / ARTE.PL -- 6.903 Z. / 114 Topics
+
+- **B11 voll**: Taxonomie-Treffer EN 58/1.751, ES 49/1.867, IT 50/1.542, PL 124/1.743 (je ~3 %, nur `ARTE Concert`). `language` (en/es/it/pl) korrekt.
+
+## tagesschau24 -- 7.601 Z. / 8 Topics
+
+- **B1 dominant** Container `tagesschau24` 6.661 (88 %).
+- **B10** 402: `in Einfacher Sprache` -- Marker fehlt zudem ganz im `MARKERS`-Vokabular.
+
+## ZDF-tivi / ZDFinfo / ZDFneo -- 12.510 Z. / 581 Topics
+
+Sauber (nicht in `TITLE_META_SENDERS`); `episode` 9.509 via `(S/E)`.
+
+- **B1** klein (`ZDFinfo - die Einzeldokus` 379, `Filme` 147). **B3** 403 (`PUR+`/`pur+`).
+
+## rbtv -- 7.109 Z. / 56 Topics
+
+Radio Bremen. **Extremfall B7**.
+
+- **B7 dominant** 6.100 (86 %): `buten un binnen | regionalmagazin` 4.932, `| sportblitz` 951, `| wetter` 211.
+- **B10** 115 (`... in Gebärdensprache`). **B1** klein (`Radio Bremen Retro ...` 101).
+
+## DW -- 6.766 Z. / 79 Topics
+
+- **B1 mittel** Genre-Rubriken: `Wirtschaft` 290, `Europa` 133, `THEMEN` 85, `Wissenschaft` 30, `Deutschland` 28, `Nahost` 24, `Kultur` 14, `Sport` 8, `Reise` 2.
+- **B3** 51 (`PopXport`). Keine Episodennotation (`episode` 0).
+
+## Funk.net -- 6.068 Z. / 128 Topics
+
+Saubererster mittelgrosser Sender (junges Online-Netzwerk). Nur **B5** 58.
+
+## ARD-alpha -- 2.914 Z. / 117 Topics
+
+- **B7** 297 (~10 %): `alpha Lernen | <Fach>` (Physik/Deutsch/Englisch/...) -- Reihe *hinter* dem Pipe. **B5** 64.
+
+## ONE -- 2.376 Z. / 60 Topics
+
+Seriensender; `series_name`/`episode` (401) sauber. `ov` 158 korrekt.
+
+- **Beobachtung:** 96 % `category=unklar` -- Dauer-Prior hat fuer ~45-min-Serienfolgen kein Signal (generelle Schwaeche, nicht ONE-spezifisch). **B1** marginal (`ONE` 6).
+
+## Radio Bremen TV -- 20 Z.
+
+Kurznotiz: identisch mit `rbtv` (derselbe Sender, anderer Sender-String); B7 in Mini-Menge.
+
+## RBTV -- 1 Z.
+
+Kurznotiz: einziger Eintrag `topic="Livestream"`. Auch dies Radio Bremen.
+
+> **Sender-String-Split (Daten-Befund):** `rbtv` (7.109), `Radio Bremen TV` (20)
+> und `RBTV` (1) sind derselbe Sender unter drei Strings -- fuer Suche/Statistik
+> zu vereinheitlichen.
+
+---
+
+## Anhang -- Reproduktion
+
+Temporaere Hilfsdateien (Praefix `_`), kein CLI-Bestandteil. Ausfuehren mit
+`PYTHONIOENCODING=utf-8 python analysis/<datei>`.
+
+- `_audit_sender.py "SENDER[,SENDER2]"` -- generisches Sender-Audit (Battery fuer alle Befunde).
+- `_topics_dump.txt`, `_bucket_3sat.py`, `_audit_3sat.py`, `_audit_ard.py` -- frueheres 3Sat-/ARD-Detailaudit.
