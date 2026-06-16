@@ -860,3 +860,21 @@ spuerbare Schicht **Genre-/Themen-Rubriken** als Topic.
 
 Kein neuer Befund; bestaetigt das Genre-Rubrik-Muster (Befund 1) auch ausserhalb
 von ZDF/3Sat.
+
+## Funk.net
+
+### Kernbefund
+
+Funk.net (6.068 Z., 128 Topics, junges Online-Netzwerk) ist **sauber**: die
+Topics sind durchweg Format-/Kanalnamen (`Y-Kollektiv`, `MrWissen2go`, `STRG_F`,
+`Coldmirror`, `Datteltäter`). Keine Rubriken, keine Metazeile (Online-Inhalte
+ohne Land/Jahr/Credits), keine Barrierefreiheits-Marker.
+
+### Treffen die Befunde 1-11 zu?
+
+| Befund | Funk.net | |
+|--------|----------|--|
+| 1/3/4/6/7/8/9/10/11 | **nein** | |
+| 5 Episoden ohne Klammern | klein (58 Z.) | |
+
+Keine Befunde der Erwaehnung wert. Sauberster mittelgrosser Sender.
