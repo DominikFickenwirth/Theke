@@ -878,3 +878,21 @@ ohne Land/Jahr/Credits), keine Barrierefreiheits-Marker.
 | 5 Episoden ohne Klammern | klein (58 Z.) | |
 
 Keine Befunde der Erwaehnung wert. Sauberster mittelgrosser Sender.
+
+## ARD-alpha
+
+### Kernbefund
+
+ARD-alpha (2.914 Z., 117 Topics, Bildungssender). Topics sind echte
+Bildungsformate (`alpha-Centauri`, `Planet Wissen`, `Telekolleg`, `GRIPS`).
+Einzige Auffaelligkeit: der **Pipe-Suffix `alpha Lernen | <Fach>`** (Befund 7).
+
+### Treffen die Befunde 1-11 zu?
+
+| Befund | ARD-alpha | Belege |
+|--------|-----------|--------|
+| 7 Pipe-Suffix | **ja** (297 Z., ~10 %) | `alpha Lernen | Physik/Deutsch/Englisch/Biologie/Chemie/Mathe`. Hier traegt der Teil *hinter* dem Pipe (das Fach) die eigentliche Reihe. |
+| 5 Episoden ohne Klammern | klein (64 Z.) | |
+| 1/3/4/6/8/9/10/11 | **nein** | |
+
+Kein neuer Befund; weiterer Beleg fuer Offene Frage 4 (Serie hinter dem Pipe).
