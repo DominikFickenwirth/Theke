@@ -896,3 +896,26 @@ Einzige Auffaelligkeit: der **Pipe-Suffix `alpha Lernen | <Fach>`** (Befund 7).
 | 1/3/4/6/8/9/10/11 | **nein** | |
 
 Kein neuer Befund; weiterer Beleg fuer Offene Frage 4 (Serie hinter dem Pipe).
+
+## ONE
+
+### Kernbefund
+
+ONE (2.376 Z., 60 Topics, ARD-Seriensender). Topics sind echte Serien
+(`Sturm der Liebe` 1.407, `Rote Rosen` 497, britische Krimis wie `Poirot`,
+`Grantchester`, `Professor T`). `series_name` und `episode` (401 via `(S/E)`)
+sauber.
+
+### Treffen die Befunde 1-11 zu?
+
+| Befund | ONE | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **marginal** | Container `ONE` 6. |
+| 5/3/4/6/7/8/9/10/11 | **nein** | `ov` 158 (Originalfassungen britischer Serien) korrekt. |
+
+Kein neuer Befund. **Beobachtung:** 2.279 Zeilen (96 %) haben `category=unklar`
+-- ONE sendet ueberwiegend ~45-min-Serienfolgen, fuer die der Dauer-Prior
+(>1.800 s -> `unklar`) kein Signal hat. Das ist keine ONE-Eigenheit, sondern die
+generelle Schwaeche des Dauer-Priors fuer lange Einzelfolgen ohne Metazeile --
+nach Einfuehrung der `genre`-Spalte (Befund 2) und besserem Format-Signal
+relevant.
