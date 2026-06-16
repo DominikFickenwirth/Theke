@@ -406,3 +406,34 @@ Titel-/Topic-Suffix (` in Gebärdensprache`, ` mit Gebärdensprache`).
 
 - `analysis/_audit_sender.py "SRF"` -- generisches Sender-Audit (alle Sender
   ab hier). Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/_audit_sender.py "SRF"`.
+
+## ZDF
+
+### Kernbefund
+
+ZDF (94.875 Z., 1.448 Topics) ist der Schwester-Sender von 3Sat und verhaelt
+sich auch so: er steht mit in `TITLE_META_SENDERS` (Metazeile aus dem **Titel**)
+und nutzt **dieselben Genre-Rubriken** als Topic. Alle 3Sat-Befunde kehren
+wieder, kein neues Muster. `series_name`-Rubriken: **5.222 Z.** Genre
+(`Politik` 2.392, `Sport` 1.261, `Nachrichten` 980, dann die 3Sat-Garnitur
+`Politik und Gesellschaft`/`Kultur`/`Wissen`/`Musik`/`Geschichte`/...) plus den
+Strand `ZDFinfo Doku` (3.480).
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | ZDF | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **ja** | 5.222 Z. Genre-Rubriken + 3.480 Z. Strand `ZDFinfo Doku`. |
+| 2 category mischt Format/Genre | **ja** | Genre-Rubriken wie bei 3Sat -- `genre`-Spalte gut befüllbar. |
+| 3 Schreibvarianten (Case) | **ja** (7 Gruppen, 6.192 Z.) | `ZDFinfo Doku`/`ZDFinfo doku`, `NANO`/`nano` (1206/246), `Scobel`/`scobel`. |
+| 4 "Film von"-Credit | **ja** (68 Z.) | ZDF in `TITLE_META_SENDERS`, bare "Film" nicht in CATWORD. |
+| 5 Episoden ohne Klammern | **ja** (170 Z.) | season/episode sonst gut (14.114/14.818 via `(S/E)`). |
+| 6 Datum "vom" | **ja** (12 Z.) | `vom 1. Februar`, plus Sport-Fragmente `gegen Norderstedt - DFB-Pokal`. |
+| 7 Pipe-Suffix | **nein** (0 Z.) | |
+| 8 Beschreibungs-Metazeile | **n. a.** | ZDF zieht Metazeile aus dem Titel, nicht der Beschreibung. |
+| 9/10 Marker im Topic | **kaum** (2 Z.) | ZDF setzt Marker im Titel -- Flags `S` 4.083, `A` 3.583 korrekt. |
+
+Keine neuen Befunde: ZDF ist der Modellfall, fuer den die 3Sat-Heuristik
+gebaut wurde. Bestaetigt die Genre-Rubrik-Liste (gemeinsam mit 3Sat) und liefert
+drei haeufige Zusatz-Rubriken (`Politik`, `Sport`, `Nachrichten`) fuers
+kuratierte Genre-Set.
