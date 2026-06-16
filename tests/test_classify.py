@@ -55,7 +55,7 @@ def test_classify_migration_upgrades_v1_db(tmp_path):
 
 
 # -- pure classify(): expected values are hand-derived from the sender ---------
-# conventions (analysis/EXTRACTION_SCHEMA.md), not produced by the extractor.
+# broadcaster conventions, not produced by the extractor.
 
 def test_classify_returns_exactly_the_classify_columns():
     r = classify("ARD", "Tatort", "Der Fall", "", 5400)
@@ -203,8 +203,16 @@ def insert_row(conn, mediathek_id, sender="ARD", topic="", title="",
         (status, mediathek_id, sender, topic, title, description, duration))
 
 
-def args(force=False):
-    return SimpleNamespace(force=force)
+def args(force=False, analyze=False, dry_run=False):
+    return SimpleNamespace(force=force, analyze=analyze, dry_run=dry_run)
+
+
+def insert_classified(conn, mediathek_id, sender="ARD", **cols):
+    """Insert a row with classify columns already set (for --analyze tests)."""
+    base = dict(status="1", mediathek_id=mediathek_id, sender=sender, **cols)
+    keys = list(base)
+    conn.execute(f"INSERT INTO mediathek ({','.join(keys)}) "
+                 f"VALUES ({','.join(':' + k for k in keys)})", base)
 
 
 def test_cmd_classify_fills_columns_and_flips_status(tmp_path):
@@ -278,3 +286,89 @@ def test_cli_classify_json_on_stdout_progress_on_stderr(tmp_path, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"classified": 2}   # one parseable object
     assert captured.out.strip().count("\n") == 0           # ... and only that
+
+
+# -- classify report modes (--analyze / --dry-run), read-only ----------------
+
+def test_analyze_report_from_stored_columns(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # two ARD rows: one fully classified film, one unclassified-ish "unklar"
+        insert_classified(conn, "a", year=2003, country="Deutschland",
+                          category="Spielfilm", classify_confidence=0.9, flags="A")
+        insert_classified(conn, "b", category="unklar", classify_confidence=0.2,
+                          flags="")
+        report = classify_report(conn, live=False, min_rows=1)
+        assert report == {"ARD": {
+            "n": 2, "year_pct": 50.0, "country_pct": 50.0, "se_pct": 0.0,
+            "cat_pct": 50.0, "unklar_pct": 50.0,
+            "flag_a_pct": 50.0, "flag_s_pct": 0.0, "flag_u_pct": 0.0, "flag_t_pct": 0.0,
+        }}
+    finally:
+        conn.close()
+
+
+def test_dry_run_report_is_live_and_writes_nothing(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # raw, unclassified rows; classify() runs live over them
+        insert_row(conn, "a", sender="ARD", topic="Filmmittwoch im Ersten",
+                   title="Der Fall", description="Spielfilm Deutschland 2003 Ein Fall.",
+                   duration=5400)                     # -> year+country+Spielfilm, conf 0.9
+        insert_row(conn, "b", sender="ARD", topic="heute", title="heute",
+                   description="", duration=900)       # -> Beitrag/Episode, conf 0.5
+        report = classify_report(conn, live=True, min_rows=1)
+        assert report == {"ARD": {
+            "n": 2, "year_pct": 50.0, "country_pct": 50.0, "se_pct": 0.0,
+            "cat_pct": 50.0, "unklar_pct": 0.0,
+            "flag_a_pct": 0.0, "flag_s_pct": 0.0, "flag_u_pct": 0.0, "flag_t_pct": 0.0,
+        }}
+        # read-only: nothing was written
+        rows = conn.execute("SELECT status, category, year, flags FROM mediathek").fetchall()
+        for r in rows:
+            assert r["status"] == "0"
+            assert r["category"] is None
+            assert r["year"] is None
+            assert r["flags"] is None
+    finally:
+        conn.close()
+
+
+def test_report_min_rows_filters_small_senders(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", category="unklar", classify_confidence=0.2, flags="")
+        assert classify_report(conn, live=False, min_rows=2) == {}   # only 1 ARD row
+    finally:
+        conn.close()
+
+
+def test_cli_classify_analyze_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_row(conn, "a", title="A")
+        insert_row(conn, "b", title="B")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "--analyze"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "analyze"          # below the default min_rows -> empty
+    assert out["senders"] == {}
+
+
+def test_cli_classify_dry_run_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_row(conn, "a", title="A")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "--dry-run"]) == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "dry-run"
+
+
+def test_cli_classify_analyze_and_dry_run_are_mutually_exclusive(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db).close()
+    assert main(["--db", db, "classify", "--analyze", "--dry-run"]) == 2  # usage error
