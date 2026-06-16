@@ -41,8 +41,9 @@ Pass 6 -- **kategorie** aus Metazeile sonst duration-Prior + topic-Keywords (B5)
   `(tlw. stumm)` -> v.a. NDR/SWR (historisches Material)
 - trailer=true: title/topic enthaelt `Trailer|Teaser|Vorschau|Vorab|Preview`
   (insgesamt selten, <1%); zusaetzlich Heuristik duration < 120 s als Stuetze.
-- Mehrteiler-Part: `(n/m)` z.B. `(1/2)`,`(2/3)`,`(5/6)` -> NICHT staffel/episode,
-  sondern Teil n von m (Reihe ohne echte Staffel). Eigenes Feld part_n/part_m.
+- Mehrteiler-Part: `(n/m)` z.B. `(1/2)`,`(2/3)`,`(5/6)` -> Teil n von m (Reihe
+  ohne echte Staffel). ENTSCHEIDUNG: n -> episode, m -> neues Feld episode_count
+  (episode nur setzen, wenn nicht schon eine echte Sxx/Exx-Notation griff).
 
 ### B2. Episodennotation -- drei disjunkte Formen (sender-spezifisch, siehe C)
 - Form A `(S<n>/E<m>)`: 4-stellige n = Jahr (Tagesformat) -> verwerfen.
@@ -194,12 +195,53 @@ Vernachlaessigbar; wie rbtv / Default behandeln.
 - SRF, KiKA, ORF haben EIGENE Episoden- bzw. Gebaerden-/Sprachmarker
   (Form B / Form C / ÖGS) und duerfen NICHT mit den anderen verschmolzen werden.
 
-## E. Offene Punkte
+## E. Geklaerte Design-Entscheidungen
 
-1. `(Originalversion)` ohne Sprachzusatz: Audio != de, genaue Sprache unbekannt
-   -> sprache="ov"/unknown bis TMDB `original_language` greift.
-2. 4-stellige S/E-Season (Jahr) zuverlaessig verwerfen; Jahr daraus optional als
-   jahr uebernehmen, wenn keine Metazeile.
-3. Mehrteiler `(n/m)`: als part_n/part_m fuehren oder bei "Reihe" auf episode
-   mappen? -- in Phase 5/Queue-Design zu entscheiden.
-4. Land-Normalisierung (`Deutschland/Frankreich/Jugoslawien`) auf ISO-Codes.
+1. `(Originalversion)` ohne Sprachzusatz -> sprache = Sentinel **"ov"** (Audio
+   != de, genaue Sprache offen) bis TMDB `original_language` greift. (umgesetzt)
+2. 4-stellige S/E-Season = Sendejahr -> staffel/episode verwerfen, Jahr als jahr
+   uebernehmen wenn keine Metazeile. (umgesetzt)
+3. Mehrteiler `(n/m)` -> **n -> episode, m -> episode_count** (neues Feld);
+   episode nur, wenn keine echte Sxx/Exx-Notation vorlag. (umgesetzt)
+4. Produktionsland -> **Roh-String jetzt** (z.B. `Deutschland/Frankreich`),
+   ISO-3166-Normalisierung inkl. historischer Staaten erst bei Matching/
+   Enrichment. (umgesetzt: Roh-String)
+5. Kategorie ohne verlaessliches Signal (langes Non-Fiction ohne Metazeile/
+   topic-Kategorie) -> Label **"unklar"** + niedrige Confidence, NICHT raten;
+   der Review-Gate (Phase 5) entscheidet. (umgesetzt: duration-Prior liefert nur
+   noch Clip / Beitrag-Episode / unklar)
+
+## F. Validierung an Stichprobe -- Befunde & Schema-Korrekturen
+
+Prototyp analysis/extract.py gegen Zufalls- und film-lange Stichproben geprueft
+(analysis/validate.py). BESTAETIGT korrekt: ARD desc-Metazeile inkl. Slash-Laender
+(`Luther` -> Spielfilm/2003/`Deutschland/USA`), S/E + Audiodeskription zusammen
+(`Reiterhof Wildenstein` -> S1/E6, Spielfilm 2021, Hoerf), 3Sat/ZDF title-Metazeile
+mit Komma (`Rivale - Spielfilm, Deutschland 2020`), KiKA Leitnummer, ARTE.DE
+Taxonomie (98%), ZDFinfo 4-stellige Season -> Jahr, SRF Form B, ARTE.EN
+Sprache+OmU. Daraus abgeleitete KORREKTUREN am Schema:
+
+1. **Kategorie steht oft im topic selbst** (ARD/3Sat topic=`Dokumentarfilm`/
+   `Spielfilm`). Neue Quelle "topic-als-Kategorie" mit Prioritaet zwischen
+   Metazeile und duration-Prior. (umgesetzt)
+2. **3Sat/ZDF-Doku-Titelform** kann `Dokumentarfilm von <Regisseur>, <Land> <Jahr>`
+   lauten -> beim Land-Parse ein `von <Name>,`-Praefix vor dem Land verwerfen.
+   (umgesetzt: bei Komma im Land-Match nur den Teil nach dem letzten Komma nehmen)
+3. **ARTE-Fremdsprachenkanaele brauchen lokalisierte Taxonomie-Maps**: die
+   topic-Position (vor ` - `) ist stabil, aber die Begriffe sind in der
+   Kanalsprache -- FR `Cinéma`/`Séries et fictions`/`Info et société`, EN
+   `Politics and society`/`Culture`. Die deutsche Map greift nur fuer ARTE.DE.
+   Zusatz: ARTE.FR/EN nutzen `Saison N` bzw. `Enquête N` im Titel fuer
+   Staffel/Episode (statt Sxx/Exx). -> pro Kanal eigene Begriffstabelle.
+4. **ORF fuehrt die Staffel im topic** (`Theodosia Staffel 1`), nicht im Titel
+   -> fuer ORF `Staffel N` aus dem topic ziehen und vom serie_name abschneiden.
+5. **duration-Prior ist schwach**: lange Talk-/News-/Magazin-/Konzert-Formate
+   (Rockpalast, Hart aber fair, ZDF-Mittagsmagazin) werden faelschlich
+   `Spielfilm?`. Mitigation: nur dann Film, wenn ein Film-Signal existiert
+   (Metazeile ODER topic-Kategorie); sonst Label `Langformat (unklar)` statt
+   `Spielfilm?`.
+6. **Trailer nur per Schluesselwort** (Trailer/Teaser/Vorschau/Preview); die
+   Dauer-Heuristik (<90 s) erzeugte zu viele Falsch-Positive (kurze News-Clips)
+   und wurde entfernt. Trailer-Anteil real <1%.
+7. Trailing `(JJJJ)` im Titel (WDR `Minenspiel (2005)`) als Jahr nutzen und vom
+   sauberen Titel abschneiden. (umgesetzt)
