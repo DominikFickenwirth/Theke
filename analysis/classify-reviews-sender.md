@@ -252,3 +252,105 @@ Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/<datei>.py`. Alle drei
 sind temporaere Hilfsdateien (Praefix `_`), kein Bestandteil des CLI.
 
 ## ARD
+
+### Kernbefund
+
+ARD ist mit **154.478 Zeilen** der groesste Sender und ein Dachsender mit
+**1.758** verschiedenen Topics. Anders als bei 3Sat sind die Topics fast immer
+**echte Programmnamen** (Nachrichten, Regionalmagazine, Telenovelas, Tatort) --
+der 3Sat-Hauptbefund (Topic = Format/Genre-Rubrik) trifft hier also nur am Rand
+zu. Dafuer treten drei neue Muster auf, alle mit derselben Wurzel:
+
+> **Gemeinsame Ursache (Befund 7 + 9, Teil von 3):** `series_name = topic` wird
+> *woertlich* uebernommen. Die Titel-Reinigungspaesse -- Pass 1 `take_parens`
+> (Klammer-Marker) und der `PIPESUF`-Suffixschnitt -- laufen nur auf dem
+> **Titel**, nie auf dem Topic. Jede Verunreinigung im Topic (Marker, Pipe,
+> Gross-/Kleinschreibung, Untertitel) landet damit ungefiltert im `series_name`.
+
+### Treffen die 3Sat-Befunde 1-6 zu?
+
+| Befund | ARD | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **teilweise**, klein | Format/Strand-Topics ~1.529 Z.: `Filme in der ARD` (1.069), `Film` (375), `Dokumentarfilm` (82). Genre-Rubriken wie bei 3Sat: praktisch keine. |
+| 2 category mischt Format/Genre | **strukturell ja** | Gilt sender-uebergreifend; bei ARD liefern die Topics aber kaum Genre-Signal, die `genre`-Spalte bliebe meist leer. |
+| 3 Schreibvarianten | **ja, stark** | Reine Case-Varianten, 20 Gruppen, **~9.074 Z.** (siehe Befund-Erweiterung unten). |
+| 4 "Film von"-Credit | **kaum** (10 Z.) | ARD ist nicht in `TITLE_META_SENDERS`, zieht Metazeile aus der Beschreibung -- "Film von" im Titel wird gar nicht angefasst. |
+| 5 Episoden ohne Klammern | **ja** (911 Z.) | u. a. `- Teil 2/2`, roemisch `Teil III`, `Teil 5`. |
+| 6 Datum-Falschtreffer "vom" | **nein** (0 Z.) | Date-Titel treffen die Beschreibungs-Metazeile nicht. |
+
+Erweiterung zu **Befund 3**: bei ARD ist die Zersplitterung fast rein
+**Gross-/Kleinschreibung** und damit mechanisch normalisierbar:
+
+```
+aktuell (18 Uhr) (1153)   vs  Aktuell (18 Uhr) (867)
+tagesschau (1654)         vs  Tagesschau (5)
+tagesthemen (986)         vs  Tagesthemen (3)
+ZAPP (325)                vs  Zapp (23)
+NACHTCAFÉ (85)            vs  NACHTCAFé (19)      <- Akzent-Case
+report MÜNCHEN (41)       vs  report München (49)
+```
+
+### Befund 7 -- Pipe-Suffix im Topic bleibt im series_name
+
+`PIPESUF` schneidet einen `| Reihe`-Suffix nur vom **Titel**, nicht vom Topic.
+Da `series_name = topic`, behalten **12.176 Zeilen** den Pipe-Suffix:
+
+```
+series_name="buten un binnen | regionalmagazin"  (1703)  -> sollte "buten un binnen"
+            "hr Retro | hessenschau"             (899)
+            "buten un binnen | sportblitz"       (283)
+            "alpha Lernen | Physik"              (10)
+```
+
+Das zersplittert dieselbe Sendung (`buten un binnen | regionalmagazin / sportblitz
+/ wetter`; `hr Retro | hessenschau / Abendschau / Der Markt`).
+
+> **Offene Frage 4:** Die Serie steht **mal vor, mal hinter** dem Pipe:
+> bei `buten un binnen | regionalmagazin` ist die Serie *vorne*, bei
+> `Auf Spurensuche | ARD Wissen` (23) bzw. `Mein Körper | ARD Wissen` (7) ist
+> `ARD Wissen` die *Dachmarke* und der Show-Titel steht vorne. Blindes Abschneiden
+> des Suffixes waere also nicht immer richtig.
+
+### Befund 8 -- Beschreibungs-Metazeile zieht Satzfragmente (falsche category/country/year bei hoher Confidence)
+
+Weil ARD nicht in `TITLE_META_SENDERS` steht, sucht `META` die
+`CATWORD <country> <year>`-Sequenz in der **Beschreibung** -- also in
+Fliesstext/Credits. Das produziert frei erfundene Felder, und zwar mit
+**Confidence 0.9** (Metazeile gilt als sicher), was den Fehler besonders
+heimtueckisch macht:
+
+```
+title="Deutschland 2050: Die Zukunft und die Klimakrise"
+  -> category="Serie"  country="über den Klimawandel aus dem Jahr"  year=2019   (frei erfunden)
+
+title="Puccini · Magier der Leidenschaft · Doku · ... · SR · 2008"
+  -> category="Dokumentation"  country="von"  year=2008
+```
+
+Sichtbar falsch sind **43 Zeilen** mit Satzfragment-`country` (`von` 12,
+`· Deutschland` 8, `über den Klimawandel aus dem Jahr` 5, ...). Die Dunkelziffer
+bei `category`/`year` ist hoeher, da jede Beschreibung mit einem CATWORD + Jahr
+falsch greifen kann. Fix-Ansatz: Metazeile nur akzeptieren, wenn der
+country-Slot wie ein Land aussieht (Grossbuchstabe, keine Funktionswoerter wie
+`von/über/aus/im`).
+
+### Befund 9 -- Klammer-Marker im Topic nicht erkannt
+
+Pass 1 `take_parens` (Audiodeskription/Gebaerdensprache/OmU -> Flags/Sprache)
+laeuft nur auf dem Titel. Im Topic bleibt der Marker stehen:
+
+```
+topic="tagesschau (mit Gebärdensprache)" (812)
+  -> series_name="tagesschau (mit Gebärdensprache)"   (statt series_name="tagesschau", flag S)
+```
+
+Doppelter Schaden: der `series_name` wird vom regulaeren `tagesschau` (1654)
+abgespalten, **und** das Flag `S` (Gebaerdensprache) wird nicht gesetzt. Bei ARD
+betrifft das nur dieses eine Topic (812 Z.), das Muster ist aber generisch und
+duerfte bei anderen Sendern wiederkehren.
+
+### Anhang (ARD)
+
+- `analysis/_audit_ard.py` -- ARD-Audit: Befund-1-6-Recurrence + Befunde 7-9
+  (Pipe-Topics, Beschreibungs-Metazeile, Marker/Case-Varianten).
+  Ausfuehren mit `PYTHONIOENCODING=utf-8 python analysis/_audit_ard.py`.
