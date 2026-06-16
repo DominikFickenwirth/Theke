@@ -641,3 +641,72 @@ ein Format-Rubrik-Topic **`Dokumentationen` (1.086 Z.)** als `series_name`, und
 
 Kein neuer Befund. PHOENIX ist ein starker Beleg, dass Befund 3 (Case-Folding)
 gross angelegt Dubletten aufloesen wuerde.
+
+## ORF
+
+### Kernbefund
+
+ORF (15.771 Z., 1.383 Topics, oesterreichisch). Sehr langer Topic-Tail mit
+echten Sendungen (`Universum`, `Dok 1`, `Die Geschichte <Bundesland>`,
+`Seitenblicke`). Zwei Auffaelligkeiten: **`(ÖGS)`-Marker im Topic** (Befund 9)
+und eine **Beschreibungs-Metazeile mit hoher Fehlerquote** (Befund 8).
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | ORF | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **kaum** | Clip-Rubriken `Vintage Videos` 220, `ZIB Flash` 196. |
+| 3 Schreibvarianten (Case) | **nein** (0) | |
+| 4 "Film von" | **nein** (1) | |
+| 5 Episoden ohne Klammern | **ja** (136 Z.) | |
+| 6 Datum "vom" | **marginal** (1) | |
+| 7 Pipe-Suffix | **nein** (0) | |
+| 8 Beschreibungs-Metazeile | **ja, hohe Fehlerquote** | Metazeile feuert 49x, davon ~43 Müll-`country` (`aus dem Jahr` 26, ...). |
+| 9/10 Marker im Topic | **ja** (277 Z.) | `(ÖGS)` (Oesterr. Gebaerdensprache): `[WETTER] ZIB (ÖGS)`, `Bürgeranwalt (ÖGS)`, ... -> `series_name` traegt `(ÖGS)` und ist vom Basis-Topic abgespalten. Flag `S` ist hier meist gesetzt (269/277, Marker steht offenbar auch im Titel) -- der Schaden ist v. a. der verschmutzte `series_name`. |
+
+Kein neuer Befund. ORF erweitert das Marker-Vokabular um `(ÖGS)`.
+
+## RBB
+
+### Kernbefund
+
+RBB (10.670 Z., 275 Topics, Berlin/Brandenburg) ist **sauber**: echte
+Programmnamen (`rbb24 Abendschau`, `DER TAG in Berlin & Brandenburg`,
+`Die Heiland`, `Polizeiruf 110`). Keine Rubrik-Topics, keine Case-Dubletten.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | RBB | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **kaum** | `Dokumentation und Reportage` 100, Strand `Märchen in der ARD` 36. |
+| 3 Schreibvarianten (Case) | **nein** (0) | |
+| 4 "Film von" | **nein** (2) | |
+| 5 Episoden ohne Klammern | **ja, klein** (68 Z.) | |
+| 6/7/9/10 | **nein** | Pipe nur 1x (Untertitel-Trenner). |
+| 8 Beschreibungs-Metazeile | **klein** (2 Z. sichtbar) | feuert 390x, kaum Müll. |
+
+Keine neuen Befunde.
+
+## HR
+
+### Kernbefund
+
+HR (9.571 Z., 192 Topics, hessisch). Zwei ausgepraegte Befunde: **Pipe-Suffix**
+(`hr Retro | ...`, Befund 7) und **klammerlose Episoden** (Befund 5) jeweils
+stark.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | HR | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **kaum** | `Dokus & Reportagen` 170, `Reisen` 97, `Spezial` 54. |
+| 3 Schreibvarianten (Case) | **nein** (0) | |
+| 4 "Film von" | **nein** (0) | |
+| 5 Episoden ohne Klammern | **ja, stark** (990 Z.) | viele `- Teil N` / `- Folge N` ohne Klammern (Podcasts, Ratgeber-Reihen). |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **ja, stark** (2.447 Z., ~26 %) | `hr Retro | hessenschau` 1.807, `| Abendschau` 449, `| Archivschätze` 95, ...; Basis `hr Retro` vorne. |
+| 8 Beschreibungs-Metazeile | **nein** (feuert 8x) | |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+Kein neuer Befund, aber HR ist der staerkste Beleg fuer Befund 7 (anteilig) und
+Befund 5.
