@@ -919,3 +919,16 @@ Kein neuer Befund. **Beobachtung:** 2.279 Zeilen (96 %) haben `category=unklar`
 generelle Schwaeche des Dauer-Priors fuer lange Einzelfolgen ohne Metazeile --
 nach Einfuehrung der `genre`-Spalte (Befund 2) und besserem Format-Signal
 relevant.
+
+## Radio Bremen TV
+
+Kurznotiz (20 Zeilen, zu wenig fuer eine Heuristik-Statistik). Inhaltlich
+identisch mit `rbtv`/`RBTV` -- derselbe Sender (Radio Bremen) unter einem
+anderen Sender-String. Topics: `buten un binnen | regionalmagazin` (12),
+`buten un binnen | extra` (3), Einzelnes. Es treten dieselben Muster auf
+(Befund 7 Pipe-Suffix), nur in Mini-Menge.
+
+**Sender-String-Split (Daten-Befund):** `rbtv` (7.109), `Radio Bremen TV` (20)
+und `RBTV` (1) sind derselbe Sender unter drei verschiedenen Sender-Strings der
+Filmliste -- analog Befund 3, aber auf Sender-Ebene. Fuer Suche/Statistik waeren
+sie zu vereinheitlichen.
