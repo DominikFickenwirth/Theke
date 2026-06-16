@@ -517,3 +517,28 @@ ein generischer **Container-Topic `Beiträge` (3.514 Z.)** als `series_name`
 Beobachtung: `Wir im Saarland - Service/Kultur/Grenzenlos/...` sind
 Sub-Magazin-Suffixe (wie NDRs Editionen); die Abkuerzung `WimS` waere zusaetzlich
 zu normalisieren (Befund 3, ueber reines Case hinaus). Kein neuer Befund.
+
+## KiKA
+
+### Kernbefund
+
+KiKA (22.827 Z., 639 Topics, Kinderkanal) ist **sehr sauber**: die Topics sind
+durchweg Sendungs-/Serien-Namen (`logo!`, `Die Pfefferkörner`, `Schloss
+Einstein`, `Löwenzahn`). Die KiKA-Spezialregel `LEADC` (fuehrende `NN.` ->
+Episode) greift -- **5.719** Zeilen tragen eine `episode`. Keine Format-/Genre-
+Rubriken, keine Metazeile (Kinderinhalte ohne Land/Jahr).
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | KiKA | Belege |
+|--------|------|--------|
+| 1 series_name=Format/Genre | **nein** (0) | |
+| 3 Schreibvarianten (Case) | **ja, klein** (3 Gruppen, 540 Z.) | `KiKANiNCHEN`/`Kikaninchen` (52/463). |
+| 4 "Film von" | **nein** (0) | |
+| 5 Episoden ohne Klammern | **ja, klein** (89 Z.) | sonst `episode` exzellent (5.719) dank `LEADC`. |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **nein** (0) | |
+| 8 Beschreibungs-Metazeile | **nein** (0) | |
+| 9/10 Marker im Topic | **nein** (0) | Flags `A` 1.217 / `S` 906 sauber aus dem Titel. |
+
+Keine neuen Befunde. KiKA bestaetigt, dass die `LEADC`-Episodenheuristik traegt.
