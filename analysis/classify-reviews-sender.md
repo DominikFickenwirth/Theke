@@ -932,3 +932,10 @@ anderen Sender-String. Topics: `buten un binnen | regionalmagazin` (12),
 und `RBTV` (1) sind derselbe Sender unter drei verschiedenen Sender-Strings der
 Filmliste -- analog Befund 3, aber auf Sender-Ebene. Fuer Suche/Statistik waeren
 sie zu vereinheitlichen.
+
+## RBTV
+
+Kurznotiz (1 Zeile). Einziger Eintrag: `topic="Livestream"` -- ein
+Livestream-Platzhalter, keine echte Sendung. Wie `Radio Bremen TV` derselbe
+Sender (Radio Bremen) unter noch einem weiteren Sender-String (siehe
+Sender-String-Split oben). Nicht aussagekraeftig.
