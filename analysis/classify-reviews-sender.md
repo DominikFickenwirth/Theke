@@ -437,3 +437,34 @@ Keine neuen Befunde: ZDF ist der Modellfall, fuer den die 3Sat-Heuristik
 gebaut wurde. Bestaetigt die Genre-Rubrik-Liste (gemeinsam mit 3Sat) und liefert
 drei haeufige Zusatz-Rubriken (`Politik`, `Sport`, `Nachrichten`) fuers
 kuratierte Genre-Set.
+
+## NDR
+
+### Kernbefund
+
+NDR (49.318 Z., 432 Topics) ist ein **gut klassifizierter** Sender: die Topics
+sind durchweg echte Programm-/Serien-Namen (Regionalmagazine `NDR Info`,
+`Nordmagazin`, `Hamburg Journal`; Serien `Morden im Norden`, `Großstadtrevier`,
+`Die Kanzlei`). **Keine** Format-/Genre-Rubriken als Topic -- Befund 1 entfaellt.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | NDR | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **nein** (0) | keine Rubrik-Topics. |
+| 3 Schreibvarianten (Case) | **nein** (19 Z.) | nur `NDR Talk Show Classics`/`classics`. |
+| 4 "Film von" | **nein** (1) | NDR zieht Metazeile aus der Beschreibung. |
+| 5 Episoden ohne Klammern | **marginal** (36 Z.) | |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **nein** (0) | |
+| 8 Beschreibungs-Metazeile | **ja, winzig** (11 Z.) | `über den Klimawandel aus dem Jahr` u. a.; Metazeile feuert nur 57x. |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+### Kleinere Beobachtung -- Editions-/Zeitslot-Suffixe
+
+Regionalmagazine erscheinen unter Haupt- **und** Ausgaben-Topic
+(`Hamburg Journal` 5.991 vs `Hamburg Journal 18:00 Uhr` 1.129;
+`Nordmagazin` 6.922 vs `Nordmagazin - Land und Leute` 489;
+`Hallo Niedersachsen` 5.425 vs `Niedersachsen 18.00` 1.038). Ob das echte
+getrennte Ausgaben sind oder zu vereinheitlichen waere, ist eine inhaltliche
+Frage fuer den 2. Pass -- kein klarer Fehler. Sonst keine neuen Befunde.
