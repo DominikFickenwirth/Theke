@@ -797,3 +797,25 @@ Marker-Suffix-Variante.
 
 Beleg, dass `MARKERS` um `Einfache Sprache` (und `Leichte Sprache`) zu ergaenzen
 waere (Befund 10).
+
+## ZDF-tivi / ZDFinfo / ZDFneo
+
+### Kernbefund
+
+Die drei ZDF-Spartenkanaele (zusammen 12.510 Z., 581 Topics: tivi = Kinder,
+ZDFinfo = Doku, ZDFneo = Serien/Filme) sind **sauber**. Anders als der
+Hauptsender ZDF stehen sie **nicht** in `TITLE_META_SENDERS` -- Metazeile aus der
+Beschreibung, die hier aber kaum feuert (conf 0.9 nur 2x). Topics sind echte
+Serien (`The Rookie`, `Die Biene Maja`, `Death in Paradise`). `episode`
+exzellent: 9.509 via `(S/E)`.
+
+### Treffen die Befunde 1-11 zu?
+
+| Befund | ZDF-Sparten | Belege |
+|--------|-------------|--------|
+| 1 series_name=Format/Genre | **klein** | Strands `ZDFinfo - die Einzeldokus` 379, `Filme` 147. |
+| 3 Schreibvarianten (Case) | **klein** (403 Z.) | `PUR+`/`pur+` (372/17). |
+| 5 Episoden ohne Klammern | **nein** (5 Z.) | `episode` sonst exzellent (9.509). |
+| 4/6/7/8/9/11 | **nein** | Flags `A` 1.008 / `S` 738 sauber. |
+
+Keine neuen Befunde.
