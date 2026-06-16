@@ -840,3 +840,23 @@ Topic, fast alles `buten un binnen | ...`.
 Kein neuer Befund. rbtv ist das Extrembeispiel fuer Befund 7. (Anmerkung: `rbtv`,
 `Radio Bremen TV` und `RBTV` sind derselbe Sender unter drei Sender-Strings --
 siehe deren Kurz-Abschnitte.)
+
+## DW
+
+### Kernbefund
+
+DW (Deutsche Welle, 6.766 Z., 79 Topics). Topics sind meist echte Formate
+(`Euromaxx`, `Made in Germany`, `Shift`, `DW Nachrichten`), aber es gibt eine
+spuerbare Schicht **Genre-/Themen-Rubriken** als Topic.
+
+### Treffen die Befunde 1-11 zu?
+
+| Befund | DW | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **ja, mittel** | Rubriken `Wirtschaft` 290, `Europa` 133, `THEMEN` 85, `Wissenschaft` 30, `Deutschland` 28, `Nahost` 24, `Kultur` 14, `Sport` 8, `Reise` 2. |
+| 3 Schreibvarianten (Case) | **klein** (51 Z.) | `PopXport`/`Popxport`. |
+| 5 Episoden ohne Klammern | **marginal** (20 Z.) | DW-Inhalte haben praktisch keine Episodennotation (`episode` 0). |
+| 4/6/7/8/9/11 | **nein** | |
+
+Kein neuer Befund; bestaetigt das Genre-Rubrik-Muster (Befund 1) auch ausserhalb
+von ZDF/3Sat.
