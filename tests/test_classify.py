@@ -1,6 +1,7 @@
 """Tests for the classify stage (phase 3, part 1): metadata extraction."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -186,3 +187,94 @@ def test_unklar_when_no_category_signal():
                  "Aktuelle Nachrichten aus der Region.", 2700)
     assert r["category"] == "unklar"
     assert r["classify_confidence"] == 0.2
+
+
+# -- cmd_classify: DB write side ---------------------------------------------
+
+def open_db(tmp_path):
+    return db_connect(str(tmp_path / "theke.db"))
+
+
+def insert_row(conn, mediathek_id, sender="ARD", topic="", title="",
+               description="", duration=0, status="0"):
+    conn.execute(
+        "INSERT INTO mediathek (status, mediathek_id, sender, topic, title, "
+        "description, duration) VALUES (?,?,?,?,?,?,?)",
+        (status, mediathek_id, sender, topic, title, description, duration))
+
+
+def args(force=False):
+    return SimpleNamespace(force=force)
+
+
+def test_cmd_classify_fills_columns_and_flips_status(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="Filmmittwoch im Ersten",
+                   title="Der Fall (Audiodeskription)",
+                   description="Spielfilm Deutschland 2003 Ein Fall.", duration=5400)
+        result = cmd_classify(conn, Config(), args())
+        assert result == {"classified": 1}
+        row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='a'").fetchone()
+        assert row["status"] == "1"
+        assert row["category"] == "Spielfilm"
+        assert row["year"] == 2003
+        assert row["country"] == "Deutschland"
+        assert row["flags"] == "A"
+        assert row["clean_title"] == "Der Fall"
+        assert row["classify_confidence"] == 0.9
+    finally:
+        conn.close()
+
+
+def test_cmd_classify_default_scope_skips_already_classified(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", title="A")
+        insert_row(conn, "b", title="B")
+        assert cmd_classify(conn, Config(), args())["classified"] == 2
+        # both rows are status '1' now -> a second default run does nothing
+        assert cmd_classify(conn, Config(), args())["classified"] == 0
+    finally:
+        conn.close()
+
+
+def test_cmd_classify_force_reprocesses_all(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", title="A")
+        insert_row(conn, "b", title="B")
+        cmd_classify(conn, Config(), args())
+        assert cmd_classify(conn, Config(), args(force=True))["classified"] == 2
+    finally:
+        conn.close()
+
+
+def test_cmd_classify_preserves_phase3_ids(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ARD", title="Der Fall")
+        conn.execute("UPDATE mediathek SET tmdb_id='123', imdb_id='tt9', "
+                     "match_confidence=0.8 WHERE mediathek_id='a'")
+        cmd_classify(conn, Config(), args())
+        row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='a'").fetchone()
+        assert row["tmdb_id"] == "123"
+        assert row["imdb_id"] == "tt9"
+        assert row["match_confidence"] == 0.8
+        assert row["clean_title"] == "Der Fall"   # classify still ran
+    finally:
+        conn.close()
+
+
+def test_cli_classify_json_on_stdout_progress_on_stderr(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_row(conn, "a", title="A")
+        insert_row(conn, "b", title="B")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"classified": 2}   # one parseable object
+    assert captured.out.strip().count("\n") == 0           # ... and only that
