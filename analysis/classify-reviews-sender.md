@@ -778,3 +778,22 @@ Zeilen fallen auf den Dauer-Prior zurueck. `language` (en/es/it/pl aus
 
 Sonst keine eigenstaendigen Befunde -- die Loesung ist dieselbe wie bei ARTE.FR:
 fremdsprachige Taxonomie-Labels in `ARTE_CAT`/`ARTE_SUB` ergaenzen (Befund 11).
+
+## tagesschau24
+
+### Kernbefund
+
+tagesschau24 (7.601 Z., nur 8 Topics). Dominiert vom **Sender-Container
+`tagesschau24` (6.661 Z., 88 %)** als `series_name` (keine Serie). Zudem eine
+Marker-Suffix-Variante.
+
+### Treffen die Befunde 1-11 zu?
+
+| Befund | tagesschau24 | Belege |
+|--------|--------------|--------|
+| 1 series_name=Format/Genre | **ja, dominant** | Container `tagesschau24` 6.661. |
+| 10 Marker-Suffix | **ja** (402 Z.) | `tagesschau in Einfacher Sprache` -- Barrierefreiheits-Suffix `in Einfacher Sprache`, splittet von `tagesschau`. **Zusatz:** dieser Marker fehlt auch im `MARKERS`-Vokabular (nur Gebaerdensprache/Audiodeskription/OmU sind dort), wuerde also selbst in Klammern im Titel nicht erkannt. |
+| 3/4/5/6/7/8/9/11 | **nein** | |
+
+Beleg, dass `MARKERS` um `Einfache Sprache` (und `Leichte Sprache`) zu ergaenzen
+waere (Befund 10).
