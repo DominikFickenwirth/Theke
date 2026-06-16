@@ -17,6 +17,8 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
+from theke.classify import classify, CLASSIFY_COLS
+
 CONFIG_DEFAULT_PATH = "theke.json"
 
 # Progress and diagnostics go to this logger; main() routes it to stderr so the
@@ -86,7 +88,8 @@ class DbLockedError(Exception):
 
 
 # One tuple of SQL statements per schema version; each stage appends its own
-# migration when it lands. Entry 1 (phase 2) is the film-list mirror schema.
+# migration when it lands. Entry 1 (phase 2) is the film-list mirror schema;
+# entry 2 (phase 3) adds the classify columns (extracted metadata).
 MIGRATIONS: list[tuple[str, ...]] = [
     (
         """CREATE TABLE mediathek (
@@ -112,6 +115,18 @@ MIGRATIONS: list[tuple[str, ...]] = [
             match_confidence REAL
         )""",
         "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
+    ),
+    (
+        "ALTER TABLE mediathek ADD COLUMN clean_title         TEXT",
+        "ALTER TABLE mediathek ADD COLUMN series_name         TEXT",
+        "ALTER TABLE mediathek ADD COLUMN season              INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN episode             INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN episode_count       INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN category            TEXT",
+        "ALTER TABLE mediathek ADD COLUMN year                INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN country             TEXT",
+        "ALTER TABLE mediathek ADD COLUMN flags               TEXT",
+        "ALTER TABLE mediathek ADD COLUMN classify_confidence REAL",
     ),
 ]
 
@@ -258,7 +273,7 @@ def _build_film(values, last_sender, last_thema) -> dict:
     url = raw.get("url", "")
     return {
         "mediathek_id":    film_id(sender, thema, url, raw.get("website", "")),
-        "status":          "0" if raw.get("neu") == "true" else "1",
+        "status":          "0",
         "sender":          sender,
         "topic":           thema,
         "title":           raw.get("titel", ""),
@@ -489,6 +504,63 @@ def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
     return _do_full(conn, cfg)
 
 
+# -- classify -----------------------------------------------------------------
+# Extract structured metadata from the free-text fields and flip status 0 -> 1.
+
+_CLASSIFY_READ = (
+    "SELECT mediathek_id, sender, topic, title, description, duration "
+    "FROM mediathek WHERE status='0'"
+)
+
+_UPDATE_SQL = (
+    "UPDATE mediathek SET {sets}, status='1' WHERE mediathek_id=:mediathek_id"
+).format(sets=", ".join(f"{c}=:{c}" for c in CLASSIFY_COLS))
+
+
+def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
+    """Classify mediathek rows: extract metadata into the classify columns. By
+    default only unclassified rows (status '0'); --force reprocesses all."""
+    sql = _CLASSIFY_READ if not args.force else _CLASSIFY_READ.replace(
+        " WHERE status='0'", "")
+    log.info("classifying rows")
+    conn.execute("BEGIN")
+    try:
+        count = _classify_rows(conn, conn.execute(sql))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"classified": count}
+
+
+def _classify_rows(conn, rows, batch=5000) -> int:
+    """Stream rows through classify(), write updates in batches; log every 50k."""
+    count = 0
+    reported = 0
+    params = []
+
+    def flush():
+        nonlocal count, reported
+        if not params:
+            return
+        conn.executemany(_UPDATE_SQL, params)
+        count += len(params)
+        params.clear()
+        if count - reported >= 50000:
+            reported = count
+            log.info("classified %d rows", count)
+
+    for row in rows:
+        meta = classify(row["sender"], row["topic"], row["title"],
+                        row["description"], row["duration"])
+        meta["mediathek_id"] = row["mediathek_id"]
+        params.append(meta)
+        if len(params) >= batch:
+            flush()
+    flush()
+    return count
+
+
 # -- cli ----------------------------------------------------------------------
 # Stable grammar and exit codes: the GUI drives the CLI and parses the --json
 # output (exactly one JSON object on stdout per call).
@@ -518,6 +590,14 @@ def build_parser() -> argparse.ArgumentParser:
                                         "download and import takes about 30 "
                                         "seconds. Progress is printed to stderr.")
     mirror.add_argument("--force", action="store_true", help="always download the full list")
+
+    classify = sub.add_parser("classify", help="extract metadata from mirrored rows",
+                              description="Extract structured metadata (title, "
+                                          "series/season/episode, category, year, "
+                                          "country, language, flags) from the "
+                                          "free-text fields. Progress is printed "
+                                          "to stderr.")
+    classify.add_argument("--force", action="store_true", help="reclassify all rows, not just unclassified")
 
     return parser
 
@@ -551,6 +631,10 @@ def main(argv=None) -> int:
             case "mirror":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_mirror(conn, cfg, args)
+                finally: conn.close()
+            case "classify":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_classify(conn, cfg, args)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 
