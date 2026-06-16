@@ -819,3 +819,24 @@ exzellent: 9.509 via `(S/E)`.
 | 4/6/7/8/9/11 | **nein** | Flags `A` 1.008 / `S` 738 sauber. |
 
 Keine neuen Befunde.
+
+## rbtv
+
+### Kernbefund
+
+rbtv (Radio Bremen, 7.109 Z., 56 Topics) ist der **am staerksten von Befund 7
+betroffene Sender ueberhaupt**: 6.100 Zeilen (86 %) haben einen Pipe-Suffix im
+Topic, fast alles `buten un binnen | ...`.
+
+### Treffen die Befunde 1-11 zu?
+
+| Befund | rbtv | Belege |
+|--------|------|--------|
+| 7 Pipe-Suffix | **ja, dominant** (6.100 Z., 86 %) | `buten un binnen | regionalmagazin` 4.932, `| sportblitz` 951, `| wetter` 211. Basis `buten un binnen` vorne. |
+| 10 Marker-Suffix | **klein** (115 Z.) | `buten un binnen um 6 in Gebärdensprache`. |
+| 1 series_name=Format/Genre | **klein** | Strand `Radio Bremen Retro - Filme aus dem Archiv` 101. |
+| 3/4/5/6/8/9/11 | **nein** | |
+
+Kein neuer Befund. rbtv ist das Extrembeispiel fuer Befund 7. (Anmerkung: `rbtv`,
+`Radio Bremen TV` und `RBTV` sind derselbe Sender unter drei Sender-Strings --
+siehe deren Kurz-Abschnitte.)
