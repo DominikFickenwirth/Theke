@@ -491,3 +491,29 @@ bekannter Befunde, kein neues Muster.
 | 9/10 Marker im Topic | **nein** (0) | |
 
 Keine neuen Befunde.
+
+## SR
+
+### Kernbefund
+
+SR (23.794 Z., 681 Topics, saarlaendisch-regional). Zwei Auffaelligkeiten:
+ein generischer **Container-Topic `Beiträge` (3.514 Z.)** als `series_name`
+(keine Serie -- Sammelbecken, wie SRFs `Sport-Clip`), und besonders viele
+**Schreibvarianten**.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | SR | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **ja** | Container/Rubrik-Topics: `Beiträge` 3.514, `SR` 748, `aktuell` 700, `SR 3 Videos` 256, `Dokumentationen und Reportagen` 226. CATWORD-Treffer: keine. |
+| 3 Schreibvarianten | **ja, stark** (9 Gruppen, 2.917 Z.) | `das saarlandwetter`/`Das Saarlandwetter` (1796/1), `AUS CHRISTLICHER SICHT`/`aus christlicher sicht` (179/89), `kabarett.com`/`Kabarett.com`. Plus **Abkuerzungs**-Variante: `WimS` (543) == `Wir im Saarland`. |
+| 4 "Film von" | **nein** (2) | |
+| 5 Episoden ohne Klammern | **ja** (95 Z.) | |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **nein** (0) | |
+| 8 Beschreibungs-Metazeile | **nein** | Metazeile feuert nur 2x. |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+Beobachtung: `Wir im Saarland - Service/Kultur/Grenzenlos/...` sind
+Sub-Magazin-Suffixe (wie NDRs Editionen); die Abkuerzung `WimS` waere zusaetzlich
+zu normalisieren (Befund 3, ueber reines Case hinaus). Kein neuer Befund.
