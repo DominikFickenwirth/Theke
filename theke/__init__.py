@@ -86,7 +86,8 @@ class DbLockedError(Exception):
 
 
 # One tuple of SQL statements per schema version; each stage appends its own
-# migration when it lands. Entry 1 (phase 2) is the film-list mirror schema.
+# migration when it lands. Entry 1 (phase 2) is the film-list mirror schema;
+# entry 2 (phase 3) adds the classify columns (extracted metadata).
 MIGRATIONS: list[tuple[str, ...]] = [
     (
         """CREATE TABLE mediathek (
@@ -112,6 +113,18 @@ MIGRATIONS: list[tuple[str, ...]] = [
             match_confidence REAL
         )""",
         "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
+    ),
+    (
+        "ALTER TABLE mediathek ADD COLUMN clean_title         TEXT",
+        "ALTER TABLE mediathek ADD COLUMN series_name         TEXT",
+        "ALTER TABLE mediathek ADD COLUMN season              INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN episode             INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN episode_count       INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN category            TEXT",
+        "ALTER TABLE mediathek ADD COLUMN year                INTEGER",
+        "ALTER TABLE mediathek ADD COLUMN country             TEXT",
+        "ALTER TABLE mediathek ADD COLUMN flags               TEXT",
+        "ALTER TABLE mediathek ADD COLUMN classify_confidence REAL",
     ),
 ]
 
