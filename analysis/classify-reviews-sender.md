@@ -542,3 +542,30 @@ Rubriken, keine Metazeile (Kinderinhalte ohne Land/Jahr).
 | 9/10 Marker im Topic | **nein** (0) | Flags `A` 1.217 / `S` 906 sauber aus dem Titel. |
 
 Keine neuen Befunde. KiKA bestaetigt, dass die `LEADC`-Episodenheuristik traegt.
+
+## WDR
+
+### Kernbefund
+
+WDR (22.533 Z., 284 Topics, regional). Ueberwiegend sauber: `WDR aktuell`,
+`Hier und heute`, viele regionale `Lokalzeit`-Ausgaben (Koeln, Dortmund,
+Muensterland, OWL, ...), `Die Maus`, `Tatort`, `Rentnercops`. Die
+`Lokalzeit`-Ausgaben sind echte getrennte Regionalausgaben, kein
+Fragmentierungs-Fehler.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | WDR | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **kaum** (~27 Z.) | `Fernsehfilm` 24, `Sport` 3. |
+| 3 Schreibvarianten (Case) | **klein** (275 Z.) | `planet schule`/`Planet Schule` (270/5) -- derselbe Cross-Sender-Fall wie SWR. |
+| 4 "Film von" | **nein** (2) | |
+| 5 Episoden ohne Klammern | **ja, klein** (86 Z.) | |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **klein** (6 Z.) | `Mein Körper | ARD Wissen` (1) + `Der Germanwings-Absturz | Chronologie eines Verbrechens` (5, hier Pipe als **Untertitel**-Trenner). |
+| 8 Beschreibungs-Metazeile | **klein** (2 Z. sichtbar) | Metazeile feuert 246x. |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+Beobachtung: der `WDR Retro`-Praefix nutzt einen Mittelpunkt-Trenner
+(`WDR Retro <Punkt> Hier und heute`, 955 Z.); fuer den 2. Pass waere er wie ein
+Praefix abzutrennen. Kein neuer Befund.
