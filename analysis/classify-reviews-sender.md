@@ -754,3 +754,27 @@ Abschnitt) Taxonomie-Labels in `ARTE_CAT`/`ARTE_SUB` ergaenzen.
 | 8 Beschreibungs-Metazeile | klein (16 Z. sichtbar) | `lief` u. a. |
 
 Beobachtung: Flag `U` (Untertitel) 8.420x -- ARTE-typisch (OmU), wirkt korrekt.
+
+## ARTE.EN / ARTE.ES / ARTE.IT / ARTE.PL
+
+### Kernbefund
+
+Die vier fremdsprachigen ARTE-Kanaele (zusammen 6.903 Z., 114 Topics) sind der
+**Vollfall von Befund 11**: ihre Taxonomie-Labels sind englisch/spanisch/
+italienisch/polnisch (`Politics and society - Investigation and reports`,
+`Política y sociedad - Análisis`, `Serie e fiction - Serie`, `Historia - XX wiek`)
+und matchen die deutsche `ARTE_CAT`/`ARTE_SUB`-Tabelle nicht.
+
+| Sender | Zeilen | Taxonomie-Treffer (0.9) | Quote |
+|--------|-------:|------------------------:|------:|
+| ARTE.EN | 1.751 | 58 | 3 % |
+| ARTE.ES | 1.867 | 49 | 3 % |
+| ARTE.IT | 1.542 | 50 | 3 % |
+| ARTE.PL | 1.743 | 124 | 7 % |
+
+Auch hier sind die Treffer fast nur die sprachgleiche Marke `ARTE Concert`. ~6.700
+Zeilen fallen auf den Dauer-Prior zurueck. `language` (en/es/it/pl aus
+`ARTE_LANG`) ist korrekt, `series_name` per Design NULL.
+
+Sonst keine eigenstaendigen Befunde -- die Loesung ist dieselbe wie bei ARTE.FR:
+fremdsprachige Taxonomie-Labels in `ARTE_CAT`/`ARTE_SUB` ergaenzen (Befund 11).
