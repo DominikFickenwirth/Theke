@@ -468,3 +468,26 @@ Regionalmagazine erscheinen unter Haupt- **und** Ausgaben-Topic
 `Hallo Niedersachsen` 5.425 vs `Niedersachsen 18.00` 1.038). Ob das echte
 getrennte Ausgaben sind oder zu vereinheitlichen waere, ist eine inhaltliche
 Frage fuer den 2. Pass -- kein klarer Fehler. Sonst keine neuen Befunde.
+
+## SWR
+
+### Kernbefund
+
+SWR (37.077 Z., 477 Topics) ist ueberwiegend sauber (Landesschau, SWR Aktuell,
+SWR Retro, Tatort, Die Fallers). Auffaellig sind nur moderate Auspraegungen
+bekannter Befunde, kein neues Muster.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | SWR | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **ja, klein** (~520 Z.) | `Film` 219, `Dokumentarfilm` 80, Rubrik `Doku & Reportage` 221. |
+| 3 Schreibvarianten (Case) | **ja** (4 Gruppen, 1.032 Z.) | `planet schule`/`Planet Schule` (636/61), Akzent-Case `NACHTCAFÉ`/`NACHTCAFé`, `SWR Extra`/`SWR extra`. |
+| 4 "Film von" | **nein** (1) | Metazeile aus Beschreibung. |
+| 5 Episoden ohne Klammern | **ja** (148 Z.) | |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **ja, winzig** (16 Z.) | `Mein Körper | ARD Wissen`, `Auf Spurensuche | ARD Wissen` -- derselbe senderuebergreifende `ARD Wissen`-Strang wie bei ARD (bestaetigt Offene Frage 4: Serie steht *vor* dem Pipe). |
+| 8 Beschreibungs-Metazeile | **ja, winzig** (4 Z.) | |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+Keine neuen Befunde.
