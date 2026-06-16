@@ -519,7 +519,11 @@ _UPDATE_SQL = (
 
 def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
     """Classify mediathek rows: extract metadata into the classify columns. By
-    default only unclassified rows (status '0'); --force reprocesses all."""
+    default only unclassified rows (status '0'); --force reprocesses all.
+    --analyze/--dry-run are read-only coverage reports instead (stored columns
+    resp. a live classify() pass), they write nothing."""
+    if args.analyze or args.dry_run:
+        return _classify_report_cmd(conn, args)
     sql = _CLASSIFY_READ if not args.force else _CLASSIFY_READ.replace(
         " WHERE status='0'", "")
     log.info("classifying rows")
@@ -561,6 +565,89 @@ def _classify_rows(conn, rows, batch=5000) -> int:
     return count
 
 
+# -- classify coverage report (read-only) -------------------------------------
+# Per-sender coverage of the classify fields, for iterating the algorithm. Two
+# sources, one tally: --analyze reads the stored columns, --dry-run runs
+# classify() live (writing nothing). Both expose the same keys per row.
+
+REPORT_MIN_ROWS = 1000   # senders below this are omitted (long tail of one-offs)
+
+_REPORT_FIELDS = ["year", "country", "se", "cat", "unklar",
+                  "flag_a", "flag_s", "flag_u", "flag_t"]
+
+
+def _new_counter() -> dict:
+    return dict.fromkeys(["n"] + _REPORT_FIELDS, 0)
+
+
+def _tally(counter, row):
+    """Increment a sender's coverage counters from a row/dict (None-safe). Works
+    on both a sqlite3.Row (stored columns) and a classify() result dict."""
+    counter["n"] += 1
+    if row["year"] is not None:    counter["year"] += 1
+    if row["country"] is not None: counter["country"] += 1
+    if row["season"] is not None or row["episode"] is not None: counter["se"] += 1
+    conf = row["classify_confidence"]
+    if conf is not None and conf >= 0.8: counter["cat"] += 1   # category from a real signal
+    if row["category"] == "unklar": counter["unklar"] += 1
+    flags = row["flags"] or ""
+    for letter in "asut":
+        if letter.upper() in flags: counter["flag_" + letter] += 1
+
+
+def _summarize(counter) -> dict:
+    n = counter["n"]
+    out = {"n": n}
+    out.update({f + "_pct": round(100 * counter[f] / n, 1) for f in _REPORT_FIELDS})
+    return out
+
+
+def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS) -> dict:
+    """Per-sender classify coverage. live=False summarizes the stored columns
+    (--analyze); live=True runs classify() over the rows without writing
+    (--dry-run). Read-only -> no transaction."""
+    acc = {}
+    if live:
+        rows = conn.execute("SELECT mediathek_id, sender, topic, title, "
+                            "description, duration FROM mediathek")
+        for r in rows:
+            meta = classify(r["sender"], r["topic"], r["title"],
+                            r["description"], r["duration"])
+            _tally(acc.setdefault(r["sender"], _new_counter()), meta)
+    else:
+        rows = conn.execute("SELECT sender, year, country, season, episode, "
+                            "category, classify_confidence, flags FROM mediathek")
+        for r in rows:
+            _tally(acc.setdefault(r["sender"], _new_counter()), r)
+    return {s: _summarize(c) for s, c in acc.items() if c["n"] >= min_rows}
+
+
+_REPORT_TABLE_COLS = [("year", "year"), ("country", "cntry"), ("se", "S/E"),
+                      ("cat", "cat"), ("unklar", "unkl"), ("flag_a", "A"),
+                      ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
+
+
+def _print_report_table(report, mode):
+    """One aligned line per sender, sorted by row count, to stdout (the result)."""
+    print(f"classify coverage ({mode}, % of rows)")
+    print(f'{"SENDER":14}{"n":>8}' + "".join(f"{h:>7}" for _, h in _REPORT_TABLE_COLS))
+    for sender, st in sorted(report.items(), key=lambda kv: -kv[1]["n"]):
+        print(f'{sender:14}{st["n"]:>8}'
+              + "".join(f'{st[f + "_pct"]:>7.1f}' for f, _ in _REPORT_TABLE_COLS))
+
+
+def _classify_report_cmd(conn, args) -> dict:
+    live = args.dry_run
+    if live:
+        log.info("running classify() live (dry-run, no writes)")
+    report = classify_report(conn, live=live)
+    mode = "dry-run" if live else "analyze"
+    if args.json:
+        return {"mode": mode, "senders": report}
+    _print_report_table(report, mode)
+    return {}
+
+
 # -- cli ----------------------------------------------------------------------
 # Stable grammar and exit codes: the GUI drives the CLI and parses the --json
 # output (exactly one JSON object on stdout per call).
@@ -598,6 +685,9 @@ def build_parser() -> argparse.ArgumentParser:
                                           "free-text fields. Progress is printed "
                                           "to stderr.")
     classify.add_argument("--force", action="store_true", help="reclassify all rows, not just unclassified")
+    report = classify.add_mutually_exclusive_group()
+    report.add_argument("--analyze", action="store_true", help="read-only: per-sender coverage report from the stored columns")
+    report.add_argument("--dry-run", action="store_true", help="read-only: run classify() live and report coverage, writing nothing")
 
     return parser
 
