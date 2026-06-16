@@ -569,3 +569,27 @@ Fragmentierungs-Fehler.
 Beobachtung: der `WDR Retro`-Praefix nutzt einen Mittelpunkt-Trenner
 (`WDR Retro <Punkt> Hier und heute`, 955 Z.); fuer den 2. Pass waere er wie ein
 Praefix abzutrennen. Kein neuer Befund.
+
+## BR
+
+### Kernbefund
+
+BR (20.787 Z., 429 Topics, bayerisch-regional). Topics sind ueberwiegend echte
+Sendungen (`Dahoam is Dahoam`, `Frankenschau`, `Watzmann ermittelt`); auffaellig
+ist der **Sender-Container `BR` (2.191 Z.)** als `series_name`.
+
+### Treffen die Befunde 1-9 zu?
+
+| Befund | BR | Belege |
+|--------|-----|--------|
+| 1 series_name=Format/Genre | **ja, mittel** | Sender-Container `BR` 2.191; sonst kaum. |
+| 3 Schreibvarianten (Case) | **klein** (128 Z.) | `Auf bairisch g'lacht!`/`Auf Bairisch g'lacht!`, `report München`/`report MÜNCHEN`. |
+| 4 "Film von" | **nein** (7) | |
+| 5 Episoden ohne Klammern | **ja, klein** (56 Z.) | |
+| 6 Datum "vom" | **nein** (0) | |
+| 7 Pipe-Suffix | **klein** (36 Z.) | `Mein Körper`/`Auf Spurensuche | ARD Wissen`; `... | Bergfreundinnen` (Serie *hinter* dem Pipe). |
+| 8 Beschreibungs-Metazeile | **klein** (9 Z.) | |
+| 9/10 Marker im Topic | **nein** (0) | |
+
+Kein neuer Befund. Der `| Bergfreundinnen`-Fall bestaetigt erneut Offene Frage 4
+(Serie mal vor, mal hinter dem Pipe).
