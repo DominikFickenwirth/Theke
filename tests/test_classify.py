@@ -203,8 +203,8 @@ def insert_row(conn, mediathek_id, sender="ARD", topic="", title="",
         (status, mediathek_id, sender, topic, title, description, duration))
 
 
-def args(force=False, analyze=False, dry_run=False):
-    return SimpleNamespace(force=force, analyze=analyze, dry_run=dry_run)
+def args(force=False):
+    return SimpleNamespace(classify_cmd="run", force=force)
 
 
 def insert_classified(conn, mediathek_id, sender="ARD", **cols):
@@ -282,13 +282,13 @@ def test_cli_classify_json_on_stdout_progress_on_stderr(tmp_path, capsys):
         insert_row(conn, "b", title="B")
     finally:
         conn.close()
-    assert main(["--json", "--db", db, "classify"]) == 0
+    assert main(["--json", "--db", db, "classify", "run"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"classified": 2}   # one parseable object
     assert captured.out.strip().count("\n") == 0           # ... and only that
 
 
-# -- classify report modes (--analyze / --dry-run), read-only ----------------
+# -- classify report (stored / --live), read-only ----------------------------
 
 def test_analyze_report_from_stored_columns(tmp_path):
     conn = open_db(tmp_path)
@@ -343,7 +343,21 @@ def test_report_min_rows_filters_small_senders(tmp_path):
         conn.close()
 
 
-def test_cli_classify_analyze_json(tmp_path, capsys):
+def test_report_sender_filter_narrows_to_named_senders(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="unklar",
+                          classify_confidence=0.2, flags="")
+        insert_classified(conn, "z", sender="ZDF", category="Spielfilm",
+                          classify_confidence=0.9, flags="")
+        report = classify_report(conn, live=False, min_rows=1, senders=["ZDF"])
+        assert set(report) == {"ZDF"}
+        assert report["ZDF"]["n"] == 1
+    finally:
+        conn.close()
+
+
+def test_cli_classify_report_json(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     conn = db_connect(db)
     try:
@@ -351,24 +365,37 @@ def test_cli_classify_analyze_json(tmp_path, capsys):
         insert_row(conn, "b", title="B")
     finally:
         conn.close()
-    assert main(["--json", "--db", db, "classify", "--analyze"]) == 0
+    assert main(["--json", "--db", db, "classify", "report"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["mode"] == "analyze"          # below the default min_rows -> empty
+    assert out["mode"] == "stored"           # below the default min_rows -> empty
     assert out["senders"] == {}
 
 
-def test_cli_classify_dry_run_json(tmp_path, capsys):
+def test_cli_classify_report_live_json(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     conn = db_connect(db)
     try:
         insert_row(conn, "a", title="A")
     finally:
         conn.close()
-    assert main(["--json", "--db", db, "classify", "--dry-run"]) == 0
-    assert json.loads(capsys.readouterr().out)["mode"] == "dry-run"
+    assert main(["--json", "--db", db, "classify", "report", "--live"]) == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "live"
 
 
-def test_cli_classify_analyze_and_dry_run_are_mutually_exclusive(tmp_path):
+def test_cli_classify_report_min_rows_zero_shows_small_sender(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="unklar",
+                          classify_confidence=0.2, flags="")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "report", "--min-rows", "0"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert set(out["senders"]) == {"ARD"}    # the single-row sender is now visible
+
+
+def test_cli_classify_requires_a_subcommand(tmp_path):
     db = str(tmp_path / "theke.db")
     db_connect(db).close()
-    assert main(["--db", db, "classify", "--analyze", "--dry-run"]) == 2  # usage error
+    assert main(["--db", db, "classify"]) == 2  # nested subcommand is required
