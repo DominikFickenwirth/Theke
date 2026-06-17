@@ -585,7 +585,7 @@ def _classify_rows(conn, rows, batch=5000) -> int:
 
 REPORT_MIN_ROWS = 1000   # senders below this are omitted (long tail of one-offs)
 
-_REPORT_FIELDS = ["year", "country", "se", "cat", "unklar",
+_REPORT_FIELDS = ["year", "country", "se", "cat", "unklar", "genre", "slot", "events",
                   "flag_a", "flag_s", "flag_u", "flag_t"]
 
 # Per-confidence-level buckets for --by-confidence: deterministic levels emitted
@@ -622,6 +622,9 @@ def _tally(counter, row):
     conf = row["classify_confidence"]
     if conf is not None and conf >= 0.8: counter["cat"] += 1   # category from a real signal
     if row["category"] == "unklar": counter["unklar"] += 1
+    if row["genre"] is not None:    counter["genre"] += 1
+    if row["slot"] is not None:     counter["slot"] += 1
+    if row["category"] == "Events": counter["events"] += 1
     if conf is not None:
         for key, level in _CONF_LEVELS:
             if round(conf, 2) == level: counter[key] += 1
@@ -656,8 +659,8 @@ def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
             _tally(acc.setdefault(r["sender"], _new_counter()), meta)
     else:
         rows = conn.execute("SELECT sender, year, country, season, episode, "
-                            "category, classify_confidence, flags FROM mediathek "
-                            + where, params)
+                            "category, classify_confidence, flags, genre, slot "
+                            "FROM mediathek " + where, params)
         for r in rows:
             _tally(acc.setdefault(r["sender"], _new_counter()), r)
     return {s: _summarize(c, by_confidence) for s, c in acc.items() if c["n"] >= min_rows}
@@ -701,7 +704,8 @@ def _print_report_diff(diff):
 
 
 _REPORT_TABLE_COLS = [("year", "year"), ("country", "cntry"), ("se", "S/E"),
-                      ("cat", "cat"), ("unklar", "unkl"), ("flag_a", "A"),
+                      ("cat", "cat"), ("unklar", "unkl"), ("genre", "genre"),
+                      ("slot", "slot"), ("events", "evt"), ("flag_a", "A"),
                       ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
 _CONF_TABLE_COLS = [("c90", "c.9"), ("c80", "c.8"), ("c50", "c.5"), ("c20", "c.2")]
 
