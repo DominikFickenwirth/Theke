@@ -8,6 +8,9 @@
 > box-drawing glyphs; draw arrows with "< - > | ^ V" (e.g. -->, <->, ^, V).
 > Applies to repo text files (source, config, docs) only -- NOT runtime data:
 > film list metadata is UTF-8 and may carry non-CP-1252 characters, stored as-is.
+> When printing such runtime data to the (Windows) console, set
+> `PYTHONIOENCODING=utf-8` -- else UnicodeEncodeError, since the data may exceed
+> CP-1252.
 
 ## Overview
 
@@ -264,9 +267,14 @@ Theke/
 +-- tests/                    pytest suite for the CLI
 +-- gui/                      Delphi desktop GUI (shells out to the CLI)
 +-- docker/                   image runs the Python CLI as entrypoint
++-- analysis/                 temporary review notes + scratch scripts
+|                             (committed, not shipped)
 +-- CLAUDE.md
 +-- README.md
 ```
+
+Feel free to build such analysis scripts under `analysis/` whenever they help
+(e.g. probing `build/theke.db`); keep throwaway tooling `_`-prefixed.
 
 ## Development and deployment
 
@@ -286,11 +294,25 @@ Theke/
 ## Coding Guidelines
 
 ALWAYS:
+- **TDD (test-driven).** Write tests first (including edge cases), watch them
+  fail -> then commit -> then write the code that makes all tests pass -> then
+  commit (2 commits per step). Refactor with the test green (one commit).
+- **Green before commit.** Run the suite before each commit; never commit with
+  failing or skipped tests.
+- **When in doubt, ask.** If a requirement is ambiguous or a decision is
+  genuinely the user's, ask before implementing -- never guess and run with it.
+- **Minimal dependencies.** Justify every new dependency; prefer the standard
+  library. FFmpeg is the only external runtime dependency besides Python, and
+  HTTP is needed in exactly three places (film list, TMDB API, media download) --
+  keep it that lean.
 - **Compact code.** Let the code speak; a short comment per unit/routine is
   enough, no sprawling comment blocks inside functions.
 - **Files may grow long** -- prefer a few clear, longer units over many tiny
   ones. No file/folder sprawl.
 - put logic in the Python CLI; the GUI stays a thin shell with no logic.
+- **Keep command handlers thin.** `cmd_*` handlers orchestrate (parse args, wire
+  stages, emit JSON); the real work lives in helpers that take plain inputs and
+  return values, so they are unit-testable without a CLI invocation.
 - keep Stages **idempotent** and re-runnable; state lives in the DB, not memory.
 - ANSI / CP-1252 content only in every text file (see encoding rule on top).
 - **Python formatting:**

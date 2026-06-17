@@ -192,6 +192,14 @@ Nicht-ARTE-Sender unveraendert.
 7. **2. Pass**: Schreibvarianten-/Alias-Normalisierung (Befund 3), Serien-/Slot-
    Extraktion aus `clean_title` (Doppelpunkt-Muster).
 
+## Arbeitsweise -- eine classify-Heuristik aendern
+
+(Spaeter nach `theke/classify.py` verschieben.) Eine Heuristik nie nur am
+Zielsender beurteilen: gegen die **ganze DB** messen -- `theke classify --dry-run`
+(per-sender coverage) bzw. ein Skript ueber `build/theke.db` -- und bestaetigen,
+dass **nicht anvisierte Sender nicht regressieren**. Zahlen zaehlen, nicht
+schaetzen (passt zur Test-Konvention "expected values hart kodieren").
+
 ## Anhang
 
 - `analysis/_verify_heuristics.py` -- Verifikation Q3 (Genre-Set) + Q4 (Pipe-Split)
