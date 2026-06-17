@@ -580,6 +580,11 @@ REPORT_MIN_ROWS = 1000   # senders below this are omitted (long tail of one-offs
 _REPORT_FIELDS = ["year", "country", "se", "cat", "unklar",
                   "flag_a", "flag_s", "flag_u", "flag_t"]
 
+# Per-confidence-level buckets for --by-confidence: deterministic levels emitted
+# by classify._confidence (0.9/0.8/0.5/0.2). Counted always, summarized only when
+# requested, so the default report shape stays stable.
+_CONF_LEVELS = [("c90", 0.9), ("c80", 0.8), ("c50", 0.5), ("c20", 0.2)]
+
 
 def _split_senders(value):
     """Comma-separated --sender value -> list of senders, or None when unset."""
@@ -596,7 +601,7 @@ def _sender_clause(senders):
 
 
 def _new_counter() -> dict:
-    return dict.fromkeys(["n"] + _REPORT_FIELDS, 0)
+    return dict.fromkeys(["n"] + _REPORT_FIELDS + [k for k, _ in _CONF_LEVELS], 0)
 
 
 def _tally(counter, row):
@@ -609,22 +614,29 @@ def _tally(counter, row):
     conf = row["classify_confidence"]
     if conf is not None and conf >= 0.8: counter["cat"] += 1   # category from a real signal
     if row["category"] == "unklar": counter["unklar"] += 1
+    if conf is not None:
+        for key, level in _CONF_LEVELS:
+            if round(conf, 2) == level: counter[key] += 1
     flags = row["flags"] or ""
     for letter in "asut":
         if letter.upper() in flags: counter["flag_" + letter] += 1
 
 
-def _summarize(counter) -> dict:
+def _summarize(counter, by_confidence=False) -> dict:
     n = counter["n"]
     out = {"n": n}
     out.update({f + "_pct": round(100 * counter[f] / n, 1) for f in _REPORT_FIELDS})
+    if by_confidence:
+        out.update({k + "_pct": round(100 * counter[k] / n, 1) for k, _ in _CONF_LEVELS})
     return out
 
 
-def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None) -> dict:
+def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
+                    by_confidence=False) -> dict:
     """Per-sender classify coverage. live=False summarizes the stored columns;
     live=True runs classify() over the rows without writing. `senders` limits the
-    scan to a list of senders. Read-only -> no transaction."""
+    scan to a list of senders; `by_confidence` adds per-confidence-level columns.
+    Read-only -> no transaction."""
     acc = {}
     where, params = _sender_clause(senders)
     if live:
@@ -640,21 +652,27 @@ def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None) ->
                             + where, params)
         for r in rows:
             _tally(acc.setdefault(r["sender"], _new_counter()), r)
-    return {s: _summarize(c) for s, c in acc.items() if c["n"] >= min_rows}
+    return {s: _summarize(c, by_confidence) for s, c in acc.items() if c["n"] >= min_rows}
 
 
 _REPORT_TABLE_COLS = [("year", "year"), ("country", "cntry"), ("se", "S/E"),
                       ("cat", "cat"), ("unklar", "unkl"), ("flag_a", "A"),
                       ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
+_CONF_TABLE_COLS = [("c90", "c.9"), ("c80", "c.8"), ("c50", "c.5"), ("c20", "c.2")]
 
 
-def _print_report_table(report, mode):
-    """One aligned line per sender, sorted by row count, to stdout (the result)."""
+def _print_report_table(report, mode, by_confidence=False):
+    """One aligned line per sender, sorted by row count, to stdout (the result).
+    With by_confidence the single cat column is replaced by per-level columns."""
+    cols = _REPORT_TABLE_COLS
+    if by_confidence:
+        i = next(j for j, (f, _) in enumerate(cols) if f == "cat")
+        cols = cols[:i] + _CONF_TABLE_COLS + cols[i + 1:]
     print(f"classify coverage ({mode}, % of rows)")
-    print(f'{"SENDER":14}{"n":>8}' + "".join(f"{h:>7}" for _, h in _REPORT_TABLE_COLS))
+    print(f'{"SENDER":14}{"n":>8}' + "".join(f"{h:>7}" for _, h in cols))
     for sender, st in sorted(report.items(), key=lambda kv: -kv[1]["n"]):
         print(f'{sender:14}{st["n"]:>8}'
-              + "".join(f'{st[f + "_pct"]:>7.1f}' for f, _ in _REPORT_TABLE_COLS))
+              + "".join(f'{st[f + "_pct"]:>7.1f}' for f, _ in cols))
 
 
 def _classify_report_cmd(conn, args) -> dict:
@@ -662,11 +680,11 @@ def _classify_report_cmd(conn, args) -> dict:
     if args.live:
         log.info("running classify() live (no writes)")
     report = classify_report(conn, live=args.live, min_rows=args.min_rows,
-                             senders=senders)
+                             senders=senders, by_confidence=args.by_confidence)
     mode = "live" if args.live else "stored"
     if args.json:
         return {"mode": mode, "senders": report}
-    _print_report_table(report, mode)
+    _print_report_table(report, mode, by_confidence=args.by_confidence)
     return {}
 
 
@@ -720,7 +738,8 @@ def build_parser() -> argparse.ArgumentParser:
                                        "re-runs classify() without writing.")
     crep.add_argument("--sender",   metavar="X[,Y]",                          help="restrict to these senders (comma-separated)")
     crep.add_argument("--min-rows", type=int, default=REPORT_MIN_ROWS, metavar="N", help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
-    crep.add_argument("--live",     action="store_true",                      help="run classify() live instead of reading the stored columns")
+    crep.add_argument("--live",          action="store_true",                 help="run classify() live instead of reading the stored columns")
+    crep.add_argument("--by-confidence", action="store_true",                 help="split the category column into per-confidence-level columns")
 
     return parser
 
