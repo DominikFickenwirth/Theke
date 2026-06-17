@@ -201,12 +201,13 @@ def test_flag_sign_language_suffix_without_parens():
 
 
 def test_flag_simple_language_suffix():
-    # B10: " in Einfacher Sprache" -> new flag E (simple-language edition).
-    r = classify("tagesschau24", "Nachrichten in Einfacher Sprache",
-                 "Nachrichten in Einfacher Sprache", "", 900)
+    # B10: " in Einfacher Sprache" -> new flag E (simple-language edition); the
+    # suffix is stripped from the title and the topic (-> series_name).
+    r = classify("tagesschau24", "Tagesschau in Einfacher Sprache",
+                 "Tagesschau in Einfacher Sprache", "", 900)
     assert r["flags"] == "E"
-    assert r["clean_title"] == "Nachrichten"
-    assert r["series_name"] == "Nachrichten"
+    assert r["clean_title"] == "Tagesschau"
+    assert r["series_name"] == "Tagesschau"
 
 
 def test_flag_burned_in_subtitles():

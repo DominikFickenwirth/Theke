@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from theke.classify import classify, looks_like_country, CLASSIFY_COLS, CATWORD
+from theke.classify import classify, looks_like_country, GENRE_SET, CLASSIFY_COLS, CATWORD
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -751,12 +751,8 @@ def _classify_report_cmd(conn, args) -> dict:
 # assembles {sender: {check: ...}}. Read-only.
 
 # Topic that is itself a bare format/genre word (not a real series). CATWORD has
-# no bare "Film"/"Doku"; add them and the curated genre rubrics.
-_BARE_TOPIC = set(re.split(r"\|", CATWORD)) | {
-    "Film", "Doku", "Reise", "Natur", "Musik", "Tiere", "Geschichte", "Politik",
-    "Politik und Gesellschaft", "Sport", "Nachrichten", "Wirtschaft", "Europa",
-    "Nahost", "Deutschland", "Esskulturen", "Kultur", "Kulturdoku",
-    "Gesellschaft", "Wissen", "Wissenschaftsdoku", "Buch", "Theater", "Märchen"}
+# no bare "Film"/"Doku"; add them and the curated genre rubrics (GENRE_SET).
+_BARE_TOPIC = set(re.split(r"\|", CATWORD)) | {"Film", "Doku"} | GENRE_SET
 _TOPIC_MARKER = re.compile(
     r"\((?:mit\s+)?(?:Gebärdensprache|Audiodeskription|Hörfassung|klare Sprache"
     r"|Originalversion|mit Untertitel|OmU|OmdU|ÖGS|OV)\)?", re.I)

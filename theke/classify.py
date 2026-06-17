@@ -47,6 +47,95 @@ SUFFIX_MARKERS = [
     (re.compile(r'\s+in\s+Gebärdensprache$', re.I),                          'S'),
     (re.compile(r'\s+in\s+(?:Einfacher|Leichter)\s+Sprache$', re.I),         'E'),
 ]
+# -- topic routing vocabulary (B1/B2/B7) ------------------------------------
+# A non-ARTE topic is usually a series, but is often a rubric: a bare format
+# word, a curated genre, a clip/container bucket, an event, or a Dachmarke|series
+# pipe. route_topic() sorts these out so series_name stays a real show name.
+
+# Genre rubrics, matched EXACTLY (never as substring): these appear as a whole
+# topic only on the rubric senders (3sat/ZDF/DW/ARTE.DE) and are never a real
+# series elsewhere ("Sport" is a rubric, "Sport im Osten" is a series). Shared
+# with the classify audit's bare-topic check.
+GENRE_SET = {'Reise', 'Natur', 'Musik', 'Tiere', 'Geschichte', 'Politik',
+             'Politik und Gesellschaft', 'Sport', 'Nachrichten', 'Wirtschaft',
+             'Europa', 'Nahost', 'Deutschland', 'Esskulturen', 'Kultur',
+             'Kulturdoku', 'Gesellschaft', 'Wissen', 'Wissenschaftsdoku', 'Buch',
+             'Theater', 'Märchen'}
+
+# Topic that is itself a format -> category, no series. Bare/compound rubrics map
+# to a canonical category; plain CATWORD topics keep their own word.
+FORMAT_TOPICS = {'film':'Film', 'filme':'Film', 'filme in der ard':'Film',
+                 'doku':'Dokumentation', 'dokus':'Dokumentation',
+                 'dokumentationen':'Dokumentation',
+                 'doku & reportage':'Doku/Reportage',
+                 'dokus & reportagen':'Doku/Reportage',
+                 'dokumentationen und reportagen':'Doku/Reportage'}
+
+# Clip/container sammeltopics: series=None, category left to the duration prior.
+CONTAINER_TOPICS = {'tagesschau24', 'beiträge', 'br', 'sr', '3sat', 'sportflash',
+                    'zib flash', 'srf news videos', 'sr 3 videos', 'vintage videos'}
+EVENT_RX = re.compile(r'\b(Berlinale|Grimme[- ]Preis|Filmpreis|Filmfest'
+                      r'|Goldene Kamera|Festival)\b')
+
+# Pipe split: the side carrying a sender token, a Dachmarke or a section word is
+# the slot; the other side is the series. Neither -> title|subtitle, do not split.
+SENDER_TOKENS = {'ard', 'zdf', '3sat', 'hr', 'br', 'wdr', 'ndr', 'swr', 'sr',
+                 'mdr', 'rbb', 'orf', 'srf', 'rbtv', 'alpha', 'arte', 'phoenix',
+                 'dw', 'kika'}
+BRANDS = ['ard wissen', 'radio bremen', 'alpha lernen']
+SECTION_WORDS = {'regionalmagazin', 'sportblitz', 'wetter', 'doku', 'extra',
+                 'retro', 'geschichten', 'spezial'}
+
+
+def _format_category(tp):
+    c = FORMAT_TOPICS.get(tp.casefold())
+    if c: return c
+    return tp if re.fullmatch(r'(' + CATWORD + r')', tp, re.I) else None
+
+
+def _is_container(tp):
+    low = tp.casefold()
+    return (low in CONTAINER_TOPICS or bool(re.search(r'clips?$', low))
+            or bool(re.search(r'\bvideos?\b', low)))
+
+
+def _side_is_slot(s):
+    low = s.casefold()
+    toks = set(re.findall(r'[a-zäöüß0-9]+', low))
+    return (bool(toks & SENDER_TOKENS) or any(b in low for b in BRANDS)
+            or bool(toks & SECTION_WORDS))
+
+
+def route_topic(topic) -> dict:
+    """Route a non-ARTE topic. Returns dict(series_name, genre, slot, category,
+    kat_src) with None where a slot does not apply."""
+    out = dict(series_name=None, genre=None, slot=None, category=None, kat_src=None)
+    tp = (topic or '').strip()
+    if not tp:
+        return out
+    if '|' in tp:                              # Dachmarke|series pipe
+        parts = [p.strip() for p in tp.split('|')]
+        if len(parts) == 2 and parts[0] and parts[1]:
+            a, b = parts
+            sa, sb = _side_is_slot(a), _side_is_slot(b)
+            if sa and not sb: out['slot'], out['series_name'] = a, b; return out
+            if sb and not sa: out['slot'], out['series_name'] = b, a; return out
+        out['series_name'] = tp                # both/neither slot -> keep whole
+        return out
+    cat = _format_category(tp)
+    if cat:
+        out['category'] = cat; out['kat_src'] = 'topic'; return out
+    if _is_container(tp):
+        return out                             # series None, category from prior
+    if tp in GENRE_SET:
+        out['genre'] = tp; return out
+    if EVENT_RX.search(tp):
+        out['series_name'] = tp; out['category'] = 'Events'; out['kat_src'] = 'event'
+        return out
+    out['series_name'] = tp                    # long tail: today's behavior
+    return out
+
+
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
 TITLE_META_SENDERS = {'ZDF', '3Sat'}
 ARTE_CAT = {'Kino':'Film','Fernsehfilme und Serien':'Serie/Fernsehfilm','ARTE Concert':'Konzert',
@@ -65,7 +154,7 @@ CLASSIFY_COLS = ['clean_title', 'series_name', 'genre', 'slot', 'season', 'episo
 def _confidence(kat_src, category):
     """Deterministic confidence from how the category was found."""
     if kat_src in ('metazeile', 'arte-topic'): return 0.9
-    if kat_src == 'topic':                      return 0.8
+    if kat_src in ('topic', 'event'):           return 0.8
     return 0.2 if category == 'unklar' else 0.5
 
 
@@ -134,9 +223,13 @@ def classify(sender, topic, title, description, duration) -> dict:
             if sender in TITLE_META_SENDERS:   # strip "- Spielfilm, ... YEAR" from title
                 t = t[:m.start()].rstrip(' -–')
 
-    # -- Pass 4: series_name ----------------------------------------------
+    # -- Pass 4: series_name via topic routing ----------------------------
     if sender not in ARTE_LANG:
-        r['series_name'] = tp
+        routed = route_topic(tp)
+        r['series_name'] = routed['series_name']
+        r['genre'] = routed['genre']; r['slot'] = routed['slot']
+        if routed['category'] and not r['category']:   # metazeile (Pass 3) wins
+            r['category'] = routed['category']; kat_src = routed['kat_src']
         t = PIPESUF.sub('', t)                 # drop " | Reihe" suffix from title
 
     # -- Pass 5: category from ARTE taxonomy / duration prior -------------
@@ -144,8 +237,6 @@ def classify(sender, topic, title, description, duration) -> dict:
         ober, _, unter = tp.partition(' - ')
         r['category'] = ARTE_SUB.get(unter.strip(), ARTE_CAT.get(ober.strip()))
         kat_src = 'arte-topic'
-    if not r['category'] and re.fullmatch(r'(' + CATWORD + r')', tp.strip(), re.I):
-        r['category'] = tp.strip(); kat_src = 'topic'   # topic itself is a category word
     if not r['category']:                      # no reliable signal -> honest low-conf prior
         s = duration or 0
         r['category'] = ('Clip' if s < 120 else 'Beitrag/Episode' if s < 1800 else 'unklar')
