@@ -357,6 +357,37 @@ def test_report_sender_filter_narrows_to_named_senders(tmp_path):
         conn.close()
 
 
+def test_report_by_confidence_splits_category_into_per_level_columns(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # two ARD rows, one per confidence level (0.9 and 0.5)
+        insert_classified(conn, "a", category="Spielfilm", classify_confidence=0.9, flags="")
+        insert_classified(conn, "b", category="Beitrag/Episode", classify_confidence=0.5, flags="")
+        st = classify_report(conn, live=False, min_rows=1, by_confidence=True)["ARD"]
+        assert st["c90_pct"] == 50.0   # 1 of 2 rows at conf 0.9
+        assert st["c80_pct"] == 0.0
+        assert st["c50_pct"] == 50.0   # 1 of 2 rows at conf 0.5
+        assert st["c20_pct"] == 0.0
+        # the per-level columns are absent unless requested (stable default shape)
+        assert "c90_pct" not in classify_report(conn, live=False, min_rows=1)["ARD"]
+    finally:
+        conn.close()
+
+
+def test_cli_classify_report_by_confidence_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm",
+                          classify_confidence=0.9, flags="")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "report",
+                 "--by-confidence", "--min-rows", "0"]) == 0
+    st = json.loads(capsys.readouterr().out)["senders"]["ARD"]
+    assert st["c90_pct"] == 100.0
+
+
 def test_cli_classify_report_json(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     conn = db_connect(db)
