@@ -525,6 +525,7 @@ def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
         case "run":    return _classify_run(conn, args)
         case "report": return _classify_report_cmd(conn, args)
         case "audit":  return _classify_audit_cmd(conn, args)
+        case "show":   return _classify_show_cmd(conn, args)
         case _: raise DbError(f"unhandled classify action: {args.classify_cmd}")
 
 
@@ -874,6 +875,80 @@ def _classify_audit_cmd(conn, args) -> dict:
     return {}
 
 
+# -- classify show / dist (read-only inspection) ------------------------------
+# show dumps the classify columns of matching rows; dist tallies one field's
+# value distribution. Both validate field names against the live mediathek
+# columns so a name can be interpolated into SQL safely (values stay bound).
+
+_SHOW_COLS = ["sender", "topic", "title", "clean_title", "series_name",
+              "category", "country", "year", "season", "episode", "flags",
+              "classify_confidence"]
+
+
+def _valid_fields(conn) -> set:
+    """The mediathek column names (for validating --field / filter fields)."""
+    return {r["name"] for r in conn.execute("PRAGMA table_info(mediathek)")}
+
+
+def _check_field(field, valid):
+    if field not in valid:
+        raise ValueError(f"unknown field: {field}")
+    return field
+
+
+def _build_show_where(conn, args):
+    """Turn the structured filter flags into a parameterized WHERE clause. Field
+    names are validated against the table; values are bound, never interpolated."""
+    valid = _valid_fields(conn)
+    conds, params = [], []
+    senders = _split_csv(args.sender)
+    if senders:
+        conds.append(f"sender IN ({','.join('?' * len(senders))})")
+        params += senders
+    for field, pattern in args.like or []:
+        conds.append(f"{_check_field(field, valid)} LIKE ?"); params.append(pattern)
+    for field, value in args.eq or []:
+        conds.append(f"{_check_field(field, valid)} = ?"); params.append(value)
+    for field in args.null or []:
+        conds.append(f"{_check_field(field, valid)} IS NULL")
+    for field in args.not_null or []:
+        conds.append(f"{_check_field(field, valid)} IS NOT NULL")
+    if args.min_conf is not None:
+        conds.append("classify_confidence >= ?"); params.append(args.min_conf)
+    if args.max_conf is not None:
+        conds.append("classify_confidence <= ?"); params.append(args.max_conf)
+    return ("WHERE " + " AND ".join(conds) if conds else ""), params
+
+
+def classify_show(conn, where_sql, params, limit) -> list:
+    """Rows matching where_sql, as dicts over mediathek_id + the inspection
+    columns. Read-only -> no transaction."""
+    rows = conn.execute(
+        "SELECT mediathek_id, " + ", ".join(_SHOW_COLS) + " FROM mediathek "
+        + where_sql + " LIMIT ?", list(params) + [limit])
+    return [dict(r) for r in rows]
+
+
+def _print_show(rows):
+    """One compact two-line block per row to stdout."""
+    print(f"{len(rows)} row(s)")
+    for r in rows:
+        print(f'[{r["sender"]}] {r["clean_title"]!r}  cat={r["category"]!r} '
+              f'country={r["country"]!r} year={r["year"]} '
+              f'S/E={r["season"]}/{r["episode"]} conf={r["classify_confidence"]}')
+        print(f'      topic={r["topic"]!r} title={r["title"]!r} '
+              f'series={r["series_name"]!r} flags={r["flags"]!r}')
+
+
+def _classify_show_cmd(conn, args) -> dict:
+    where, params = _build_show_where(conn, args)
+    rows = classify_show(conn, where, params, args.limit)
+    if args.json:
+        return {"rows": rows}
+    _print_show(rows)
+    return {}
+
+
 # -- cli ----------------------------------------------------------------------
 # Stable grammar and exit codes: the GUI drives the CLI and parses the --json
 # output (exactly one JSON object on stdout per call).
@@ -937,6 +1012,19 @@ def build_parser() -> argparse.ArgumentParser:
     caud.add_argument("--sender", metavar="X[,Y]",            help="restrict to these senders (comma-separated)")
     caud.add_argument("--check",  metavar="NAME[,NAME]",      help="run only these checks (default all)")
     caud.add_argument("--limit",  type=int, default=5, metavar="N", help="examples per finding (default 5)")
+
+    csho = csub.add_parser("show", help="read-only sample of rows with their classify columns",
+                           description="Dump the classify columns of matching rows. "
+                                       "Filters are ANDed; FIELD must be a mediathek "
+                                       "column.")
+    csho.add_argument("--sender",    metavar="X[,Y]",                     help="restrict to these senders (comma-separated)")
+    csho.add_argument("--like",      nargs=2, action="append", metavar=("FIELD", "PATTERN"), help="FIELD LIKE PATTERN (repeatable)")
+    csho.add_argument("--eq",        nargs=2, action="append", metavar=("FIELD", "VALUE"),   help="FIELD = VALUE (repeatable)")
+    csho.add_argument("--null",      action="append", metavar="FIELD",    help="FIELD IS NULL (repeatable)")
+    csho.add_argument("--not-null",  action="append", metavar="FIELD",    help="FIELD IS NOT NULL (repeatable)")
+    csho.add_argument("--min-conf",  type=float, metavar="X",             help="classify_confidence >= X")
+    csho.add_argument("--max-conf",  type=float, metavar="X",             help="classify_confidence <= X")
+    csho.add_argument("--limit",     type=int, default=20, metavar="N",   help="max rows to dump (default 20)")
 
     return parser
 

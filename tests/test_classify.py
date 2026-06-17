@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from theke import *
+from theke import _build_show_where
 from theke.classify import classify, CLASSIFY_COLS
 
 
