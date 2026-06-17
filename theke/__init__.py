@@ -518,12 +518,17 @@ _UPDATE_SQL = (
 
 
 def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
-    """Classify mediathek rows: extract metadata into the classify columns. By
-    default only unclassified rows (status '0'); --force reprocesses all.
-    --analyze/--dry-run are read-only coverage reports instead (stored columns
-    resp. a live classify() pass), they write nothing."""
-    if args.analyze or args.dry_run:
-        return _classify_report_cmd(conn, args)
+    """Dispatch a classify action: `run` writes the classify columns; the others
+    (`report`/`audit`/`show`/`dist`) are read-only inspection tools."""
+    match args.classify_cmd:
+        case "run":    return _classify_run(conn, args)
+        case "report": return _classify_report_cmd(conn, args)
+        case _: raise DbError(f"unhandled classify action: {args.classify_cmd}")
+
+
+def _classify_run(conn, args) -> dict:
+    """Classify mediathek rows into the classify columns and flip status 0 -> 1.
+    By default only unclassified rows (status '0'); --force reprocesses all."""
     sql = _CLASSIFY_READ if not args.force else _CLASSIFY_READ.replace(
         " WHERE status='0'", "")
     log.info("classifying rows")
@@ -576,6 +581,20 @@ _REPORT_FIELDS = ["year", "country", "se", "cat", "unklar",
                   "flag_a", "flag_s", "flag_u", "flag_t"]
 
 
+def _split_senders(value):
+    """Comma-separated --sender value -> list of senders, or None when unset."""
+    if not value:
+        return None
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def _sender_clause(senders):
+    """WHERE fragment + params restricting to the given senders ('' when None)."""
+    if not senders:
+        return "", []
+    return f"WHERE sender IN ({','.join('?' * len(senders))})", list(senders)
+
+
 def _new_counter() -> dict:
     return dict.fromkeys(["n"] + _REPORT_FIELDS, 0)
 
@@ -602,21 +621,23 @@ def _summarize(counter) -> dict:
     return out
 
 
-def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS) -> dict:
-    """Per-sender classify coverage. live=False summarizes the stored columns
-    (--analyze); live=True runs classify() over the rows without writing
-    (--dry-run). Read-only -> no transaction."""
+def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None) -> dict:
+    """Per-sender classify coverage. live=False summarizes the stored columns;
+    live=True runs classify() over the rows without writing. `senders` limits the
+    scan to a list of senders. Read-only -> no transaction."""
     acc = {}
+    where, params = _sender_clause(senders)
     if live:
         rows = conn.execute("SELECT mediathek_id, sender, topic, title, "
-                            "description, duration FROM mediathek")
+                            "description, duration FROM mediathek " + where, params)
         for r in rows:
             meta = classify(r["sender"], r["topic"], r["title"],
                             r["description"], r["duration"])
             _tally(acc.setdefault(r["sender"], _new_counter()), meta)
     else:
         rows = conn.execute("SELECT sender, year, country, season, episode, "
-                            "category, classify_confidence, flags FROM mediathek")
+                            "category, classify_confidence, flags FROM mediathek "
+                            + where, params)
         for r in rows:
             _tally(acc.setdefault(r["sender"], _new_counter()), r)
     return {s: _summarize(c) for s, c in acc.items() if c["n"] >= min_rows}
@@ -637,11 +658,12 @@ def _print_report_table(report, mode):
 
 
 def _classify_report_cmd(conn, args) -> dict:
-    live = args.dry_run
-    if live:
-        log.info("running classify() live (dry-run, no writes)")
-    report = classify_report(conn, live=live)
-    mode = "dry-run" if live else "analyze"
+    senders = _split_senders(args.sender)
+    if args.live:
+        log.info("running classify() live (no writes)")
+    report = classify_report(conn, live=args.live, min_rows=args.min_rows,
+                             senders=senders)
+    mode = "live" if args.live else "stored"
     if args.json:
         return {"mode": mode, "senders": report}
     _print_report_table(report, mode)
@@ -678,16 +700,27 @@ def build_parser() -> argparse.ArgumentParser:
                                         "seconds. Progress is printed to stderr.")
     mirror.add_argument("--force", action="store_true", help="always download the full list")
 
-    classify = sub.add_parser("classify", help="extract metadata from mirrored rows",
-                              description="Extract structured metadata (title, "
-                                          "series/season/episode, category, year, "
-                                          "country, language, flags) from the "
-                                          "free-text fields. Progress is printed "
-                                          "to stderr.")
-    classify.add_argument("--force", action="store_true", help="reclassify all rows, not just unclassified")
-    report = classify.add_mutually_exclusive_group()
-    report.add_argument("--analyze", action="store_true", help="read-only: per-sender coverage report from the stored columns")
-    report.add_argument("--dry-run", action="store_true", help="read-only: run classify() live and report coverage, writing nothing")
+    classify = sub.add_parser("classify", help="extract metadata and inspect the result",
+                              description="Extract structured metadata from the "
+                                          "free-text fields (run) and inspect the "
+                                          "result with read-only reports. Progress "
+                                          "is printed to stderr.")
+    csub = classify.add_subparsers(dest="classify_cmd", required=True, metavar="action")
+
+    crun = csub.add_parser("run", help="classify mirrored rows (writes the classify columns)",
+                           description="Extract structured metadata (title, "
+                                       "series/season/episode, category, year, "
+                                       "country, language, flags) into the classify "
+                                       "columns and flip status 0 -> 1.")
+    crun.add_argument("--force", action="store_true", help="reclassify all rows, not just unclassified")
+
+    crep = csub.add_parser("report", help="read-only per-sender coverage report",
+                           description="Per-sender coverage of the classify fields. "
+                                       "Reads the stored columns by default; --live "
+                                       "re-runs classify() without writing.")
+    crep.add_argument("--sender",   metavar="X[,Y]",                          help="restrict to these senders (comma-separated)")
+    crep.add_argument("--min-rows", type=int, default=REPORT_MIN_ROWS, metavar="N", help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
+    crep.add_argument("--live",     action="store_true",                      help="run classify() live instead of reading the stored columns")
 
     return parser
 
