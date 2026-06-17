@@ -486,3 +486,127 @@ def test_cli_classify_requires_a_subcommand(tmp_path):
     db = str(tmp_path / "theke.db")
     db_connect(db).close()
     assert main(["--db", db, "classify"]) == 2  # nested subcommand is required
+
+
+# -- classify audit (read-only findings scan) --------------------------------
+
+def test_audit_bare_topic(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="Spielfilm", title="X")
+        insert_row(conn, "b", sender="ARD", topic="Tatort", title="Y")   # real series
+        res = classify_audit(conn, checks=["bare-topic"])
+        assert res["ARD"]["bare-topic"]["count"] == 1
+        assert res["ARD"]["bare-topic"]["examples"] == ["Spielfilm"]
+    finally:
+        conn.close()
+
+
+def test_audit_topic_pipe(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="HR", topic="hr Retro | Geschichte", title="X")
+        res = classify_audit(conn, checks=["topic-pipe"])
+        assert res["HR"]["topic-pipe"]["count"] == 1
+        assert res["HR"]["topic-pipe"]["examples"] == ["hr Retro | Geschichte"]
+    finally:
+        conn.close()
+
+
+def test_audit_topic_marker(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ORF", topic="ZIB (mit Gebärdensprache)", title="X")
+        res = classify_audit(conn, checks=["topic-marker"])
+        assert res["ORF"]["topic-marker"]["count"] == 1
+        assert res["ORF"]["topic-marker"]["examples"] == ["ZIB (mit Gebärdensprache)"]
+    finally:
+        conn.close()
+
+
+def test_audit_case_variants(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="3Sat", topic="nano", title="X")
+        insert_row(conn, "b", sender="3Sat", topic="NANO", title="Y")
+        res = classify_audit(conn, checks=["case-variants"])
+        assert res["3Sat"]["case-variants"]["count"] == 2          # both rows
+        assert res["3Sat"]["case-variants"]["examples"] == ["NANO/nano"]
+    finally:
+        conn.close()
+
+
+def test_audit_country_shape(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ZDF", country="vom 3. Mai")   # date residue
+        insert_classified(conn, "b", sender="ZDF", country="Deutschland")  # real country
+        res = classify_audit(conn, checks=["country-shape"])
+        assert res["ZDF"]["country-shape"]["count"] == 1
+        assert res["ZDF"]["country-shape"]["examples"] == ["vom 3. Mai"]
+    finally:
+        conn.close()
+
+
+def test_audit_title_credit(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="3Sat",
+                          clean_title="Der Wald - Film von Hans Meiser")
+        insert_classified(conn, "b", sender="3Sat", clean_title="Der Wald")
+        res = classify_audit(conn, checks=["title-credit"])
+        assert res["3Sat"]["title-credit"]["count"] == 1
+        assert res["3Sat"]["title-credit"]["examples"] == ["Der Wald - Film von Hans Meiser"]
+    finally:
+        conn.close()
+
+
+def test_audit_episodic_unparsed(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # raw, unclassified -> season/episode are NULL but the title looks episodic
+        insert_row(conn, "a", sender="HR", topic="Die Reise", title="Die Reise, Folge 3")
+        res = classify_audit(conn, checks=["episodic-unparsed"])
+        assert res["HR"]["episodic-unparsed"]["count"] == 1
+        assert res["HR"]["episodic-unparsed"]["examples"] == ["Die Reise, Folge 3"]
+    finally:
+        conn.close()
+
+
+def test_audit_limit_caps_examples(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        for i, w in enumerate(("Spielfilm", "Drama", "Krimi")):
+            insert_row(conn, str(i), sender="ARD", topic=w, title="X")
+        res = classify_audit(conn, checks=["bare-topic"], limit=2)
+        assert res["ARD"]["bare-topic"]["count"] == 3          # all counted
+        assert len(res["ARD"]["bare-topic"]["examples"]) == 2  # examples capped
+    finally:
+        conn.close()
+
+
+def test_audit_unknown_check_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(Exception):
+            classify_audit(conn, checks=["nope"])
+    finally:
+        conn.close()
+
+
+def test_cli_audit_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="Spielfilm", title="X")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "audit", "--check", "bare-topic"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["senders"]["ARD"]["bare-topic"]["count"] == 1
+
+
+def test_cli_audit_unknown_check_exits_1(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db).close()
+    assert main(["--db", db, "classify", "audit", "--check", "nope"]) == 1
