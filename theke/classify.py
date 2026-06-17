@@ -159,11 +159,34 @@ def route_topic(topic) -> dict:
 
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
 TITLE_META_SENDERS = {'ZDF', '3Sat'}
+# ARTE genre taxonomy "Ober - Unter"; the sub-label wins, else the super-label.
+# Keys are the source labels in every ARTE UI language (DE/FR/EN/ES/IT/PL); the
+# category values stay the German canonical set.
 ARTE_CAT = {'Kino':'Film','Fernsehfilme und Serien':'Serie/Fernsehfilm','ARTE Concert':'Konzert',
             'Geschichte':'Doku','Wissenschaft':'Doku','Entdeckung der Welt':'Doku','Entdeckung':'Doku',
-            'Aktuelles und Gesellschaft':'Reportage','Kultur und Pop':'Kultur'}
+            'Aktuelles und Gesellschaft':'Reportage','Kultur und Pop':'Kultur',
+            # FR
+            'Cinéma':'Film','Histoire':'Doku','Sciences':'Doku','Info et société':'Reportage',
+            'Séries et fictions':'Serie/Fernsehfilm','Culture et pop':'Kultur','Voyages et découvertes':'Doku',
+            # EN
+            'Cinema':'Film','History':'Doku','Politics and society':'Reportage',
+            'Series':'Serie/Fernsehfilm','Culture':'Kultur',
+            # ES
+            'Cine':'Film','Historia':'Doku','Ciencias':'Doku','Política y sociedad':'Reportage',
+            'Series y ficciones':'Serie/Fernsehfilm','Cultura y pop':'Kultur','Viajes y naturaleza':'Doku',
+            # IT
+            'Storia':'Doku','Scienze':'Doku','Politica e società':'Reportage',
+            'Serie e fiction':'Serie/Fernsehfilm','Cultura':'Kultur','Viaggi e scoperte':'Doku',
+            # PL
+            'Kino':'Film','Nauka':'Doku','Polityka i społeczeństwo':'Reportage',
+            'Seriale i filmy fabularne':'Serie/Fernsehfilm','Kultura':'Kultur','Odkrycia':'Doku'}
 ARTE_SUB = {'Filme':'Spielfilm','Kurzfilme':'Kurzfilm','Stummfilme':'Stummfilm',
-            'Serien':'Serie','Fernsehfilme':'Fernsehfilm'}
+            'Serien':'Serie','Fernsehfilme':'Fernsehfilm',
+            'Films':'Spielfilm','Film':'Spielfilm','Películas':'Spielfilm','Filmy':'Spielfilm',
+            'Courts métrages':'Kurzfilm','Short films':'Kurzfilm','Cortometrajes':'Kurzfilm',
+            'Cortometraggi':'Kurzfilm','Filmy krótkometrażowe':'Kurzfilm',
+            'Séries':'Serie','Series':'Serie','Serie':'Serie','Seriale':'Serie',
+            'Webseries':'Serie','Webseriale':'Serie'}
 
 # Columns classify writes; the returned dict has exactly these keys. status and
 # mediathek_id are handled by the DB layer, not here.
