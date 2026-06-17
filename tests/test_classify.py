@@ -388,6 +388,62 @@ def test_cli_classify_report_by_confidence_json(tmp_path, capsys):
     assert st["c90_pct"] == 100.0
 
 
+def test_report_diff_reports_per_field_churn(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="x", title="Der Fall",
+                   description="Spielfilm Deutschland 2003.", duration=5400)
+        # pretend an older classify() run stored a different category/year; the
+        # other columns already match what classify() produces today
+        conn.execute("UPDATE mediathek SET category='OldCat', year=1999, "
+                     "clean_title='Der Fall', series_name='x', country='Deutschland', "
+                     "classify_confidence=0.9, language='de', flags='' "
+                     "WHERE mediathek_id='a'")
+        ard = classify_report_diff(conn)["ARD"]
+        assert ard["category"]["changed"] == 1
+        assert ard["year"]["changed"] == 1
+        assert ard["category"]["samples"][0] == {
+            "id": "a", "before": "OldCat", "after": "Spielfilm"}
+        assert ard["year"]["samples"][0] == {"id": "a", "before": 1999, "after": 2003}
+        assert "clean_title" not in ard   # unchanged fields are omitted
+        # read-only: stored columns are untouched
+        assert conn.execute("SELECT category FROM mediathek WHERE mediathek_id='a'"
+                            ).fetchone()["category"] == "OldCat"
+    finally:
+        conn.close()
+
+
+def test_report_diff_senders_with_no_churn_are_omitted(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # stored columns already equal a live classify() pass -> no churn
+        insert_row(conn, "a", sender="ARD", topic="x", title="A", duration=60)
+        conn.execute("UPDATE mediathek SET category='Clip', series_name='x', "
+                     "clean_title='A', language='de', flags='', "
+                     "classify_confidence=0.2 WHERE mediathek_id='a'")
+        assert classify_report_diff(conn) == {}
+    finally:
+        conn.close()
+
+
+def test_cli_classify_report_diff_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="x", title="Der Fall",
+                   description="Spielfilm Deutschland 2003.", duration=5400)
+        conn.execute("UPDATE mediathek SET category='OldCat', year=1999, "
+                     "clean_title='Der Fall', series_name='x', country='Deutschland', "
+                     "classify_confidence=0.9, language='de', flags='' "
+                     "WHERE mediathek_id='a'")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "report", "--diff"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "diff"
+    assert out["senders"]["ARD"]["category"]["changed"] == 1
+
+
 def test_cli_classify_report_json(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     conn = db_connect(db)
