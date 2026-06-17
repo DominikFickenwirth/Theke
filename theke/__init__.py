@@ -526,6 +526,7 @@ def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
         case "report": return _classify_report_cmd(conn, args)
         case "audit":  return _classify_audit_cmd(conn, args)
         case "show":   return _classify_show_cmd(conn, args)
+        case "dist":   return _classify_dist_cmd(conn, args)
         case _: raise DbError(f"unhandled classify action: {args.classify_cmd}")
 
 
@@ -949,6 +950,33 @@ def _classify_show_cmd(conn, args) -> dict:
     return {}
 
 
+def classify_dist(conn, field, senders=None, limit=30) -> list:
+    """Top-N (value, count) of one field, descending by count. `field` is
+    validated against the table columns. Read-only -> no transaction."""
+    field = _check_field(field, _valid_fields(conn))
+    where, params = _sender_clause(senders)
+    rows = conn.execute(
+        f"SELECT {field} AS v, count(*) AS c FROM mediathek " + where
+        + f" GROUP BY {field} ORDER BY c DESC, v LIMIT ?", list(params) + [limit])
+    return [(r["v"], r["c"]) for r in rows]
+
+
+def _print_dist(field, dist):
+    """Value distribution to stdout, one aligned line per value."""
+    print(f"distribution of {field} (count: value)")
+    for value, count in dist:
+        print(f"   {count:8}  {value!r}")
+
+
+def _classify_dist_cmd(conn, args) -> dict:
+    dist = classify_dist(conn, args.field, senders=_split_csv(args.sender),
+                         limit=args.limit)
+    if args.json:
+        return {"field": args.field, "values": dist}
+    _print_dist(args.field, dist)
+    return {}
+
+
 # -- cli ----------------------------------------------------------------------
 # Stable grammar and exit codes: the GUI drives the CLI and parses the --json
 # output (exactly one JSON object on stdout per call).
@@ -1025,6 +1053,13 @@ def build_parser() -> argparse.ArgumentParser:
     csho.add_argument("--min-conf",  type=float, metavar="X",             help="classify_confidence >= X")
     csho.add_argument("--max-conf",  type=float, metavar="X",             help="classify_confidence <= X")
     csho.add_argument("--limit",     type=int, default=20, metavar="N",   help="max rows to dump (default 20)")
+
+    cdis = csub.add_parser("dist", help="read-only value distribution of one field",
+                           description="Top-N value frequencies of a single classify "
+                                       "field (or any mediathek column).")
+    cdis.add_argument("--sender", metavar="X[,Y]",            help="restrict to these senders (comma-separated)")
+    cdis.add_argument("--field",  required=True, metavar="NAME", help="the column to tally")
+    cdis.add_argument("--limit",  type=int, default=30, metavar="N", help="top-N values (default 30)")
 
     return parser
 
