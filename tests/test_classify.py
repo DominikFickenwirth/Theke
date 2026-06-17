@@ -709,3 +709,64 @@ def test_cli_show_unknown_field_exits_1(tmp_path):
     db = str(tmp_path / "theke.db")
     db_connect(db).close()
     assert main(["--db", db, "classify", "show", "--null", "nope"]) == 1
+
+
+# -- classify dist (read-only field value distribution) ----------------------
+
+def test_dist_counts_values_descending(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", category="Spielfilm")
+        insert_classified(conn, "b", category="Spielfilm")
+        insert_classified(conn, "c", category="Doku")
+        assert classify_dist(conn, "category") == [("Spielfilm", 2), ("Doku", 1)]
+    finally:
+        conn.close()
+
+
+def test_dist_sender_filter(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm")
+        insert_classified(conn, "b", sender="ZDF", category="Spielfilm")
+        assert classify_dist(conn, "category", senders=["ARD"]) == [("Spielfilm", 1)]
+    finally:
+        conn.close()
+
+
+def test_dist_limit_caps_entries(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        for i, c in enumerate(("Spielfilm", "Doku", "Krimi")):
+            insert_classified(conn, str(i), category=c)
+        assert len(classify_dist(conn, "category", limit=2)) == 2
+    finally:
+        conn.close()
+
+
+def test_dist_unknown_field_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(Exception):
+            classify_dist(conn, "nope")
+    finally:
+        conn.close()
+
+
+def test_cli_dist_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "dist", "--field", "category"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["field"] == "category"
+    assert out["values"] == [["Spielfilm", 1]]   # tuples serialize to JSON arrays
+
+
+def test_cli_dist_unknown_field_exits_1(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db).close()
+    assert main(["--db", db, "classify", "dist", "--field", "nope"]) == 1
