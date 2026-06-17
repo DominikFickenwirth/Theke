@@ -655,6 +655,43 @@ def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
     return {s: _summarize(c, by_confidence) for s, c in acc.items() if c["n"] >= min_rows}
 
 
+def classify_report_diff(conn, senders=None, sample_limit=5) -> dict:
+    """Per sender/field churn between the stored classify columns and a live
+    classify() pass: how many rows would change, with a few before/after samples
+    ({id, before, after}). Senders with no churn are omitted. Most useful after a
+    classify run (against unclassified rows everything looks 'changed').
+    Read-only -> no transaction."""
+    where, params = _sender_clause(senders)
+    rows = conn.execute(
+        "SELECT mediathek_id, sender, topic, title, description, duration, "
+        + ", ".join(CLASSIFY_COLS) + " FROM mediathek " + where, params)
+    acc = {}
+    for r in rows:
+        live = classify(r["sender"], r["topic"], r["title"],
+                        r["description"], r["duration"])
+        bucket = acc.setdefault(r["sender"], {})
+        for f in CLASSIFY_COLS:
+            if r[f] == live[f]:
+                continue
+            fb = bucket.setdefault(f, {"changed": 0, "samples": []})
+            fb["changed"] += 1
+            if len(fb["samples"]) < sample_limit:
+                fb["samples"].append(
+                    {"id": r["mediathek_id"], "before": r[f], "after": live[f]})
+    return {s: b for s, b in acc.items() if b}
+
+
+def _print_report_diff(diff):
+    """Churn per sender/field to stdout: count + a couple of before/after samples."""
+    print("classify churn (stored vs live)")
+    for sender in sorted(diff):
+        print(f"{sender}:")
+        for f in sorted(diff[sender]):
+            fb = diff[sender][f]
+            ex = "; ".join(f'{s["before"]!r}->{s["after"]!r}' for s in fb["samples"][:2])
+            print(f'  {f:20}{fb["changed"]:>8}   {ex}')
+
+
 _REPORT_TABLE_COLS = [("year", "year"), ("country", "cntry"), ("se", "S/E"),
                       ("cat", "cat"), ("unklar", "unkl"), ("flag_a", "A"),
                       ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
@@ -677,6 +714,13 @@ def _print_report_table(report, mode, by_confidence=False):
 
 def _classify_report_cmd(conn, args) -> dict:
     senders = _split_senders(args.sender)
+    if args.diff:
+        log.info("running classify() live to diff against the stored columns")
+        diff = classify_report_diff(conn, senders=senders)
+        if args.json:
+            return {"mode": "diff", "senders": diff}
+        _print_report_diff(diff)
+        return {}
     if args.live:
         log.info("running classify() live (no writes)")
     report = classify_report(conn, live=args.live, min_rows=args.min_rows,
@@ -739,6 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
     crep.add_argument("--sender",   metavar="X[,Y]",                          help="restrict to these senders (comma-separated)")
     crep.add_argument("--min-rows", type=int, default=REPORT_MIN_ROWS, metavar="N", help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
     crep.add_argument("--live",          action="store_true",                 help="run classify() live instead of reading the stored columns")
+    crep.add_argument("--diff",          action="store_true",                 help="report per-field churn: stored columns vs a live classify() pass")
     crep.add_argument("--by-confidence", action="store_true",                 help="split the category column into per-confidence-level columns")
 
     return parser

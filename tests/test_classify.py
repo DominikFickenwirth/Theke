@@ -420,7 +420,7 @@ def test_report_diff_senders_with_no_churn_are_omitted(tmp_path):
         insert_row(conn, "a", sender="ARD", topic="x", title="A", duration=60)
         conn.execute("UPDATE mediathek SET category='Clip', series_name='x', "
                      "clean_title='A', language='de', flags='', "
-                     "classify_confidence=0.2 WHERE mediathek_id='a'")
+                     "classify_confidence=0.5 WHERE mediathek_id='a'")  # Clip -> conf 0.5
         assert classify_report_diff(conn) == {}
     finally:
         conn.close()
