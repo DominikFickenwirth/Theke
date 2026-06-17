@@ -184,8 +184,12 @@ automated producer reusing the manual-path machinery (phases 4-7); for movies an
 - **CLI (Python)** holds *all* logic -- stages config, mirror, classify, enrich,
   match, search, review, download, remux, run (`config`/`mirror`/`classify`
   exist; the rest land with their phases). One command per stage; the only thing
-  on the NAS and the Docker entrypoint. **Machine-readable mode** (`--json`,
-  stable exit codes, stable grammar) so the GUI can drive and parse it.
+  on the NAS and the Docker entrypoint. A stage with several modes nests them as
+  sub-actions: `classify run` writes the columns; `classify report`/`audit`/
+  `show`/`dist` are read-only inspection tools for iterating the heuristics
+  (per-sender coverage incl. `--by-confidence`/`--diff`, findings scan, row
+  sampler, value distribution). **Machine-readable mode** (`--json`, stable exit
+  codes, stable grammar) so the GUI can drive and parse it.
   - **stdout vs stderr:** stdout carries only the result (the single JSON object
     in `--json`); progress/diagnostics go to **stderr** as plain text, so a long
     stage stays visible without polluting the parseable result.

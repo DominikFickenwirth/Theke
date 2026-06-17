@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from theke import *
+from theke import _build_show_where
 from theke.classify import classify, CLASSIFY_COLS
 
 
@@ -203,8 +204,8 @@ def insert_row(conn, mediathek_id, sender="ARD", topic="", title="",
         (status, mediathek_id, sender, topic, title, description, duration))
 
 
-def args(force=False, analyze=False, dry_run=False):
-    return SimpleNamespace(force=force, analyze=analyze, dry_run=dry_run)
+def args(force=False):
+    return SimpleNamespace(classify_cmd="run", force=force)
 
 
 def insert_classified(conn, mediathek_id, sender="ARD", **cols):
@@ -282,13 +283,13 @@ def test_cli_classify_json_on_stdout_progress_on_stderr(tmp_path, capsys):
         insert_row(conn, "b", title="B")
     finally:
         conn.close()
-    assert main(["--json", "--db", db, "classify"]) == 0
+    assert main(["--json", "--db", db, "classify", "run"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"classified": 2}   # one parseable object
     assert captured.out.strip().count("\n") == 0           # ... and only that
 
 
-# -- classify report modes (--analyze / --dry-run), read-only ----------------
+# -- classify report (stored / --live), read-only ----------------------------
 
 def test_analyze_report_from_stored_columns(tmp_path):
     conn = open_db(tmp_path)
@@ -343,7 +344,108 @@ def test_report_min_rows_filters_small_senders(tmp_path):
         conn.close()
 
 
-def test_cli_classify_analyze_json(tmp_path, capsys):
+def test_report_sender_filter_narrows_to_named_senders(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="unklar",
+                          classify_confidence=0.2, flags="")
+        insert_classified(conn, "z", sender="ZDF", category="Spielfilm",
+                          classify_confidence=0.9, flags="")
+        report = classify_report(conn, live=False, min_rows=1, senders=["ZDF"])
+        assert set(report) == {"ZDF"}
+        assert report["ZDF"]["n"] == 1
+    finally:
+        conn.close()
+
+
+def test_report_by_confidence_splits_category_into_per_level_columns(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # two ARD rows, one per confidence level (0.9 and 0.5)
+        insert_classified(conn, "a", category="Spielfilm", classify_confidence=0.9, flags="")
+        insert_classified(conn, "b", category="Beitrag/Episode", classify_confidence=0.5, flags="")
+        st = classify_report(conn, live=False, min_rows=1, by_confidence=True)["ARD"]
+        assert st["c90_pct"] == 50.0   # 1 of 2 rows at conf 0.9
+        assert st["c80_pct"] == 0.0
+        assert st["c50_pct"] == 50.0   # 1 of 2 rows at conf 0.5
+        assert st["c20_pct"] == 0.0
+        # the per-level columns are absent unless requested (stable default shape)
+        assert "c90_pct" not in classify_report(conn, live=False, min_rows=1)["ARD"]
+    finally:
+        conn.close()
+
+
+def test_cli_classify_report_by_confidence_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm",
+                          classify_confidence=0.9, flags="")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "report",
+                 "--by-confidence", "--min-rows", "0"]) == 0
+    st = json.loads(capsys.readouterr().out)["senders"]["ARD"]
+    assert st["c90_pct"] == 100.0
+
+
+def test_report_diff_reports_per_field_churn(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="x", title="Der Fall",
+                   description="Spielfilm Deutschland 2003.", duration=5400)
+        # pretend an older classify() run stored a different category/year; the
+        # other columns already match what classify() produces today
+        conn.execute("UPDATE mediathek SET category='OldCat', year=1999, "
+                     "clean_title='Der Fall', series_name='x', country='Deutschland', "
+                     "classify_confidence=0.9, language='de', flags='' "
+                     "WHERE mediathek_id='a'")
+        ard = classify_report_diff(conn)["ARD"]
+        assert ard["category"]["changed"] == 1
+        assert ard["year"]["changed"] == 1
+        assert ard["category"]["samples"][0] == {
+            "id": "a", "before": "OldCat", "after": "Spielfilm"}
+        assert ard["year"]["samples"][0] == {"id": "a", "before": 1999, "after": 2003}
+        assert "clean_title" not in ard   # unchanged fields are omitted
+        # read-only: stored columns are untouched
+        assert conn.execute("SELECT category FROM mediathek WHERE mediathek_id='a'"
+                            ).fetchone()["category"] == "OldCat"
+    finally:
+        conn.close()
+
+
+def test_report_diff_senders_with_no_churn_are_omitted(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # stored columns already equal a live classify() pass -> no churn
+        insert_row(conn, "a", sender="ARD", topic="x", title="A", duration=60)
+        conn.execute("UPDATE mediathek SET category='Clip', series_name='x', "
+                     "clean_title='A', language='de', flags='', "
+                     "classify_confidence=0.5 WHERE mediathek_id='a'")  # Clip -> conf 0.5
+        assert classify_report_diff(conn) == {}
+    finally:
+        conn.close()
+
+
+def test_cli_classify_report_diff_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="x", title="Der Fall",
+                   description="Spielfilm Deutschland 2003.", duration=5400)
+        conn.execute("UPDATE mediathek SET category='OldCat', year=1999, "
+                     "clean_title='Der Fall', series_name='x', country='Deutschland', "
+                     "classify_confidence=0.9, language='de', flags='' "
+                     "WHERE mediathek_id='a'")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "report", "--diff"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "diff"
+    assert out["senders"]["ARD"]["category"]["changed"] == 1
+
+
+def test_cli_classify_report_json(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     conn = db_connect(db)
     try:
@@ -351,24 +453,320 @@ def test_cli_classify_analyze_json(tmp_path, capsys):
         insert_row(conn, "b", title="B")
     finally:
         conn.close()
-    assert main(["--json", "--db", db, "classify", "--analyze"]) == 0
+    assert main(["--json", "--db", db, "classify", "report"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["mode"] == "analyze"          # below the default min_rows -> empty
+    assert out["mode"] == "stored"           # below the default min_rows -> empty
     assert out["senders"] == {}
 
 
-def test_cli_classify_dry_run_json(tmp_path, capsys):
+def test_cli_classify_report_live_json(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     conn = db_connect(db)
     try:
         insert_row(conn, "a", title="A")
     finally:
         conn.close()
-    assert main(["--json", "--db", db, "classify", "--dry-run"]) == 0
-    assert json.loads(capsys.readouterr().out)["mode"] == "dry-run"
+    assert main(["--json", "--db", db, "classify", "report", "--live"]) == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "live"
 
 
-def test_cli_classify_analyze_and_dry_run_are_mutually_exclusive(tmp_path):
+def test_cli_classify_report_min_rows_zero_shows_small_sender(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="unklar",
+                          classify_confidence=0.2, flags="")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "report", "--min-rows", "0"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert set(out["senders"]) == {"ARD"}    # the single-row sender is now visible
+
+
+def test_cli_classify_requires_a_subcommand(tmp_path):
     db = str(tmp_path / "theke.db")
     db_connect(db).close()
-    assert main(["--db", db, "classify", "--analyze", "--dry-run"]) == 2  # usage error
+    assert main(["--db", db, "classify"]) == 2  # nested subcommand is required
+
+
+# -- classify audit (read-only findings scan) --------------------------------
+
+def test_audit_bare_topic(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="Spielfilm", title="X")
+        insert_row(conn, "b", sender="ARD", topic="Tatort", title="Y")   # real series
+        res = classify_audit(conn, checks=["bare-topic"])
+        assert res["ARD"]["bare-topic"]["count"] == 1
+        assert res["ARD"]["bare-topic"]["examples"] == ["Spielfilm"]
+    finally:
+        conn.close()
+
+
+def test_audit_topic_pipe(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="HR", topic="hr Retro | Geschichte", title="X")
+        res = classify_audit(conn, checks=["topic-pipe"])
+        assert res["HR"]["topic-pipe"]["count"] == 1
+        assert res["HR"]["topic-pipe"]["examples"] == ["hr Retro | Geschichte"]
+    finally:
+        conn.close()
+
+
+def test_audit_topic_marker(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="ORF", topic="ZIB (mit Gebärdensprache)", title="X")
+        res = classify_audit(conn, checks=["topic-marker"])
+        assert res["ORF"]["topic-marker"]["count"] == 1
+        assert res["ORF"]["topic-marker"]["examples"] == ["ZIB (mit Gebärdensprache)"]
+    finally:
+        conn.close()
+
+
+def test_audit_case_variants(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "a", sender="3Sat", topic="nano", title="X")
+        insert_row(conn, "b", sender="3Sat", topic="NANO", title="Y")
+        res = classify_audit(conn, checks=["case-variants"])
+        assert res["3Sat"]["case-variants"]["count"] == 2          # both rows
+        assert res["3Sat"]["case-variants"]["examples"] == ["NANO/nano"]
+    finally:
+        conn.close()
+
+
+def test_audit_country_shape(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ZDF", country="vom 3. Mai")   # date residue
+        insert_classified(conn, "b", sender="ZDF", country="Deutschland")  # real country
+        res = classify_audit(conn, checks=["country-shape"])
+        assert res["ZDF"]["country-shape"]["count"] == 1
+        assert res["ZDF"]["country-shape"]["examples"] == ["vom 3. Mai"]
+    finally:
+        conn.close()
+
+
+def test_audit_title_credit(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="3Sat",
+                          clean_title="Der Wald - Film von Hans Meiser")
+        insert_classified(conn, "b", sender="3Sat", clean_title="Der Wald")
+        res = classify_audit(conn, checks=["title-credit"])
+        assert res["3Sat"]["title-credit"]["count"] == 1
+        assert res["3Sat"]["title-credit"]["examples"] == ["Der Wald - Film von Hans Meiser"]
+    finally:
+        conn.close()
+
+
+def test_audit_episodic_unparsed(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # raw, unclassified -> season/episode are NULL but the title looks episodic
+        insert_row(conn, "a", sender="HR", topic="Die Reise", title="Die Reise, Folge 3")
+        res = classify_audit(conn, checks=["episodic-unparsed"])
+        assert res["HR"]["episodic-unparsed"]["count"] == 1
+        assert res["HR"]["episodic-unparsed"]["examples"] == ["Die Reise, Folge 3"]
+    finally:
+        conn.close()
+
+
+def test_audit_limit_caps_examples(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        for i, w in enumerate(("Spielfilm", "Drama", "Krimi")):
+            insert_row(conn, str(i), sender="ARD", topic=w, title="X")
+        res = classify_audit(conn, checks=["bare-topic"], limit=2)
+        assert res["ARD"]["bare-topic"]["count"] == 3          # all counted
+        assert len(res["ARD"]["bare-topic"]["examples"]) == 2  # examples capped
+    finally:
+        conn.close()
+
+
+def test_audit_unknown_check_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(Exception):
+            classify_audit(conn, checks=["nope"])
+    finally:
+        conn.close()
+
+
+def test_cli_audit_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_row(conn, "a", sender="ARD", topic="Spielfilm", title="X")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "audit", "--check", "bare-topic"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["senders"]["ARD"]["bare-topic"]["count"] == 1
+
+
+def test_cli_audit_unknown_check_exits_1(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db).close()
+    assert main(["--db", db, "classify", "audit", "--check", "nope"]) == 1
+
+
+# -- classify show (read-only row sampler, structured filters) ----------------
+
+def show_args(sender=None, like=None, eq=None, null=None, not_null=None,
+              min_conf=None, max_conf=None, limit=20):
+    return SimpleNamespace(classify_cmd="show", sender=sender, like=like, eq=eq,
+                           null=null, not_null=not_null, min_conf=min_conf,
+                           max_conf=max_conf, limit=limit)
+
+
+def test_show_like_filter(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", clean_title="Der Wald - Film von Hans")
+        insert_classified(conn, "b", clean_title="Der Wald")
+        where, params = _build_show_where(conn, show_args(like=[["clean_title", "%Film von %"]]))
+        rows = classify_show(conn, where, params, 20)
+        assert [r["mediathek_id"] for r in rows] == ["a"]
+        assert rows[0]["clean_title"] == "Der Wald - Film von Hans"
+    finally:
+        conn.close()
+
+
+def test_show_eq_with_sender_filter(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm")
+        insert_classified(conn, "b", sender="ZDF", category="Spielfilm")
+        insert_classified(conn, "c", sender="ARD", category="Doku")
+        where, params = _build_show_where(conn, show_args(sender="ARD", eq=[["category", "Spielfilm"]]))
+        rows = classify_show(conn, where, params, 20)
+        assert [r["mediathek_id"] for r in rows] == ["a"]
+    finally:
+        conn.close()
+
+
+def test_show_null_and_not_null(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", year=2003)
+        insert_classified(conn, "b")            # year stays NULL
+        nullrows = classify_show(conn, *_build_show_where(conn, show_args(null=["year"])), 20)
+        notnull = classify_show(conn, *_build_show_where(conn, show_args(not_null=["year"])), 20)
+        assert [r["mediathek_id"] for r in nullrows] == ["b"]
+        assert [r["mediathek_id"] for r in notnull] == ["a"]
+    finally:
+        conn.close()
+
+
+def test_show_min_conf(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", classify_confidence=0.9)
+        insert_classified(conn, "b", classify_confidence=0.2)
+        rows = classify_show(conn, *_build_show_where(conn, show_args(min_conf=0.5)), 20)
+        assert [r["mediathek_id"] for r in rows] == ["a"]
+    finally:
+        conn.close()
+
+
+def test_show_limit_caps_rows(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        for i in range(3):
+            insert_classified(conn, str(i), category="Spielfilm")
+        rows = classify_show(conn, *_build_show_where(conn, show_args()), 2)
+        assert len(rows) == 2
+    finally:
+        conn.close()
+
+
+def test_show_unknown_field_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(Exception):
+            _build_show_where(conn, show_args(like=[["nope", "x"]]))
+    finally:
+        conn.close()
+
+
+def test_cli_show_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="3Sat", clean_title="Der Wald - Film von Hans")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "show",
+                 "--like", "clean_title", "%Film von %"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [r["mediathek_id"] for r in out["rows"]] == ["a"]
+
+
+def test_cli_show_unknown_field_exits_1(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db).close()
+    assert main(["--db", db, "classify", "show", "--null", "nope"]) == 1
+
+
+# -- classify dist (read-only field value distribution) ----------------------
+
+def test_dist_counts_values_descending(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", category="Spielfilm")
+        insert_classified(conn, "b", category="Spielfilm")
+        insert_classified(conn, "c", category="Doku")
+        assert classify_dist(conn, "category") == [("Spielfilm", 2), ("Doku", 1)]
+    finally:
+        conn.close()
+
+
+def test_dist_sender_filter(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm")
+        insert_classified(conn, "b", sender="ZDF", category="Spielfilm")
+        assert classify_dist(conn, "category", senders=["ARD"]) == [("Spielfilm", 1)]
+    finally:
+        conn.close()
+
+
+def test_dist_limit_caps_entries(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        for i, c in enumerate(("Spielfilm", "Doku", "Krimi")):
+            insert_classified(conn, str(i), category=c)
+        assert len(classify_dist(conn, "category", limit=2)) == 2
+    finally:
+        conn.close()
+
+
+def test_dist_unknown_field_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(Exception):
+            classify_dist(conn, "nope")
+    finally:
+        conn.close()
+
+
+def test_cli_dist_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "dist", "--field", "category"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["field"] == "category"
+    assert out["values"] == [["Spielfilm", 1]]   # tuples serialize to JSON arrays
+
+
+def test_cli_dist_unknown_field_exits_1(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db).close()
+    assert main(["--db", db, "classify", "dist", "--field", "nope"]) == 1

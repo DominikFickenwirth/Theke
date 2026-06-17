@@ -11,13 +11,14 @@ import io
 import json
 import logging
 import lzma
+import re
 import sqlite3
 import sys
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from theke.classify import classify, CLASSIFY_COLS
+from theke.classify import classify, CLASSIFY_COLS, CATWORD
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -518,12 +519,20 @@ _UPDATE_SQL = (
 
 
 def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
-    """Classify mediathek rows: extract metadata into the classify columns. By
-    default only unclassified rows (status '0'); --force reprocesses all.
-    --analyze/--dry-run are read-only coverage reports instead (stored columns
-    resp. a live classify() pass), they write nothing."""
-    if args.analyze or args.dry_run:
-        return _classify_report_cmd(conn, args)
+    """Dispatch a classify action: `run` writes the classify columns; the others
+    (`report`/`audit`/`show`/`dist`) are read-only inspection tools."""
+    match args.classify_cmd:
+        case "run":    return _classify_run(conn, args)
+        case "report": return _classify_report_cmd(conn, args)
+        case "audit":  return _classify_audit_cmd(conn, args)
+        case "show":   return _classify_show_cmd(conn, args)
+        case "dist":   return _classify_dist_cmd(conn, args)
+        case _: raise DbError(f"unhandled classify action: {args.classify_cmd}")
+
+
+def _classify_run(conn, args) -> dict:
+    """Classify mediathek rows into the classify columns and flip status 0 -> 1.
+    By default only unclassified rows (status '0'); --force reprocesses all."""
     sql = _CLASSIFY_READ if not args.force else _CLASSIFY_READ.replace(
         " WHERE status='0'", "")
     log.info("classifying rows")
@@ -575,9 +584,28 @@ REPORT_MIN_ROWS = 1000   # senders below this are omitted (long tail of one-offs
 _REPORT_FIELDS = ["year", "country", "se", "cat", "unklar",
                   "flag_a", "flag_s", "flag_u", "flag_t"]
 
+# Per-confidence-level buckets for --by-confidence: deterministic levels emitted
+# by classify._confidence (0.9/0.8/0.5/0.2). Counted always, summarized only when
+# requested, so the default report shape stays stable.
+_CONF_LEVELS = [("c90", 0.9), ("c80", 0.8), ("c50", 0.5), ("c20", 0.2)]
+
+
+def _split_csv(value):
+    """Comma-separated CLI value -> list of trimmed items, or None when unset."""
+    if not value:
+        return None
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def _sender_clause(senders):
+    """WHERE fragment + params restricting to the given senders ('' when None)."""
+    if not senders:
+        return "", []
+    return f"WHERE sender IN ({','.join('?' * len(senders))})", list(senders)
+
 
 def _new_counter() -> dict:
-    return dict.fromkeys(["n"] + _REPORT_FIELDS, 0)
+    return dict.fromkeys(["n"] + _REPORT_FIELDS + [k for k, _ in _CONF_LEVELS], 0)
 
 
 def _tally(counter, row):
@@ -590,61 +618,362 @@ def _tally(counter, row):
     conf = row["classify_confidence"]
     if conf is not None and conf >= 0.8: counter["cat"] += 1   # category from a real signal
     if row["category"] == "unklar": counter["unklar"] += 1
+    if conf is not None:
+        for key, level in _CONF_LEVELS:
+            if round(conf, 2) == level: counter[key] += 1
     flags = row["flags"] or ""
     for letter in "asut":
         if letter.upper() in flags: counter["flag_" + letter] += 1
 
 
-def _summarize(counter) -> dict:
+def _summarize(counter, by_confidence=False) -> dict:
     n = counter["n"]
     out = {"n": n}
     out.update({f + "_pct": round(100 * counter[f] / n, 1) for f in _REPORT_FIELDS})
+    if by_confidence:
+        out.update({k + "_pct": round(100 * counter[k] / n, 1) for k, _ in _CONF_LEVELS})
     return out
 
 
-def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS) -> dict:
-    """Per-sender classify coverage. live=False summarizes the stored columns
-    (--analyze); live=True runs classify() over the rows without writing
-    (--dry-run). Read-only -> no transaction."""
+def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
+                    by_confidence=False) -> dict:
+    """Per-sender classify coverage. live=False summarizes the stored columns;
+    live=True runs classify() over the rows without writing. `senders` limits the
+    scan to a list of senders; `by_confidence` adds per-confidence-level columns.
+    Read-only -> no transaction."""
     acc = {}
+    where, params = _sender_clause(senders)
     if live:
         rows = conn.execute("SELECT mediathek_id, sender, topic, title, "
-                            "description, duration FROM mediathek")
+                            "description, duration FROM mediathek " + where, params)
         for r in rows:
             meta = classify(r["sender"], r["topic"], r["title"],
                             r["description"], r["duration"])
             _tally(acc.setdefault(r["sender"], _new_counter()), meta)
     else:
         rows = conn.execute("SELECT sender, year, country, season, episode, "
-                            "category, classify_confidence, flags FROM mediathek")
+                            "category, classify_confidence, flags FROM mediathek "
+                            + where, params)
         for r in rows:
             _tally(acc.setdefault(r["sender"], _new_counter()), r)
-    return {s: _summarize(c) for s, c in acc.items() if c["n"] >= min_rows}
+    return {s: _summarize(c, by_confidence) for s, c in acc.items() if c["n"] >= min_rows}
+
+
+def classify_report_diff(conn, senders=None, sample_limit=5) -> dict:
+    """Per sender/field churn between the stored classify columns and a live
+    classify() pass: how many rows would change, with a few before/after samples
+    ({id, before, after}). Senders with no churn are omitted. Most useful after a
+    classify run (against unclassified rows everything looks 'changed').
+    Read-only -> no transaction."""
+    where, params = _sender_clause(senders)
+    rows = conn.execute(
+        "SELECT mediathek_id, sender, topic, title, description, duration, "
+        + ", ".join(CLASSIFY_COLS) + " FROM mediathek " + where, params)
+    acc = {}
+    for r in rows:
+        live = classify(r["sender"], r["topic"], r["title"],
+                        r["description"], r["duration"])
+        bucket = acc.setdefault(r["sender"], {})
+        for f in CLASSIFY_COLS:
+            if r[f] == live[f]:
+                continue
+            fb = bucket.setdefault(f, {"changed": 0, "samples": []})
+            fb["changed"] += 1
+            if len(fb["samples"]) < sample_limit:
+                fb["samples"].append(
+                    {"id": r["mediathek_id"], "before": r[f], "after": live[f]})
+    return {s: b for s, b in acc.items() if b}
+
+
+def _print_report_diff(diff):
+    """Churn per sender/field to stdout: count + a couple of before/after samples."""
+    print("classify churn (stored vs live)")
+    for sender in sorted(diff):
+        print(f"{sender}:")
+        for f in sorted(diff[sender]):
+            fb = diff[sender][f]
+            ex = "; ".join(f'{s["before"]!r}->{s["after"]!r}' for s in fb["samples"][:2])
+            print(f'  {f:20}{fb["changed"]:>8}   {ex}')
 
 
 _REPORT_TABLE_COLS = [("year", "year"), ("country", "cntry"), ("se", "S/E"),
                       ("cat", "cat"), ("unklar", "unkl"), ("flag_a", "A"),
                       ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
+_CONF_TABLE_COLS = [("c90", "c.9"), ("c80", "c.8"), ("c50", "c.5"), ("c20", "c.2")]
 
 
-def _print_report_table(report, mode):
-    """One aligned line per sender, sorted by row count, to stdout (the result)."""
+def _print_report_table(report, mode, by_confidence=False):
+    """One aligned line per sender, sorted by row count, to stdout (the result).
+    With by_confidence the single cat column is replaced by per-level columns."""
+    cols = _REPORT_TABLE_COLS
+    if by_confidence:
+        i = next(j for j, (f, _) in enumerate(cols) if f == "cat")
+        cols = cols[:i] + _CONF_TABLE_COLS + cols[i + 1:]
     print(f"classify coverage ({mode}, % of rows)")
-    print(f'{"SENDER":14}{"n":>8}' + "".join(f"{h:>7}" for _, h in _REPORT_TABLE_COLS))
+    print(f'{"SENDER":14}{"n":>8}' + "".join(f"{h:>7}" for _, h in cols))
     for sender, st in sorted(report.items(), key=lambda kv: -kv[1]["n"]):
         print(f'{sender:14}{st["n"]:>8}'
-              + "".join(f'{st[f + "_pct"]:>7.1f}' for f, _ in _REPORT_TABLE_COLS))
+              + "".join(f'{st[f + "_pct"]:>7.1f}' for f, _ in cols))
 
 
 def _classify_report_cmd(conn, args) -> dict:
-    live = args.dry_run
-    if live:
-        log.info("running classify() live (dry-run, no writes)")
-    report = classify_report(conn, live=live)
-    mode = "dry-run" if live else "analyze"
+    senders = _split_csv(args.sender)
+    if args.diff:
+        log.info("running classify() live to diff against the stored columns")
+        diff = classify_report_diff(conn, senders=senders)
+        if args.json:
+            return {"mode": "diff", "senders": diff}
+        _print_report_diff(diff)
+        return {}
+    if args.live:
+        log.info("running classify() live (no writes)")
+    report = classify_report(conn, live=args.live, min_rows=args.min_rows,
+                             senders=senders, by_confidence=args.by_confidence)
+    mode = "live" if args.live else "stored"
     if args.json:
         return {"mode": mode, "senders": report}
-    _print_report_table(report, mode)
+    _print_report_table(report, mode, by_confidence=args.by_confidence)
+    return {}
+
+
+# -- classify audit (read-only findings scan) ---------------------------------
+# Promotes the analysis/_audit_sender.py battery into the CLI: per sender, the
+# rows where a heuristic visibly mishandled the input (counts coverage as filled
+# but not correct). Each check returns {sender: {count, examples}}; classify_audit
+# assembles {sender: {check: ...}}. Read-only.
+
+# Topic that is itself a bare format/genre word (not a real series). CATWORD has
+# no bare "Film"/"Doku"; add them and the curated genre rubrics.
+_BARE_TOPIC = set(re.split(r"\|", CATWORD)) | {
+    "Film", "Doku", "Reise", "Natur", "Musik", "Tiere", "Geschichte", "Politik",
+    "Politik und Gesellschaft", "Sport", "Nachrichten", "Wirtschaft", "Europa",
+    "Nahost", "Deutschland", "Esskulturen", "Kultur", "Kulturdoku",
+    "Gesellschaft", "Wissen", "Wissenschaftsdoku", "Buch", "Theater", "Märchen"}
+_TOPIC_MARKER = re.compile(
+    r"\((?:mit\s+)?(?:Gebärdensprache|Audiodeskription|Hörfassung|klare Sprache"
+    r"|Originalversion|mit Untertitel|OmU|OmdU|ÖGS|OV)\)?", re.I)
+_BAD_COUNTRY = re.compile(
+    r"^[a-zäöü·\"]|\b(von|über|aus|im|mit|der|die|das|und|dem|den|eine?r?|Jahr|vom)\b")
+_TITLE_CREDIT = re.compile(r"\b(?:Film|" + CATWORD + r")\s+von\s+\S", re.I)
+_EPISODIC = re.compile(r"Staffel.*Folge|,\s*Folge\s+\d|\bTeil\s+\d|\b\d+\s*/\s*\d+\b", re.I)
+
+
+def _audit_scan(conn, where, params, select, predicate, limit) -> dict:
+    """Generic row-level check: predicate(row) -> example string (or None to skip).
+    Buckets count per sender and collects up to `limit` distinct examples."""
+    out = {}
+    for r in conn.execute(f"SELECT sender, {select} FROM mediathek " + where, params):
+        ex = predicate(r)
+        if ex is None:
+            continue
+        b = out.setdefault(r["sender"], {"count": 0, "examples": []})
+        b["count"] += 1
+        if ex not in b["examples"] and len(b["examples"]) < limit:
+            b["examples"].append(ex)
+    return out
+
+
+def _check_bare_topic(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "topic",
+                       lambda r: r["topic"] if r["topic"] in _BARE_TOPIC else None, limit)
+
+
+def _check_topic_pipe(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "topic",
+                       lambda r: r["topic"] if "|" in (r["topic"] or "") else None, limit)
+
+
+def _check_topic_marker(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "topic",
+                       lambda r: r["topic"] if _TOPIC_MARKER.search(r["topic"] or "") else None, limit)
+
+
+def _check_country_shape(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "country",
+                       lambda r: r["country"] if r["country"] and _BAD_COUNTRY.search(r["country"]) else None, limit)
+
+
+def _check_title_credit(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "clean_title",
+                       lambda r: r["clean_title"] if _TITLE_CREDIT.search(r["clean_title"] or "") else None, limit)
+
+
+def _check_episodic_unparsed(conn, where, params, limit):
+    def pred(r):
+        looks = _EPISODIC.search(r["title"] or "")
+        return r["title"] if looks and r["season"] is None and r["episode"] is None else None
+    return _audit_scan(conn, where, params, "title, season, episode", pred, limit)
+
+
+def _check_case_variants(conn, where, params, limit):
+    """Topics within a sender that collapse to one casefold but differ in raw form."""
+    rows = conn.execute("SELECT sender, topic, count(*) c FROM mediathek "
+                        + where + " GROUP BY sender, topic", params)
+    bysender = {}
+    for r in rows:
+        if not r["topic"]:
+            continue
+        bysender.setdefault(r["sender"], {}).setdefault(
+            r["topic"].casefold(), []).append((r["topic"], r["c"]))
+    out = {}
+    for sender, groups in bysender.items():
+        multi = [v for v in groups.values() if len({t for t, _ in v}) > 1]
+        if not multi:
+            continue
+        out[sender] = {
+            "count": sum(c for v in multi for _, c in v),
+            "examples": ["/".join(sorted(t for t, _ in v)) for v in multi[:limit]]}
+    return out
+
+
+# Check name -> implementation. Names are the public --check vocabulary.
+AUDIT_CHECKS = {
+    "bare-topic":        _check_bare_topic,
+    "case-variants":     _check_case_variants,
+    "topic-pipe":        _check_topic_pipe,
+    "topic-marker":      _check_topic_marker,
+    "country-shape":     _check_country_shape,
+    "title-credit":      _check_title_credit,
+    "episodic-unparsed": _check_episodic_unparsed,
+}
+
+
+def classify_audit(conn, senders=None, checks=None, limit=5) -> dict:
+    """Run the findings checks (default all) and return {sender: {check: {count,
+    examples}}}. country-shape/title-credit/episodic-unparsed only fire on
+    already-classified rows. Read-only -> no transaction."""
+    names = checks or list(AUDIT_CHECKS)
+    unknown = [c for c in names if c not in AUDIT_CHECKS]
+    if unknown:
+        raise ValueError(f"unknown audit check(s): {', '.join(unknown)} "
+                         f"(known: {', '.join(AUDIT_CHECKS)})")
+    where, params = _sender_clause(senders)
+    out = {}
+    for name in names:
+        for sender, res in AUDIT_CHECKS[name](conn, where, params, limit).items():
+            out.setdefault(sender, {})[name] = res
+    return out
+
+
+def _print_audit(result):
+    """Findings per sender/check to stdout: count + the collected examples."""
+    print("classify audit (findings: count + examples)")
+    for sender in sorted(result):
+        print(f"{sender}:")
+        for check in sorted(result[sender]):
+            res = result[sender][check]
+            print(f'  {check:18}{res["count"]:>8}')
+            for ex in res["examples"]:
+                print(f"      {ex!r}")
+
+
+def _classify_audit_cmd(conn, args) -> dict:
+    result = classify_audit(conn, senders=_split_csv(args.sender),
+                            checks=_split_csv(args.check), limit=args.limit)
+    if args.json:
+        return {"senders": result}
+    _print_audit(result)
+    return {}
+
+
+# -- classify show / dist (read-only inspection) ------------------------------
+# show dumps the classify columns of matching rows; dist tallies one field's
+# value distribution. Both validate field names against the live mediathek
+# columns so a name can be interpolated into SQL safely (values stay bound).
+
+_SHOW_COLS = ["sender", "topic", "title", "clean_title", "series_name",
+              "category", "country", "year", "season", "episode", "flags",
+              "classify_confidence"]
+
+
+def _valid_fields(conn) -> set:
+    """The mediathek column names (for validating --field / filter fields)."""
+    return {r["name"] for r in conn.execute("PRAGMA table_info(mediathek)")}
+
+
+def _check_field(field, valid):
+    if field not in valid:
+        raise ValueError(f"unknown field: {field}")
+    return field
+
+
+def _build_show_where(conn, args):
+    """Turn the structured filter flags into a parameterized WHERE clause. Field
+    names are validated against the table; values are bound, never interpolated."""
+    valid = _valid_fields(conn)
+    conds, params = [], []
+    senders = _split_csv(args.sender)
+    if senders:
+        conds.append(f"sender IN ({','.join('?' * len(senders))})")
+        params += senders
+    for field, pattern in args.like or []:
+        conds.append(f"{_check_field(field, valid)} LIKE ?"); params.append(pattern)
+    for field, value in args.eq or []:
+        conds.append(f"{_check_field(field, valid)} = ?"); params.append(value)
+    for field in args.null or []:
+        conds.append(f"{_check_field(field, valid)} IS NULL")
+    for field in args.not_null or []:
+        conds.append(f"{_check_field(field, valid)} IS NOT NULL")
+    if args.min_conf is not None:
+        conds.append("classify_confidence >= ?"); params.append(args.min_conf)
+    if args.max_conf is not None:
+        conds.append("classify_confidence <= ?"); params.append(args.max_conf)
+    return ("WHERE " + " AND ".join(conds) if conds else ""), params
+
+
+def classify_show(conn, where_sql, params, limit) -> list:
+    """Rows matching where_sql, as dicts over mediathek_id + the inspection
+    columns. Read-only -> no transaction."""
+    rows = conn.execute(
+        "SELECT mediathek_id, " + ", ".join(_SHOW_COLS) + " FROM mediathek "
+        + where_sql + " LIMIT ?", list(params) + [limit])
+    return [dict(r) for r in rows]
+
+
+def _print_show(rows):
+    """One compact two-line block per row to stdout."""
+    print(f"{len(rows)} row(s)")
+    for r in rows:
+        print(f'[{r["sender"]}] {r["clean_title"]!r}  cat={r["category"]!r} '
+              f'country={r["country"]!r} year={r["year"]} '
+              f'S/E={r["season"]}/{r["episode"]} conf={r["classify_confidence"]}')
+        print(f'      topic={r["topic"]!r} title={r["title"]!r} '
+              f'series={r["series_name"]!r} flags={r["flags"]!r}')
+
+
+def _classify_show_cmd(conn, args) -> dict:
+    where, params = _build_show_where(conn, args)
+    rows = classify_show(conn, where, params, args.limit)
+    if args.json:
+        return {"rows": rows}
+    _print_show(rows)
+    return {}
+
+
+def classify_dist(conn, field, senders=None, limit=30) -> list:
+    """Top-N (value, count) of one field, descending by count. `field` is
+    validated against the table columns. Read-only -> no transaction."""
+    field = _check_field(field, _valid_fields(conn))
+    where, params = _sender_clause(senders)
+    rows = conn.execute(
+        f"SELECT {field} AS v, count(*) AS c FROM mediathek " + where
+        + f" GROUP BY {field} ORDER BY c DESC, v LIMIT ?", list(params) + [limit])
+    return [(r["v"], r["c"]) for r in rows]
+
+
+def _print_dist(field, dist):
+    """Value distribution to stdout, one aligned line per value."""
+    print(f"distribution of {field} (count: value)")
+    for value, count in dist:
+        print(f"   {count:8}  {value!r}")
+
+
+def _classify_dist_cmd(conn, args) -> dict:
+    dist = classify_dist(conn, args.field, senders=_split_csv(args.sender),
+                         limit=args.limit)
+    if args.json:
+        return {"field": args.field, "values": dist}
+    _print_dist(args.field, dist)
     return {}
 
 
@@ -672,22 +1001,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("config", help="show the effective configuration")
 
-    mirror = sub.add_parser("mirror", help="refresh the film-list mirror (~30 s)",
-                            description="Refresh the film-list mirror; a full "
-                                        "download and import takes about 30 "
-                                        "seconds. Progress is printed to stderr.")
+    mirror = sub.add_parser("mirror", help="refresh the film-list mirror (~30 s)", description="Refresh the film-list mirror; a full download and import takes about 30 seconds. Progress is printed to stderr.")
     mirror.add_argument("--force", action="store_true", help="always download the full list")
 
-    classify = sub.add_parser("classify", help="extract metadata from mirrored rows",
-                              description="Extract structured metadata (title, "
-                                          "series/season/episode, category, year, "
-                                          "country, language, flags) from the "
-                                          "free-text fields. Progress is printed "
-                                          "to stderr.")
-    classify.add_argument("--force", action="store_true", help="reclassify all rows, not just unclassified")
-    report = classify.add_mutually_exclusive_group()
-    report.add_argument("--analyze", action="store_true", help="read-only: per-sender coverage report from the stored columns")
-    report.add_argument("--dry-run", action="store_true", help="read-only: run classify() live and report coverage, writing nothing")
+    classify = sub.add_parser("classify", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
+    csub = classify.add_subparsers(dest="classify_cmd", required=True, metavar="action")
+    crun = csub.add_parser("run",    help="classify mirrored rows (writes the classify columns)", description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the classify columns and flip status 0 -> 1.")
+    crep = csub.add_parser("report", help="read-only per-sender coverage report",                 description="Per-sender coverage of the classify fields. Reads the stored columns by default; --live re-runs classify() without writing.")
+    caud = csub.add_parser("audit",  help="read-only findings scan (wrong/suspicious values)",    description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-classified rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
+    csho = csub.add_parser("show",   help="read-only sample of rows with their classify columns", description="Dump the classify columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
+    cdis = csub.add_parser("dist",   help="read-only value distribution of one field",            description="Top-N value frequencies of a single classify field (or any mediathek column).")
+    crun.add_argument("--force",         action="store_true",                                    help="reclassify all rows, not just unclassified")
+    crep.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    crep.add_argument("--min-rows",      metavar="N", type=int, default=REPORT_MIN_ROWS,         help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
+    crep.add_argument("--live",          action="store_true",                                    help="run classify() live instead of reading the stored columns")
+    crep.add_argument("--diff",          action="store_true",                                    help="report per-field churn: stored columns vs a live classify() pass")
+    crep.add_argument("--by-confidence", action="store_true",                                    help="split the category column into per-confidence-level columns")
+    caud.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    caud.add_argument("--check",         metavar="NAME[,NAME]",                                  help="run only these checks (default all)")
+    caud.add_argument("--limit",         metavar="N", type=int, default=5,                       help="examples per finding (default 5)")
+    csho.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    csho.add_argument("--like",          metavar=("FIELD", "PATTERN"), nargs=2, action="append", help="FIELD LIKE PATTERN (repeatable)")
+    csho.add_argument("--eq",            metavar=("FIELD", "VALUE"),   nargs=2, action="append", help="FIELD = VALUE (repeatable)")
+    csho.add_argument("--null",          action="append", metavar="FIELD",                       help="FIELD IS NULL (repeatable)")
+    csho.add_argument("--not-null",      action="append", metavar="FIELD",                       help="FIELD IS NOT NULL (repeatable)")
+    csho.add_argument("--min-conf",      type=float, metavar="X",                                help="classify_confidence >= X")
+    csho.add_argument("--max-conf",      type=float, metavar="X",                                help="classify_confidence <= X")
+    csho.add_argument("--limit",         type=int, default=20, metavar="N",                      help="max rows to dump (default 20)")
+    cdis.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    cdis.add_argument("--field",         required=True, metavar="NAME",                          help="the column to tally")
+    cdis.add_argument("--limit",         type=int, default=30, metavar="N",                      help="top-N values (default 30)")
 
     return parser
 
