@@ -20,10 +20,12 @@ def column_names(conn, table="mediathek"):
     return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
-# columns the classify migration adds (language already exists from phase 2)
+# columns the classify migrations add (language already exists from phase 2);
+# genre/slot land in the phase-3 part-2 migration (schema version 3).
 NEW_COLS = {
     "clean_title", "series_name", "season", "episode", "episode_count",
     "category", "year", "country", "flags", "classify_confidence",
+    "genre", "slot",
 }
 
 
@@ -32,7 +34,7 @@ NEW_COLS = {
 def test_classify_migration_adds_columns_on_fresh_db(tmp_path):
     conn = db_connect(str(tmp_path / "theke.db"))  # real MIGRATIONS
     try:
-        assert user_version(conn) == 2               # phase 2 + phase 3
+        assert user_version(conn) == 3               # phase 2 + phase 3 (two steps)
         assert NEW_COLS <= column_names(conn)
     finally:
         conn.close()
@@ -41,9 +43,9 @@ def test_classify_migration_adds_columns_on_fresh_db(tmp_path):
 def test_classify_migration_upgrades_v1_db(tmp_path):
     db = str(tmp_path / "theke.db")
     db_connect(db, migrations=MIGRATIONS[:1]).close()   # stop at phase-2 schema
-    conn = db_connect(db)                               # apply phase-3 migration
+    conn = db_connect(db)                               # apply phase-3 migrations
     try:
-        assert user_version(conn) == 2
+        assert user_version(conn) == 3
         cols = column_names(conn)
         assert NEW_COLS <= cols
         # a row written under v1 has the new columns, all NULL
@@ -51,6 +53,20 @@ def test_classify_migration_upgrades_v1_db(tmp_path):
         row = conn.execute("SELECT * FROM mediathek").fetchone()
         for col in NEW_COLS:
             assert row[col] is None
+    finally:
+        conn.close()
+
+
+def test_classify_migration_upgrades_v2_db_adds_genre_slot(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db, migrations=MIGRATIONS[:2]).close()   # stop at phase-3 part-1
+    conn = db_connect(db)                               # apply the genre/slot step
+    try:
+        assert user_version(conn) == 3
+        assert {"genre", "slot"} <= column_names(conn)
+        conn.execute("INSERT INTO mediathek (status, mediathek_id) VALUES ('0','x')")
+        row = conn.execute("SELECT * FROM mediathek").fetchone()
+        assert row["genre"] is None and row["slot"] is None
     finally:
         conn.close()
 
