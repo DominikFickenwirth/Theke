@@ -126,9 +126,12 @@ Heuristik.
 ### `classify run`
 
 Klassifiziert Zeilen in die classify-Spalten (`clean_title`, `series_name`,
-`season`, `episode`, `episode_count`, `category`, `year`, `country`, `language`,
-`flags`, `classify_confidence`) und setzt `status` 0 -> 1. Standardmäßig nur neue
-Zeilen (`status='0'`).
+`genre`, `slot`, `season`, `episode`, `episode_count`, `category`, `year`,
+`country`, `language`, `flags`, `classify_confidence`) und setzt `status` 0 -> 1.
+Standardmäßig nur neue Zeilen (`status='0'`). `series_name` trägt nur echte
+Serien-/Sendungsnamen; Rubriken landen in `genre` (kuratiertes Set), Dachmarken/
+Sendeplätze in `slot`, reine Format-Topics in `category` (Wert `Events` für
+Festivals/Preise).
 
 | Option    | Wirkung                                          |
 | --------- | ------------------------------------------------ |
@@ -143,8 +146,8 @@ theke --db build/theke.db classify run --force    # alles neu
 Leichte Sprache, `S` Gebärdensprache, `U` eingebrannte Untertitel, `T`
 Trailer/Vorschau.
 `classify_confidence` ist deterministisch: `0.9` (Metazeile/ARTE-Topic), `0.8`
-(Topic ist selbst ein Kategoriewort), `0.5` (Dauer-Prior), `0.2` (`category` =
-`unklar`).
+(Topic ist selbst ein Kategoriewort oder ein Event), `0.5` (Dauer-Prior), `0.2`
+(`category` = `unklar`).
 
 ### `classify report`
 

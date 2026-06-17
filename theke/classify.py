@@ -18,11 +18,32 @@ COUNTRY_BAD = re.compile(r'^[a-zäöü·"]|\b(von|über|aus|im|mit|der|die|das|u
 def looks_like_country(s) -> bool:
     return bool(s) and not COUNTRY_BAD.search(s)
 
+
+def _to_int(s):
+    """An arabic or roman 'Teil' number to int."""
+    if s.isdigit():
+        return int(s)
+    total = prev = 0
+    for ch in reversed(s.upper()):
+        v = ROMAN.get(ch, 0)
+        total += -v if v < prev else v; prev = max(prev, v)
+    return total
+
 SE_A    = re.compile(r'\(S(\d+)/E(\d+)\)')                    # ZDF family + thirds
 SE_B    = re.compile(r'\((?:Staffel\s*(\d+),\s*)?Folge\s*(\d+)\)')   # SRF
 LEADC   = re.compile(r'^\s*(\d{1,4})\.\s+')                   # KiKA leading "NN."
 PART    = re.compile(r'\((\d{1,2})/(\d{1,2})\)')             # Mehrteiler "(n/m)"
+# Paren-less episode notation (B5), all guarded: "Staffel n, Folge m";
+# "- Teil n" (arabic or roman); a bare "n/m" only at the very end (so dates
+# like "10/06/2026" and "3 1/2 Stunden" never match).
+STAFFOLGE = re.compile(r'\bStaffel\s+(\d{1,2}),?\s+Folge\s+(\d{1,3})\b', re.I)
+TEIL      = re.compile(r'\s*[-–(]?\s*\bTeil\s+(\d{1,2}|[IVXLC]+)(?:\s*/\s*(\d{1,2}))?\b\)?', re.I)
+NPART     = re.compile(r'\s*(?<![\d./])(\d{1,2})\s*/\s*(\d{1,2})\s*$')
+ROMAN   = {'I':1,'V':5,'X':10,'L':50,'C':100}
 PIPESUF = re.compile(r'\s*\|\|?\s*[^|]+(?:\|\|?\s*[^|]+)*$')  # trailing " | Reihe"
+# Trailing "- <Format> von <Name>" director credit (B4); no year -> not a
+# metazeile, just strip it off the title (no country/year extraction).
+CREDIT  = re.compile(r'\s+[-–]\s+(?:Film|' + CATWORD + r')\s+von\s+\S.*$', re.I)
 TRAILER = re.compile(r'\b(Trailer|Teaser|Vorschau|Vorab|Preview|Präview)\b', re.I)
 
 # Parenthetical marker vocabulary -> (target, value). 'flag' adds a letter to
@@ -210,6 +231,20 @@ def classify(sender, topic, title, description, duration) -> dict:
         r['episode_count'] = int(pm.group(2))
         if r['episode'] is None: r['episode'] = int(pm.group(1))
         t = PART.sub('', t)
+    if r['episode'] is None:                   # paren-less notation (B5), guarded
+        mf = STAFFOLGE.search(t)
+        mt = TEIL.search(t)
+        mn = NPART.search(t)
+        if mf:
+            r['season'] = int(mf.group(1)); r['episode'] = int(mf.group(2))
+            t = STAFFOLGE.sub('', t)
+        elif mt:
+            r['episode'] = _to_int(mt.group(1))
+            if mt.group(2): r['episode_count'] = int(mt.group(2))
+            t = TEIL.sub('', t)
+        elif mn and int(mn.group(1)) <= int(mn.group(2)) <= 50:   # n<=m, no dates
+            r['episode'] = int(mn.group(1)); r['episode_count'] = int(mn.group(2))
+            t = t[:mn.start()]
 
     # -- Pass 3: metazeile (category + country + year) --------------------
     src = t if sender in TITLE_META_SENDERS else d
@@ -241,6 +276,10 @@ def classify(sender, topic, title, description, duration) -> dict:
         s = duration or 0
         r['category'] = ('Clip' if s < 120 else 'Beitrag/Episode' if s < 1800 else 'unklar')
         kat_src = 'duration-prior'
+
+    cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
+    if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
+        t = t[:cm.start()]
 
     my = re.search(r'\s*\((?:19|20)\d\d\)\s*$', t)       # trailing "(YYYY)" disambiguation
     if my:
