@@ -8,6 +8,15 @@ CATWORD = (r'Spielfilm|Fernsehfilm|TV-Film|Dokumentarfilm|Dokumentation|Dokudram
            r'|Doku-Reihe|Kurzfilm|Animationsfilm|Zeichentrickfilm|Trickfilm'
            r'|Komödie|Drama|Thriller|Krimi|Spielfilmreihe|Kinderfilm|Serie|Reportage|Magazin')
 META    = re.compile(r'\b(' + CATWORD + r'),?\s+(.{2,40}?)\s+((?:19|20)\d\d)\b')
+# A metazeile country slot only counts when it actually looks like a country (or
+# a list of them): an uppercase start and no function words / date fragments.
+# Shared with the classify audit's country-shape check.
+COUNTRY_BAD = re.compile(r'^[a-zäöü·"]|\b(von|über|aus|im|mit|der|die|das|und'
+                         r'|dem|den|eine?r?|Jahr|vom)\b')
+
+
+def looks_like_country(s) -> bool:
+    return bool(s) and not COUNTRY_BAD.search(s)
 
 SE_A    = re.compile(r'\(S(\d+)/E(\d+)\)')                    # ZDF family + thirds
 SE_B    = re.compile(r'\((?:Staffel\s*(\d+),\s*)?Folge\s*(\d+)\)')   # SRF
@@ -102,12 +111,13 @@ def classify(sender, topic, title, description, duration) -> dict:
     src = t if sender in TITLE_META_SENDERS else d
     m = META.search(src) if src else None
     if m and len(m.group(2)) < 40:
-        r['category'] = m.group(1); kat_src = 'metazeile'
         country = m.group(2).strip(' ,-')
         if ',' in country: country = country.split(',')[-1].strip()   # drop "von <Regisseur>," prefix
-        r['country'] = country; r['year'] = r['year'] or int(m.group(3))
-        if sender in TITLE_META_SENDERS:       # strip "- Spielfilm, ... YEAR" from title
-            t = t[:m.start()].rstrip(' -–')
+        if looks_like_country(country):        # else it is a sentence fragment/date -> reject
+            r['category'] = m.group(1); kat_src = 'metazeile'
+            r['country'] = country; r['year'] = r['year'] or int(m.group(3))
+            if sender in TITLE_META_SENDERS:   # strip "- Spielfilm, ... YEAR" from title
+                t = t[:m.start()].rstrip(' -–')
 
     # -- Pass 4: series_name ----------------------------------------------
     if sender not in ARTE_LANG:

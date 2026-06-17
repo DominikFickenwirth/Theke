@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from theke.classify import classify, CLASSIFY_COLS, CATWORD
+from theke.classify import classify, looks_like_country, CLASSIFY_COLS, CATWORD
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -760,8 +760,6 @@ _BARE_TOPIC = set(re.split(r"\|", CATWORD)) | {
 _TOPIC_MARKER = re.compile(
     r"\((?:mit\s+)?(?:Gebärdensprache|Audiodeskription|Hörfassung|klare Sprache"
     r"|Originalversion|mit Untertitel|OmU|OmdU|ÖGS|OV)\)?", re.I)
-_BAD_COUNTRY = re.compile(
-    r"^[a-zäöü·\"]|\b(von|über|aus|im|mit|der|die|das|und|dem|den|eine?r?|Jahr|vom)\b")
 _TITLE_CREDIT = re.compile(r"\b(?:Film|" + CATWORD + r")\s+von\s+\S", re.I)
 _EPISODIC = re.compile(r"Staffel.*Folge|,\s*Folge\s+\d|\bTeil\s+\d|\b\d+\s*/\s*\d+\b", re.I)
 
@@ -798,7 +796,7 @@ def _check_topic_marker(conn, where, params, limit):
 
 def _check_country_shape(conn, where, params, limit):
     return _audit_scan(conn, where, params, "country",
-                       lambda r: r["country"] if r["country"] and _BAD_COUNTRY.search(r["country"]) else None, limit)
+                       lambda r: r["country"] if r["country"] and not looks_like_country(r["country"]) else None, limit)
 
 
 def _check_title_credit(conn, where, params, limit):
