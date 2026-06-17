@@ -610,3 +610,101 @@ def test_cli_audit_unknown_check_exits_1(tmp_path):
     db = str(tmp_path / "theke.db")
     db_connect(db).close()
     assert main(["--db", db, "classify", "audit", "--check", "nope"]) == 1
+
+
+# -- classify show (read-only row sampler, structured filters) ----------------
+
+def show_args(sender=None, like=None, eq=None, null=None, not_null=None,
+              min_conf=None, max_conf=None, limit=20):
+    return SimpleNamespace(classify_cmd="show", sender=sender, like=like, eq=eq,
+                           null=null, not_null=not_null, min_conf=min_conf,
+                           max_conf=max_conf, limit=limit)
+
+
+def test_show_like_filter(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", clean_title="Der Wald - Film von Hans")
+        insert_classified(conn, "b", clean_title="Der Wald")
+        where, params = _build_show_where(conn, show_args(like=[["clean_title", "%Film von %"]]))
+        rows = classify_show(conn, where, params, 20)
+        assert [r["mediathek_id"] for r in rows] == ["a"]
+        assert rows[0]["clean_title"] == "Der Wald - Film von Hans"
+    finally:
+        conn.close()
+
+
+def test_show_eq_with_sender_filter(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", sender="ARD", category="Spielfilm")
+        insert_classified(conn, "b", sender="ZDF", category="Spielfilm")
+        insert_classified(conn, "c", sender="ARD", category="Doku")
+        where, params = _build_show_where(conn, show_args(sender="ARD", eq=[["category", "Spielfilm"]]))
+        rows = classify_show(conn, where, params, 20)
+        assert [r["mediathek_id"] for r in rows] == ["a"]
+    finally:
+        conn.close()
+
+
+def test_show_null_and_not_null(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", year=2003)
+        insert_classified(conn, "b")            # year stays NULL
+        nullrows = classify_show(conn, *_build_show_where(conn, show_args(null=["year"])), 20)
+        notnull = classify_show(conn, *_build_show_where(conn, show_args(not_null=["year"])), 20)
+        assert [r["mediathek_id"] for r in nullrows] == ["b"]
+        assert [r["mediathek_id"] for r in notnull] == ["a"]
+    finally:
+        conn.close()
+
+
+def test_show_min_conf(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_classified(conn, "a", classify_confidence=0.9)
+        insert_classified(conn, "b", classify_confidence=0.2)
+        rows = classify_show(conn, *_build_show_where(conn, show_args(min_conf=0.5)), 20)
+        assert [r["mediathek_id"] for r in rows] == ["a"]
+    finally:
+        conn.close()
+
+
+def test_show_limit_caps_rows(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        for i in range(3):
+            insert_classified(conn, str(i), category="Spielfilm")
+        rows = classify_show(conn, *_build_show_where(conn, show_args()), 2)
+        assert len(rows) == 2
+    finally:
+        conn.close()
+
+
+def test_show_unknown_field_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(Exception):
+            _build_show_where(conn, show_args(like=[["nope", "x"]]))
+    finally:
+        conn.close()
+
+
+def test_cli_show_json(tmp_path, capsys):
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db)
+    try:
+        insert_classified(conn, "a", sender="3Sat", clean_title="Der Wald - Film von Hans")
+    finally:
+        conn.close()
+    assert main(["--json", "--db", db, "classify", "show",
+                 "--like", "clean_title", "%Film von %"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [r["mediathek_id"] for r in out["rows"]] == ["a"]
+
+
+def test_cli_show_unknown_field_exits_1(tmp_path):
+    db = str(tmp_path / "theke.db")
+    db_connect(db).close()
+    assert main(["--db", db, "classify", "show", "--null", "nope"]) == 1
