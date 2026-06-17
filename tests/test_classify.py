@@ -319,6 +319,7 @@ def test_analyze_report_from_stored_columns(tmp_path):
         assert report == {"ARD": {
             "n": 2, "year_pct": 50.0, "country_pct": 50.0, "se_pct": 0.0,
             "cat_pct": 50.0, "unklar_pct": 50.0,
+            "genre_pct": 0.0, "slot_pct": 0.0, "events_pct": 0.0,
             "flag_a_pct": 50.0, "flag_s_pct": 0.0, "flag_u_pct": 0.0, "flag_t_pct": 0.0,
         }}
     finally:
@@ -338,6 +339,7 @@ def test_dry_run_report_is_live_and_writes_nothing(tmp_path):
         assert report == {"ARD": {
             "n": 2, "year_pct": 50.0, "country_pct": 50.0, "se_pct": 0.0,
             "cat_pct": 50.0, "unklar_pct": 0.0,
+            "genre_pct": 0.0, "slot_pct": 0.0, "events_pct": 0.0,
             "flag_a_pct": 0.0, "flag_s_pct": 0.0, "flag_u_pct": 0.0, "flag_t_pct": 0.0,
         }}
         # read-only: nothing was written
@@ -347,6 +349,26 @@ def test_dry_run_report_is_live_and_writes_nothing(tmp_path):
             assert r["category"] is None
             assert r["year"] is None
             assert r["flags"] is None
+    finally:
+        conn.close()
+
+
+def test_report_counts_genre_slot_events(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # four ARD rows: one with a genre, one with a slot, one an Events
+        # category, one plain -> each new column at 25 %.
+        insert_classified(conn, "a", genre="Natur", category="unklar",
+                          classify_confidence=0.2, flags="")
+        insert_classified(conn, "b", slot="hr Retro", category="unklar",
+                          classify_confidence=0.2, flags="")
+        insert_classified(conn, "c", series_name="Berlinale", category="Events",
+                          classify_confidence=0.8, flags="")
+        insert_classified(conn, "d", category="unklar", classify_confidence=0.2, flags="")
+        st = classify_report(conn, live=False, min_rows=1)["ARD"]
+        assert st["genre_pct"] == 25.0
+        assert st["slot_pct"] == 25.0
+        assert st["events_pct"] == 25.0
     finally:
         conn.close()
 
