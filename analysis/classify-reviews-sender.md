@@ -198,8 +198,12 @@ Kurznotiz: einziger Eintrag `topic="Livestream"`. Auch dies Radio Bremen.
 
 ## Anhang -- Reproduktion
 
-Temporaere Hilfsdateien (Praefix `_`), kein CLI-Bestandteil. Ausfuehren mit
-`PYTHONIOENCODING=utf-8 python analysis/<datei>`.
+Die frueheren `_`-Skripte sind in die CLI gewandert (read-only, `--json`).
+Ausfuehren z. B. mit `PYTHONIOENCODING=utf-8 theke --db build/theke.db <cmd>`.
 
-- `_audit_sender.py "SENDER[,SENDER2]"` -- generisches Sender-Audit (Battery fuer alle Befunde).
-- `_topics_dump.txt`, `_bucket_3sat.py`, `_audit_3sat.py`, `_audit_ard.py` -- frueheres 3Sat-/ARD-Detailaudit.
+- `theke classify audit --sender "SENDER[,SENDER2]"` -- Befund-Scan je Sender
+  (ersetzt das generische `_audit_sender.py`).
+- `theke classify show --sender X --like <feld> "<muster>"` -- Beispielzeilen
+  mit classify-Spalten (ersetzt die `_audit_3sat.py`/`_audit_ard.py`-Drilldowns).
+- `theke classify dist --sender X --field <feld>` -- Werteverteilung (ersetzt
+  `_topics_dump.txt` / die Bucket-Auszaehlung aus `_bucket_3sat.py`).

@@ -90,7 +90,7 @@ Set:
 `Reise, Natur, Musik, Tiere, Geschichte, Politik, Politik und Gesellschaft,
 Sport, Nachrichten, Wirtschaft, Europa, Nahost, Deutschland, Esskulturen, Kultur,
 Kulturdoku, Gesellschaft, Wissen, Wissenschaftsdoku, Buch, Theater, Märchen`.
-**Bricht nichts (geprueft, `_verify_heuristics.py`):** diese Woerter kommen als
+**Bricht nichts (DB-weit geprueft):** diese Woerter kommen als
 *exaktes* Topic nur in 3sat/ZDF/DW/ARTE.DE vor und sind dort durchweg Rubriken --
 **nie** eine echte Serie in anderen Sendern. Entscheidend ist **Exakt-Match**:
 `Sport` ist Rubrik, aber `Sportschau`/`Sport im Osten`/`BR24Sport` sind Serien und
@@ -138,7 +138,7 @@ Nur ZDF/3sat (Titel-Metazeile) betroffen.
 Bremen, alpha Lernen) oder einem **Sektionswort** (regionalmagazin, sportblitz,
 wetter, Retro, Doku, ...) wird `slot`, die andere Seite `series_name`. Matcht
 keine Seite -> nicht teilen (Untertitel-Fall).
-**Geprueft (`_verify_heuristics.py`):** 12.184/12.206 Pipe-Zeilen (99,8 %)
+**Geprueft (DB-weit):** 12.184/12.206 Pipe-Zeilen (99,8 %)
 eindeutig aufgeloest, 0 Konflikte (beide Seiten slot), 21 echte Untertitel-Faelle
 korrekt *nicht* getrennt (`Der Germanwings-Absturz | Chronologie ...`). Rest-Risiko:
 wenige `... | Bergfreundinnen` (Serie hinterm Pipe ohne Token) bleiben unsplit --
@@ -194,13 +194,24 @@ Nicht-ARTE-Sender unveraendert.
 
 ## Arbeitsweise -- eine classify-Heuristik aendern
 
-(Spaeter nach `theke/classify.py` verschieben.) Eine Heuristik nie nur am
-Zielsender beurteilen: gegen die **ganze DB** messen -- `theke classify --dry-run`
-(per-sender coverage) bzw. ein Skript ueber `build/theke.db` -- und bestaetigen,
-dass **nicht anvisierte Sender nicht regressieren**. Zahlen zaehlen, nicht
-schaetzen (passt zur Test-Konvention "expected values hart kodieren").
+Eine Heuristik nie nur am Zielsender beurteilen: gegen die **ganze DB** messen
+und bestaetigen, dass **nicht anvisierte Sender nicht regressieren**. Die dafuer
+noetigen read-only Werkzeuge sind als `theke classify`-Subcommands verfuegbar
+(`--json` fuer alle, kein Schreibzugriff):
 
-## Anhang
+- `theke classify report` -- per-sender coverage aus den gespeicherten Spalten;
+  `--live` rechnet `classify()` frisch, `--by-confidence` schluesselt die
+  category-Spalte nach Konfidenzstufe auf, `--sender`/`--min-rows` filtern.
+- `theke classify report --diff` -- der Iterations-Killer: zeigt pro Sender/Feld
+  die Aenderungs-Churn (gespeicherte Spalten vs. frischer `classify()`-Lauf, mit
+  Vorher/Nachher-Samples). Workflow: `classify run` (Baseline) -> Heuristik in
+  `theke/classify.py` aendern -> `report --diff` zeigt genau die gekippten Zeilen.
+- `theke classify audit` -- Befund-Scan (`bare-topic`, `case-variants`,
+  `topic-pipe`, `topic-marker`, `country-shape`, `title-credit`,
+  `episodic-unparsed`); `--check` waehlt aus, `--limit` begrenzt die Beispiele.
+- `theke classify show` -- Beispielzeilen mit ihren classify-Spalten, gefiltert
+  ueber `--like/--eq/--null/--not-null/--min-conf/--max-conf`.
+- `theke classify dist --field <spalte>` -- Werteverteilung eines Feldes (top-N).
 
-- `analysis/_verify_heuristics.py` -- Verifikation Q3 (Genre-Set) + Q4 (Pipe-Split)
-  gegen die ganze DB. `PYTHONIOENCODING=utf-8 python analysis/_verify_heuristics.py`.
+Zahlen zaehlen, nicht schaetzen (passt zur Test-Konvention "expected values hart
+kodieren").
