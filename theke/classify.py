@@ -40,8 +40,9 @@ ARTE_SUB = {'Filme':'Spielfilm','Kurzfilme':'Kurzfilm','Stummfilme':'Stummfilm',
 
 # Columns classify writes; the returned dict has exactly these keys. status and
 # mediathek_id are handled by the DB layer, not here.
-CLASSIFY_COLS = ['clean_title', 'series_name', 'season', 'episode', 'episode_count',
-                 'category', 'year', 'country', 'language', 'flags', 'classify_confidence']
+CLASSIFY_COLS = ['clean_title', 'series_name', 'genre', 'slot', 'season', 'episode',
+                 'episode_count', 'category', 'year', 'country', 'language', 'flags',
+                 'classify_confidence']
 
 
 def _confidence(kat_src, category):
@@ -56,8 +57,8 @@ def classify(sender, topic, title, description, duration) -> dict:
     t = title or ''; d = (description or '').strip(); tp = topic or ''
     flags = set()
     kat_src = None
-    r = dict(clean_title=None, series_name=None, season=None, episode=None,
-             episode_count=None, category=None, year=None, country=None,
+    r = dict(clean_title=None, series_name=None, genre=None, slot=None, season=None,
+             episode=None, episode_count=None, category=None, year=None, country=None,
              language=ARTE_LANG.get(sender, 'de'), flags='', classify_confidence=None)
 
     # -- Pass 1: parenthetical markers (extract + strip) -------------------

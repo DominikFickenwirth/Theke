@@ -129,6 +129,10 @@ MIGRATIONS: list[tuple[str, ...]] = [
         "ALTER TABLE mediathek ADD COLUMN flags               TEXT",
         "ALTER TABLE mediathek ADD COLUMN classify_confidence REAL",
     ),
+    (
+        "ALTER TABLE mediathek ADD COLUMN genre TEXT",
+        "ALTER TABLE mediathek ADD COLUMN slot  TEXT",
+    ),
 ]
 
 
