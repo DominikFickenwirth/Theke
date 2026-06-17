@@ -256,6 +256,78 @@ def test_unklar_when_no_category_signal():
     assert r["classify_confidence"] == 0.2
 
 
+# -- topic routing (B1+B2+B7): format/genre/slot/event vs. real series --------
+
+def test_topic_routing_format_word_sets_category_not_series():
+    # A topic that is itself a format word is not a series; it sets the category
+    # and leaves series_name empty.
+    r = classify("3Sat", "Spielfilm", "Der Lauf der Dinge", "", 5400)
+    assert r["category"] == "Spielfilm"
+    assert r["series_name"] is None
+    assert r["classify_confidence"] == 0.8
+
+
+def test_topic_routing_format_rubric_phrase():
+    # Multi-word format rubric -> generic "Film" category, no series.
+    r = classify("ARD", "Filme in der ARD", "Tatort", "", 5400)
+    assert r["category"] == "Film"
+    assert r["series_name"] is None
+
+
+def test_topic_routing_genre_word_sets_genre_not_series():
+    r = classify("3Sat", "Natur", "Wildes Skandinavien", "", 2700)
+    assert r["genre"] == "Natur"
+    assert r["series_name"] is None
+    assert r["category"] == "unklar"   # genre is not a format -> duration prior
+
+
+def test_topic_routing_genre_is_exact_not_substring():
+    # "Sport" alone is a rubric; "Sport im Osten" is a real series -> not genre.
+    r = classify("ARD", "Sport im Osten", "Spieltag", "", 2700)
+    assert r["genre"] is None
+    assert r["series_name"] == "Sport im Osten"
+
+
+def test_topic_routing_event_sets_events_category():
+    r = classify("3Sat", "Berlinale", "Eröffnungsgala", "", 3600)
+    assert r["category"] == "Events"
+    assert r["series_name"] == "Berlinale"
+    assert r["classify_confidence"] == 0.8
+
+
+def test_topic_routing_pipe_dachmarke_front():
+    r = classify("HR", "hr Retro | hessenschau", "Sendung vom Montag", "", 1500)
+    assert r["slot"] == "hr Retro"
+    assert r["series_name"] == "hessenschau"
+
+
+def test_topic_routing_pipe_dachmarke_back():
+    r = classify("rbtv", "buten un binnen | regionalmagazin", "Ausgabe", "", 1500)
+    assert r["slot"] == "regionalmagazin"
+    assert r["series_name"] == "buten un binnen"
+
+
+def test_topic_routing_pipe_subtitle_is_not_split():
+    # Neither side is a Dachmarke -> title|subtitle, keep the whole topic.
+    topic = "Der Germanwings-Absturz | Chronologie eines Unglücks"
+    r = classify("ARD", topic, "Doku", "", 3600)
+    assert r["slot"] is None
+    assert r["series_name"] == topic
+
+
+def test_topic_routing_container_clip_has_no_series():
+    r = classify("SRF", "Sport-Clip", "Tor des Tages", "", 60)
+    assert r["series_name"] is None
+    assert r["category"] == "Clip"   # short duration prior
+
+
+def test_topic_routing_plain_series_unchanged():
+    # Regression: an ordinary topic still becomes the series_name verbatim.
+    r = classify("ARD", "Tatort", "Der Fall", "", 5400)
+    assert r["series_name"] == "Tatort"
+    assert r["genre"] is None and r["slot"] is None
+
+
 # -- cmd_classify: DB write side ---------------------------------------------
 
 def open_db(tmp_path):
