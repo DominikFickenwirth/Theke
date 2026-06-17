@@ -11,13 +11,14 @@ import io
 import json
 import logging
 import lzma
+import re
 import sqlite3
 import sys
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from theke.classify import classify, CLASSIFY_COLS
+from theke.classify import classify, CLASSIFY_COLS, CATWORD
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -523,6 +524,7 @@ def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
     match args.classify_cmd:
         case "run":    return _classify_run(conn, args)
         case "report": return _classify_report_cmd(conn, args)
+        case "audit":  return _classify_audit_cmd(conn, args)
         case _: raise DbError(f"unhandled classify action: {args.classify_cmd}")
 
 
@@ -586,8 +588,8 @@ _REPORT_FIELDS = ["year", "country", "se", "cat", "unklar",
 _CONF_LEVELS = [("c90", 0.9), ("c80", 0.8), ("c50", 0.5), ("c20", 0.2)]
 
 
-def _split_senders(value):
-    """Comma-separated --sender value -> list of senders, or None when unset."""
+def _split_csv(value):
+    """Comma-separated CLI value -> list of trimmed items, or None when unset."""
     if not value:
         return None
     return [s.strip() for s in value.split(",") if s.strip()]
@@ -713,7 +715,7 @@ def _print_report_table(report, mode, by_confidence=False):
 
 
 def _classify_report_cmd(conn, args) -> dict:
-    senders = _split_senders(args.sender)
+    senders = _split_csv(args.sender)
     if args.diff:
         log.info("running classify() live to diff against the stored columns")
         diff = classify_report_diff(conn, senders=senders)
@@ -729,6 +731,146 @@ def _classify_report_cmd(conn, args) -> dict:
     if args.json:
         return {"mode": mode, "senders": report}
     _print_report_table(report, mode, by_confidence=args.by_confidence)
+    return {}
+
+
+# -- classify audit (read-only findings scan) ---------------------------------
+# Promotes the analysis/_audit_sender.py battery into the CLI: per sender, the
+# rows where a heuristic visibly mishandled the input (counts coverage as filled
+# but not correct). Each check returns {sender: {count, examples}}; classify_audit
+# assembles {sender: {check: ...}}. Read-only.
+
+# Topic that is itself a bare format/genre word (not a real series). CATWORD has
+# no bare "Film"/"Doku"; add them and the curated genre rubrics.
+_BARE_TOPIC = set(re.split(r"\|", CATWORD)) | {
+    "Film", "Doku", "Reise", "Natur", "Musik", "Tiere", "Geschichte", "Politik",
+    "Politik und Gesellschaft", "Sport", "Nachrichten", "Wirtschaft", "Europa",
+    "Nahost", "Deutschland", "Esskulturen", "Kultur", "Kulturdoku",
+    "Gesellschaft", "Wissen", "Wissenschaftsdoku", "Buch", "Theater", "Märchen"}
+_TOPIC_MARKER = re.compile(
+    r"\((?:mit\s+)?(?:Gebärdensprache|Audiodeskription|Hörfassung|klare Sprache"
+    r"|Originalversion|mit Untertitel|OmU|OmdU|ÖGS|OV)\)?", re.I)
+_BAD_COUNTRY = re.compile(
+    r"^[a-zäöü·\"]|\b(von|über|aus|im|mit|der|die|das|und|dem|den|eine?r?|Jahr|vom)\b")
+_TITLE_CREDIT = re.compile(r"\b(?:Film|" + CATWORD + r")\s+von\s+\S", re.I)
+_EPISODIC = re.compile(r"Staffel.*Folge|,\s*Folge\s+\d|\bTeil\s+\d|\b\d+\s*/\s*\d+\b", re.I)
+
+
+def _audit_scan(conn, where, params, select, predicate, limit) -> dict:
+    """Generic row-level check: predicate(row) -> example string (or None to skip).
+    Buckets count per sender and collects up to `limit` distinct examples."""
+    out = {}
+    for r in conn.execute(f"SELECT sender, {select} FROM mediathek " + where, params):
+        ex = predicate(r)
+        if ex is None:
+            continue
+        b = out.setdefault(r["sender"], {"count": 0, "examples": []})
+        b["count"] += 1
+        if ex not in b["examples"] and len(b["examples"]) < limit:
+            b["examples"].append(ex)
+    return out
+
+
+def _check_bare_topic(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "topic",
+                       lambda r: r["topic"] if r["topic"] in _BARE_TOPIC else None, limit)
+
+
+def _check_topic_pipe(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "topic",
+                       lambda r: r["topic"] if "|" in (r["topic"] or "") else None, limit)
+
+
+def _check_topic_marker(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "topic",
+                       lambda r: r["topic"] if _TOPIC_MARKER.search(r["topic"] or "") else None, limit)
+
+
+def _check_country_shape(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "country",
+                       lambda r: r["country"] if r["country"] and _BAD_COUNTRY.search(r["country"]) else None, limit)
+
+
+def _check_title_credit(conn, where, params, limit):
+    return _audit_scan(conn, where, params, "clean_title",
+                       lambda r: r["clean_title"] if _TITLE_CREDIT.search(r["clean_title"] or "") else None, limit)
+
+
+def _check_episodic_unparsed(conn, where, params, limit):
+    def pred(r):
+        looks = _EPISODIC.search(r["title"] or "")
+        return r["title"] if looks and r["season"] is None and r["episode"] is None else None
+    return _audit_scan(conn, where, params, "title, season, episode", pred, limit)
+
+
+def _check_case_variants(conn, where, params, limit):
+    """Topics within a sender that collapse to one casefold but differ in raw form."""
+    rows = conn.execute("SELECT sender, topic, count(*) c FROM mediathek "
+                        + where + " GROUP BY sender, topic", params)
+    bysender = {}
+    for r in rows:
+        if not r["topic"]:
+            continue
+        bysender.setdefault(r["sender"], {}).setdefault(
+            r["topic"].casefold(), []).append((r["topic"], r["c"]))
+    out = {}
+    for sender, groups in bysender.items():
+        multi = [v for v in groups.values() if len({t for t, _ in v}) > 1]
+        if not multi:
+            continue
+        out[sender] = {
+            "count": sum(c for v in multi for _, c in v),
+            "examples": ["/".join(sorted(t for t, _ in v)) for v in multi[:limit]]}
+    return out
+
+
+# Check name -> implementation. Names are the public --check vocabulary.
+AUDIT_CHECKS = {
+    "bare-topic":        _check_bare_topic,
+    "case-variants":     _check_case_variants,
+    "topic-pipe":        _check_topic_pipe,
+    "topic-marker":      _check_topic_marker,
+    "country-shape":     _check_country_shape,
+    "title-credit":      _check_title_credit,
+    "episodic-unparsed": _check_episodic_unparsed,
+}
+
+
+def classify_audit(conn, senders=None, checks=None, limit=5) -> dict:
+    """Run the findings checks (default all) and return {sender: {check: {count,
+    examples}}}. country-shape/title-credit/episodic-unparsed only fire on
+    already-classified rows. Read-only -> no transaction."""
+    names = checks or list(AUDIT_CHECKS)
+    unknown = [c for c in names if c not in AUDIT_CHECKS]
+    if unknown:
+        raise ValueError(f"unknown audit check(s): {', '.join(unknown)} "
+                         f"(known: {', '.join(AUDIT_CHECKS)})")
+    where, params = _sender_clause(senders)
+    out = {}
+    for name in names:
+        for sender, res in AUDIT_CHECKS[name](conn, where, params, limit).items():
+            out.setdefault(sender, {})[name] = res
+    return out
+
+
+def _print_audit(result):
+    """Findings per sender/check to stdout: count + the collected examples."""
+    print("classify audit (findings: count + examples)")
+    for sender in sorted(result):
+        print(f"{sender}:")
+        for check in sorted(result[sender]):
+            res = result[sender][check]
+            print(f'  {check:18}{res["count"]:>8}')
+            for ex in res["examples"]:
+                print(f"      {ex!r}")
+
+
+def _classify_audit_cmd(conn, args) -> dict:
+    result = classify_audit(conn, senders=_split_csv(args.sender),
+                            checks=_split_csv(args.check), limit=args.limit)
+    if args.json:
+        return {"senders": result}
+    _print_audit(result)
     return {}
 
 
@@ -785,6 +927,16 @@ def build_parser() -> argparse.ArgumentParser:
     crep.add_argument("--live",          action="store_true",                 help="run classify() live instead of reading the stored columns")
     crep.add_argument("--diff",          action="store_true",                 help="report per-field churn: stored columns vs a live classify() pass")
     crep.add_argument("--by-confidence", action="store_true",                 help="split the category column into per-confidence-level columns")
+
+    caud = csub.add_parser("audit", help="read-only findings scan (wrong/suspicious values)",
+                           description="Scan for rows a heuristic visibly mishandled "
+                                       "(coverage counts filled, not correct). "
+                                       "country-shape/title-credit/episodic-unparsed "
+                                       "only fire on already-classified rows. Checks: "
+                                       + ", ".join(AUDIT_CHECKS) + ".")
+    caud.add_argument("--sender", metavar="X[,Y]",            help="restrict to these senders (comma-separated)")
+    caud.add_argument("--check",  metavar="NAME[,NAME]",      help="run only these checks (default all)")
+    caud.add_argument("--limit",  type=int, default=5, metavar="N", help="examples per finding (default 5)")
 
     return parser
 
