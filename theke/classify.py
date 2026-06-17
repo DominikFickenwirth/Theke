@@ -1,9 +1,7 @@
 # -- metadata extraction (phase 3, part 1) ----------------------------------
 # Pure, deterministic: one mediathek row -> structured metadata, following the
 # per-sender broadcaster conventions reverse-engineered for phase 3 (see git
-# history). Conservative: a field stays None when no convention applies. Run
-# `theke classify report --live` to re-measure per-sender coverage after a
-# change, or `theke classify report --diff` to see which rows it flips.
+# history). Conservative: a field stays None when no convention applies.
 import re
 
 CATWORD = (r'Spielfilm|Fernsehfilm|TV-Film|Dokumentarfilm|Dokumentation|Dokudrama'

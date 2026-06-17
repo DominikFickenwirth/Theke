@@ -1001,65 +1001,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("config", help="show the effective configuration")
 
-    mirror = sub.add_parser("mirror", help="refresh the film-list mirror (~30 s)",
-                            description="Refresh the film-list mirror; a full "
-                                        "download and import takes about 30 "
-                                        "seconds. Progress is printed to stderr.")
+    mirror = sub.add_parser("mirror", help="refresh the film-list mirror (~30 s)", description="Refresh the film-list mirror; a full download and import takes about 30 seconds. Progress is printed to stderr.")
     mirror.add_argument("--force", action="store_true", help="always download the full list")
 
-    classify = sub.add_parser("classify", help="extract metadata and inspect the result",
-                              description="Extract structured metadata from the "
-                                          "free-text fields (run) and inspect the "
-                                          "result with read-only reports. Progress "
-                                          "is printed to stderr.")
+    classify = sub.add_parser("classify", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
     csub = classify.add_subparsers(dest="classify_cmd", required=True, metavar="action")
-
-    crun = csub.add_parser("run", help="classify mirrored rows (writes the classify columns)",
-                           description="Extract structured metadata (title, "
-                                       "series/season/episode, category, year, "
-                                       "country, language, flags) into the classify "
-                                       "columns and flip status 0 -> 1.")
-    crun.add_argument("--force", action="store_true", help="reclassify all rows, not just unclassified")
-
-    crep = csub.add_parser("report", help="read-only per-sender coverage report",
-                           description="Per-sender coverage of the classify fields. "
-                                       "Reads the stored columns by default; --live "
-                                       "re-runs classify() without writing.")
-    crep.add_argument("--sender",   metavar="X[,Y]",                          help="restrict to these senders (comma-separated)")
-    crep.add_argument("--min-rows", type=int, default=REPORT_MIN_ROWS, metavar="N", help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
-    crep.add_argument("--live",          action="store_true",                 help="run classify() live instead of reading the stored columns")
-    crep.add_argument("--diff",          action="store_true",                 help="report per-field churn: stored columns vs a live classify() pass")
-    crep.add_argument("--by-confidence", action="store_true",                 help="split the category column into per-confidence-level columns")
-
-    caud = csub.add_parser("audit", help="read-only findings scan (wrong/suspicious values)",
-                           description="Scan for rows a heuristic visibly mishandled "
-                                       "(coverage counts filled, not correct). "
-                                       "country-shape/title-credit/episodic-unparsed "
-                                       "only fire on already-classified rows. Checks: "
-                                       + ", ".join(AUDIT_CHECKS) + ".")
-    caud.add_argument("--sender", metavar="X[,Y]",            help="restrict to these senders (comma-separated)")
-    caud.add_argument("--check",  metavar="NAME[,NAME]",      help="run only these checks (default all)")
-    caud.add_argument("--limit",  type=int, default=5, metavar="N", help="examples per finding (default 5)")
-
-    csho = csub.add_parser("show", help="read-only sample of rows with their classify columns",
-                           description="Dump the classify columns of matching rows. "
-                                       "Filters are ANDed; FIELD must be a mediathek "
-                                       "column.")
-    csho.add_argument("--sender",    metavar="X[,Y]",                     help="restrict to these senders (comma-separated)")
-    csho.add_argument("--like",      nargs=2, action="append", metavar=("FIELD", "PATTERN"), help="FIELD LIKE PATTERN (repeatable)")
-    csho.add_argument("--eq",        nargs=2, action="append", metavar=("FIELD", "VALUE"),   help="FIELD = VALUE (repeatable)")
-    csho.add_argument("--null",      action="append", metavar="FIELD",    help="FIELD IS NULL (repeatable)")
-    csho.add_argument("--not-null",  action="append", metavar="FIELD",    help="FIELD IS NOT NULL (repeatable)")
-    csho.add_argument("--min-conf",  type=float, metavar="X",             help="classify_confidence >= X")
-    csho.add_argument("--max-conf",  type=float, metavar="X",             help="classify_confidence <= X")
-    csho.add_argument("--limit",     type=int, default=20, metavar="N",   help="max rows to dump (default 20)")
-
-    cdis = csub.add_parser("dist", help="read-only value distribution of one field",
-                           description="Top-N value frequencies of a single classify "
-                                       "field (or any mediathek column).")
-    cdis.add_argument("--sender", metavar="X[,Y]",            help="restrict to these senders (comma-separated)")
-    cdis.add_argument("--field",  required=True, metavar="NAME", help="the column to tally")
-    cdis.add_argument("--limit",  type=int, default=30, metavar="N", help="top-N values (default 30)")
+    crun = csub.add_parser("run",    help="classify mirrored rows (writes the classify columns)", description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the classify columns and flip status 0 -> 1.")
+    crep = csub.add_parser("report", help="read-only per-sender coverage report",                 description="Per-sender coverage of the classify fields. Reads the stored columns by default; --live re-runs classify() without writing.")
+    caud = csub.add_parser("audit",  help="read-only findings scan (wrong/suspicious values)",    description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-classified rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
+    csho = csub.add_parser("show",   help="read-only sample of rows with their classify columns", description="Dump the classify columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
+    cdis = csub.add_parser("dist",   help="read-only value distribution of one field",            description="Top-N value frequencies of a single classify field (or any mediathek column).")
+    crun.add_argument("--force",         action="store_true",                                    help="reclassify all rows, not just unclassified")
+    crep.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    crep.add_argument("--min-rows",      metavar="N", type=int, default=REPORT_MIN_ROWS,         help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
+    crep.add_argument("--live",          action="store_true",                                    help="run classify() live instead of reading the stored columns")
+    crep.add_argument("--diff",          action="store_true",                                    help="report per-field churn: stored columns vs a live classify() pass")
+    crep.add_argument("--by-confidence", action="store_true",                                    help="split the category column into per-confidence-level columns")
+    caud.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    caud.add_argument("--check",         metavar="NAME[,NAME]",                                  help="run only these checks (default all)")
+    caud.add_argument("--limit",         metavar="N", type=int, default=5,                       help="examples per finding (default 5)")
+    csho.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    csho.add_argument("--like",          metavar=("FIELD", "PATTERN"), nargs=2, action="append", help="FIELD LIKE PATTERN (repeatable)")
+    csho.add_argument("--eq",            metavar=("FIELD", "VALUE"),   nargs=2, action="append", help="FIELD = VALUE (repeatable)")
+    csho.add_argument("--null",          action="append", metavar="FIELD",                       help="FIELD IS NULL (repeatable)")
+    csho.add_argument("--not-null",      action="append", metavar="FIELD",                       help="FIELD IS NOT NULL (repeatable)")
+    csho.add_argument("--min-conf",      type=float, metavar="X",                                help="classify_confidence >= X")
+    csho.add_argument("--max-conf",      type=float, metavar="X",                                help="classify_confidence <= X")
+    csho.add_argument("--limit",         type=int, default=20, metavar="N",                      help="max rows to dump (default 20)")
+    cdis.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
+    cdis.add_argument("--field",         required=True, metavar="NAME",                          help="the column to tally")
+    cdis.add_argument("--limit",         type=int, default=30, metavar="N",                      help="top-N values (default 30)")
 
     return parser
 
