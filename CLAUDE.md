@@ -1,87 +1,81 @@
 # CLAUDE.md -- Theke
 
-> Context file for Claude Code: architecture, domain knowledge and conventions.
-> Keep it in sync whenever a core assumption changes.
+> Context file for Claude Code: architecture, domain, conventions. Keep in sync
+> when a core assumption changes.
 >
-> ENCODING RULE: every repo text file (this one included) is stored UTF-8 but
-> kept CP-1252-only in content (valid in both). No emojis, no Unicode arrows, no
-> box-drawing glyphs; draw arrows with "< - > | ^ V" (e.g. -->, <->, ^, V).
-> Applies to repo text files (source, config, docs) only -- NOT runtime data:
-> film list metadata is UTF-8 and may carry non-CP-1252 characters, stored as-is.
-> When printing such runtime data to the (Windows) console, set
-> `PYTHONIOENCODING=utf-8` -- else UnicodeEncodeError, since the data may exceed
-> CP-1252.
+> ENCODING: every repo text file (this one too) is UTF-8 but CP-1252-only in
+> content. No emojis/Unicode arrows/box-drawing; draw arrows as `-->`, `<->`,
+> `^`, `V`. Repo text only (source, config, docs) -- NOT runtime data: film-list
+> metadata is UTF-8 and may exceed CP-1252, stored as-is. Set
+> `PYTHONIOENCODING=utf-8` when printing it to the Windows console (else
+> UnicodeEncodeError).
 
 ## Overview
 
-**Theke** (from Media-*thek*) is a self-hosted media manager that acquires,
-processes and files German public-broadcaster content into a **Jellyfin**
-library. The catalog is the **MediathekView film list** -- a plain download from
-liste.mediathekview.de. The only source is the public Mediatheken.
+**Theke** (from Media-*thek*) is a self-hosted media manager: it acquires German
+public-broadcaster content and files it into a **Jellyfin** library. The only
+source is the public Mediatheken via the **MediathekView film list** (a plain
+download from liste.mediathekview.de).
 
-**Two languages, one home for the logic:** the **CLI is Python** and holds all
-logic; the **Delphi desktop GUI** owns nothing and shells out to the CLI for
-everything. The CLI is the only thing that runs on the NAS.
+**One home for the logic:** the **Python CLI** holds *all* logic and is the only
+thing on the NAS; the **Delphi desktop GUI** holds none and shells out to the
+CLI for everything.
 
 ## Phases (implementation order)
 
-Each phase ends with something usable on its own. Only phases 1-2 are planned;
-**phase 3 onward is tentative** (designs and ordering will be revisited if work
-gets there) -- do not over-engineer for later phases. Ordering principle for the
-middle phases: build the full **manual acquisition path** as one testable
-vertical slice (search --> queue --> approve --> download --> remux), then add
-the **wishlist** as automation on the same machinery.
+Each phase is usable on its own. Phases 1-2 are planned; **3+ is tentative** --
+don't over-engineer ahead. Middle-phase ordering: build the full **manual
+acquisition path** as one vertical slice (search --> queue --> approve -->
+download --> remux), then add the **wishlist** as automation on the same
+machinery.
 
 1. **Scaffolding** -- config, DB layer, CLI skeleton.
-2. **Film list mirror** -- download the film list and import into SQLite table
-   `mediathek`, keyed by `mediathek_id` = MediathekView's own film identity
-   (SHA-256 over sender+thema+url+website, each UTF-16LE-encoded).
-   Standalone: a locally searchable Mediathek DB.
-3. **Enrichment + matching** -- add TMDB/IMDB IDs and language codes, fuzzy match
-   with confidence scores. On refresh, existing ID assignments must **not** be
-   lost; entries that vanish from the source are kept (the mirror only grows or
-   updates, never deletes).
-4. **DB search** -- read-only query/browse of the enriched catalog. A pick by ID
-   becomes a review-queue entry (once phase 5 exists), not a download.
-5. **Review queue + gate** -- staging of proposals/picks and the approval gate.
-   Manual picks land here; user approves. Still no download.
+2. **Film list mirror** -- download and import into SQLite table `mediathek`,
+   keyed by `mediathek_id` (MediathekView's identity: SHA-256 over
+   sender+thema+url+website, each UTF-16LE). Follows MV's update logic: check the
+   server list id, skip if unchanged; else apply the diff list
+   (`Filmliste-diff.xz`) when usable, else full download (`--force` forces full).
+3. **Classify + enrich + match** (partly done). **classify** (done): extract
+   structured metadata (clean title, series/season/episode, category, year,
+   country, language, flags) from free text, flip `status` '0' -> '1'.
+   **enrich + match** (to come): add TMDB/IMDB IDs, fuzzy match with confidence.
+   A refresh must preserve existing ID assignments; vanished entries are kept
+   (the mirror only grows/updates, never deletes).
+4. **DB search** -- read-only query/browse; a pick by ID becomes a review-queue
+   entry (phase 5), not a download.
+5. **Review queue + gate** -- staging of proposals/picks + approval gate. Still
+   no download.
 6. **Downloader** -- plain HTTP download of approved items (DE/EN separate,
-   subtitles), triggered manually via CLI.
-7. **Remuxer** -- FFmpeg pipeline, files land in the Jellyfin folders. **Manual
-   path complete here** (search --> ... --> remux works end to end).
-8. **Wishlist** -- wish entries by TMDB/IMDB ID, automatic availability checks
-   feeding the same review queue. Pure automation on phases 4-7.
-9. **Docker + NAS deployment** -- containerize, deploy, still manually triggered
-   (smoke test).
-10. **Scheduler** -- in-app scheduler goes live; system can run unattended.
-11. **Jellyfin indexer** -- parse NFO files, cache the existing library.
-    Prerequisite for phase 12.
+   subtitles), manual via CLI.
+7. **Remuxer** -- FFmpeg pipeline into the Jellyfin folders. **Manual path
+   complete here.**
+8. **Wishlist** -- entries by TMDB/IMDB ID, auto availability checks feeding the
+   same queue. Pure automation on phases 4-7.
+9. **Docker + NAS deployment** -- containerize, deploy (smoke test, manual).
+10. **Scheduler** -- in-app scheduler; runs unattended.
+11. **Jellyfin indexer** -- parse NFO files, cache the library. Needed for 12.
 12. **Quality upgrades + series completion** -- detect higher resolutions /
     missing episodes (needs the indexer).
 13. **Web UI** -- review dashboard, settings, history.
 
-## Guiding principle: optional human-in-the-loop
+## The gate (optional human-in-the-loop)
 
 Review is a **configurable gate**, not a hard rule:
 
-1. **Proposal** -- Theke generates match candidates + confidence scores (or the
-   user picks via search) into a review queue.
-2. **Approval** -- user inspects, optionally corrects, approves or deletes. Only
-   then does the download start.
+1. **Proposal** -- Theke generates match candidates + confidence (or the user
+   picks via search) into the review queue.
+2. **Approval** -- user inspects/corrects, approves or deletes; only then does
+   download start. Set in config (optional auto-approve confidence threshold).
 
-The gate is set in config (optional auto-approve confidence threshold).
+**Side-effect boundary:** DB-only operations run automatically; anything that
+writes/deletes files in the library sits behind the gate.
 
-## Automatic vs. manual (side-effect boundary)
-
-Rule of thumb: **DB-only operations run automatically; anything that writes or
-deletes files in the media library sits behind the gate.**
-
-- Automatic (DB-only): mirror, enrichment, matching, DB search (read-only),
-  wishlist checks, proposal generation.
+- Automatic (DB-only): mirror, classify, enrich, match, DB search, wishlist
+  checks, proposal generation.
 - Gated (touches the library): starting downloads, replacing files.
-- Automatic after approval: download, remux, placement.
+- After approval, automatic: download, remux, placement.
 - Quality upgrades are most sensitive (they delete files): proposal automatic,
-  replacement only after approval -- even if the gate is otherwise relaxed.
+  replacement only after approval -- even when the gate is otherwise relaxed.
 
 ## Architecture / pipeline
 
@@ -105,241 +99,195 @@ Jellyfin (NFO files) --> [Indexer] -----------+  (phase 11)
                                    NAS / Jellyfin media folders
 ```
 
-Two producers feed the review queue: a manual pick from DB search, and the
-wishlist. Stages are decoupled -- each writes its state to the DB, so aborts and
-re-runs are idempotent. Every stage is callable individually.
+Two producers feed the queue (a manual DB-search pick, the wishlist). Stages are
+decoupled and idempotent -- each persists its state to the DB, so aborts/re-runs
+are safe and every stage is callable on its own.
 
 ## Data model
 
-A **single SQLite file** (`theke.db`) holds all tables. Field lists are
-indicative.
+Single SQLite file `theke.db`. Field lists indicative.
 
-- **mediathek** -- mirror of the film list, refreshed periodically.
-  `mediathek_id` is MediathekView's identity (SHA-256 over
-  sender+thema+url+website, UTF-16LE); `status` is one character
-  ('0' new, '1' classified). language/tmdb_id/imdb_id/match_confidence are filled by
-  phase 3 and preserved across refreshes.
+- **mediathek** -- film-list mirror, refreshed periodically. `status` is one char
+  ('0' new, '1' classified). classify (phase 3) fills `language` +
+  clean_title/series_name/season/episode/episode_count/category/year/country/
+  flags/classify_confidence and flips status to '1'; tmdb_id/imdb_id/
+  match_confidence wait for enrich+match. All phase-3 columns survive refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
   size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
-  url_history, geo, language, tmdb_id, imdb_id, match_confidence`
+  url_history, geo, language, tmdb_id, imdb_id, match_confidence, clean_title,
+  series_name, season, episode, episode_count, category, year, country, flags,
+  classify_confidence`
   Plus a `meta` key/value table (filmliste_id, filmliste_created).
-- **queue** -- the single acquisition table = review queue + download record.
-  Lifecycle: `proposed -> approved -> downloading -> done / failed / cancelled`.
+- **queue** -- review queue + download record in one. Lifecycle
+  `proposed -> approved -> downloading -> done / failed / cancelled`.
   `status, id, mediathek_id, source (match/search/wishlist), language,
   confidence, target_path, resolution, error, created_at, updated_at`
 - **wishlist** (phase 8) -- `tmdb_id, imdb_id, type, season, episode, status,
   added_at`
-- **library** -- filled by parsing MP4 files plus the NFO files (XML) in each
-  media folder, which already carry TMDB/IMDB IDs (trivial matching on this
-  side). Replaces `wishlist` in phase 11 (wishlist entries become library
-  entries with status="wishlist").
+- **library** -- from MP4s + their NFO files (XML already carries TMDB/IMDB IDs,
+  so matching here is trivial). Replaces `wishlist` in phase 11 (wishlist entries
+  become library entries with status="wishlist").
   `status, type (movie/episode), title, year, tmdb_id, imdb_id, season, episode,
   path, resolution, languages, added_at`
 
-## DB search (phase 4)
+## Stage details
 
-- Read-only query over the enriched catalog: title/topic substring, TMDB/IMDB
-  ID, sender, date, or match status.
-- A result picked by ID is handed to the review queue (phase 5), not downloaded
-  directly. This is the minimal manual acquisition path -- what the wishlist
-  later automates; both feed the same queue.
-- Needs proper indexes on searched columns; SQLite FTS5 over
-  title/topic/description is an option to evaluate.
+**DB search (phase 4):** read-only over the enriched catalog (title/topic
+substring, TMDB/IMDB ID, sender, date, match status). A pick by ID goes to the
+queue (phase 5), not a direct download -- the minimal manual path the wishlist
+later automates; both feed the same queue. Needs indexes on searched columns;
+FTS5 over title/topic/description is an option to evaluate.
 
-## Matching (core problem)
+**Matching (core problem):** film-list row <-> TMDB/IMDB ID, pragmatically: fuzzy
+match on title+year (token/Levenshtein); for series also season/episode (far more
+reliable); confirm with duration, release year, optional synopsis; compute a
+confidence score, below threshold -> manual review (goal: few false positives).
+TMDB exposes the IMDB ID as an external ID, so matching TMDB and taking IMDB from
+there usually suffices. One TMDB/IMDB ID maps to **many** mediathek rows (senders,
+SD/HD, repeats); the queue dedups on target (tmdb/imdb id + language +
+resolution), search may still list all rows. AI (embeddings/classifier) or web
+search is a **later** fallback only if the classic hit rate is poor.
 
-Film list row <-> TMDB/IMDB ID. Pragmatic approach:
+**Download (phase 6):** source is the film list (direct media URLs). Transport:
+plain HTTP GET for mp4/mp3/m4v/flv/m4a streamed to disk; ffmpeg for m3u8 (like
+MV's "Programmset"). HTTP is needed in exactly three places: film list, TMDB REST
+API, media download. DE/EN downloaded **separately** when present; subtitles
+DE/EN when present (external subtitle providers later). Failed downloads retry,
+status in DB, no silent loss.
 
-- **Fuzzy match** on title + year (token-based / Levenshtein).
-- **For series** also use season/episode (far more reliable).
-- Confirm with extra signals: duration, release year, optional synopsis compare.
-- Compute a **confidence score**; below threshold -> flag for manual review.
-  Goal: few false positives.
-- TMDB returns the IMDB ID as an external ID, so matching against TMDB and taking
-  the IMDB ID from there is usually enough.
-- One TMDB/IMDB ID maps to **many** mediathek rows (across senders, SD/HD,
-  repeats). The queue deduplicates on the target (tmdb/imdb id + language +
-  resolution) so an item is not proposed/downloaded twice; search may still list
-  all underlying rows.
-- AI approaches (embeddings, learned classifier) or web search are a **later**
-  fallback if the classic hit rate is poor -- not in the first cut.
+**Remux convention (important)** -- never store **duplicate video**:
 
-## Download and processing
+- One language only -> file stored unchanged.
+- DE **and** EN with equal-length video streams:
+  - The **original-language** MP4 stays the main file, unchanged. Original
+    language comes from the TMDB match (`original_language`); for these
+    broadcasters it is almost always German -> German is the fallback.
+  - From the secondary file, FFmpeg extracts **only the audio** as an external
+    track next to the video, named `<basename>.<lang>.<codec>` (e.g.
+    `Tatort (2024).en.aac/ac3/m4a/mka`); its video is discarded. Jellyfin picks
+    the external audio up as an extra track.
+- Verify on implementation: exact codec/extension; that Jellyfin maps the
+  external audio with this naming; set correct **language tags** on remux (else
+  Jellyfin mislabels); check naming against current Jellyfin docs.
 
-- **Source:** the film list (direct media URLs included).
-- **Transport:** plain HTTP GET for mp4/mp3/m4v/flv/m4a, streamed to disk;
-  ffmpeg for m3u8 (like MediathekView's "Programmset"). HTTP is needed in
-  exactly three simple places: fetching the film list, the TMDB REST API
-  (enrichment), and downloading media files.
-- **Languages:** DE and EN downloaded **separately** when present.
-- **Subtitles:** DE/EN when present (external subtitle providers: later).
-- Robust error handling: failed downloads retry, status in DB, no silent loss.
+**Quality upgrades (phase 12):** track current resolution (from the Jellyfin
+cache); a higher resolution in the film list -> upgrade proposal. After approval:
+download + verify the new file, then swap **atomically** (library never broken).
 
-## Remux convention (important)
-
-Goal: never store **duplicate video files**.
-
-- Only one language present -> file stored unchanged.
-- DE **and** EN present with equal-length video streams:
-  - The **original-language** MP4 stays the main file, **unchanged**. Original
-    language comes from the TMDB match (`original_language`); for
-    public-broadcaster content this is almost always German, so German is the
-    fallback when no match says otherwise.
-  - From the **secondary-language** file, FFmpeg extracts **only the audio
-    track** as an **external audio file** next to the main video, named
-    `<basename>.<lang>.<codec>` (e.g. `Tatort (2024).en.aac/ac3/m4a/mka`); its
-    video stream is discarded.
-  - Jellyfin then picks up the secondary audio as an extra track, no second
-    video stored.
-
-Verify during implementation: exact codec/extension (`.m4a` vs `.ac3` ...) and
-that Jellyfin reliably maps the external audio with that naming scheme; set
-correct **language metadata/tags** on remux (else Jellyfin mislabels the track);
-check the naming convention against current Jellyfin docs.
-
-## Quality upgrades (phase 12, tentative)
-
-- Track current resolution per entry (via the Jellyfin cache).
-- Higher resolution appears in the film list -> queue an upgrade proposal.
-- After approval: download + verify the new file first, then swap **atomically**,
-  so the library is never left broken.
-
-## Wishlist (phase 8)
-
-- Entries by **TMDB** or **IMDB ID**; periodic check against the film list
-  mirror. A hit -> download proposal in the review queue (subject to the gate).
-- Reuses the exact manual-path machinery (phases 4-7); it is just the automated
-  producer of queue entries. Works for movies and (phase 12) missing episodes.
+**Wishlist (phase 8):** entries by TMDB/IMDB ID, periodically checked against the
+mirror; a hit -> download proposal in the queue (subject to the gate). Just the
+automated producer reusing the manual-path machinery (phases 4-7); for movies and
+(phase 12) missing episodes.
 
 ## Tech stack
 
-- **Languages:** CLI in **Python** holds *all* logic (mirror, enrich, match,
-  search, review, download, remux, run); the **Delphi desktop GUI** holds none
-  and shells out for everything.
-- **Front-ends:**
-  - **CLI** (primary, Python): one command per stage; the only thing on the NAS
-    and the Docker entrypoint (smoke test in phase 9, `theke run` from phase 10).
-    Must offer a **machine-readable mode** (`--json`, stable exit codes, stable
-    command grammar) so the GUI can drive and parse it.
-    - **stdout vs stderr:** stdout carries only the result (the single JSON object
-      in `--json` mode); progress and diagnostics go to **stderr** as plain text,
-      so a long stage (e.g. `mirror`, ~30 s) stays visible without polluting the
-      parseable result. The GUI reads the two streams separately.
-  - **Desktop GUI** (Delphi): thin presentation shell for the test phase and
-    non-technical users; runs every action as a CLI call and renders the JSON.
-  - On the PC the CLI ships as a **PyInstaller-frozen `.exe`** bundled with the
-    GUI (no Python install needed); the GUI locates and invokes that exe.
-  - **Web UI** (phase 13, tentative): review dashboard, settings; possibly a REST
-    service over the `--json` output.
-- **DB:** a single SQLite file, accessed **only by the CLI** (the GUI has no DB
-  dependency). **Single-user design:** only one process at a time may open the
-  DB -- so during a scheduled `theke run`, no other `theke` CLI process works.
-- **Video:** FFmpeg as an external process (remux/extraction) -- the **only
-  external runtime dependency besides Python**; must be present on the NAS / in
-  the Docker image.
+- **CLI (Python)** holds *all* logic -- stages config, mirror, classify, enrich,
+  match, search, review, download, remux, run (`config`/`mirror`/`classify`
+  exist; the rest land with their phases). One command per stage; the only thing
+  on the NAS and the Docker entrypoint. **Machine-readable mode** (`--json`,
+  stable exit codes, stable grammar) so the GUI can drive and parse it.
+  - **stdout vs stderr:** stdout carries only the result (the single JSON object
+    in `--json`); progress/diagnostics go to **stderr** as plain text, so a long
+    stage stays visible without polluting the parseable result.
+- **Desktop GUI (Delphi):** thin shell for the test phase and non-technical
+  users; every action is a CLI call, renders the JSON. On the PC the CLI ships as
+  a **PyInstaller `.exe`** bundled with the GUI (no Python install); the GUI
+  locates and invokes it.
+- **Web UI (phase 13):** review dashboard/settings, possibly REST over `--json`.
+- **DB:** one SQLite file, accessed **only by the CLI**. **Single-user:** one
+  process at a time may open it -- during a scheduled `theke run` no other CLI
+  process works.
+- **Video:** FFmpeg as an external process (remux/extraction) -- the only
+  external runtime dependency besides Python; must be present on NAS / in the
+  image.
 
 ## Scheduler (in-app, phase 10)
 
-- Part of the application, not the deployment: `theke run` loops over the stages
-  at configured intervals in pipeline order (mirror -> enrich -> match ->
-  wishlist check -> ...).
-- **Works locally without Docker** -- same code and behavior on the dev PC as in
-  the container; Docker is packaging only, using `theke run` as its entrypoint.
-- **One entrypoint, two modes:** single stage once (`theke <stage>`, e.g.
-  `theke mirror`) or the full loop (`theke run`). One-shot exists from the start,
-  so the image can ship and be smoke-tested before the loop lands -- the
-  entrypoint never changes.
-- No host cron, no Compose-level scheduling (rejected: config would live outside
-  the app and local no-Docker debugging would be impossible). Every stage stays
-  individually callable for targeted debugging.
+- `theke run` loops the stages at configured intervals in pipeline order
+  (mirror -> enrich -> match -> wishlist check -> ...). Part of the app, not the
+  deployment.
+- **One entrypoint, two modes:** a single stage once (`theke <stage>`) or the
+  full loop (`theke run`). One-shot exists from the start so the image ships and
+  smoke-tests before the loop lands; the entrypoint never changes.
+- **Runs locally without Docker** -- same code/behavior on the dev PC as in the
+  container (Docker is packaging only). No host cron / Compose scheduling: that
+  would put config outside the app and make local no-Docker debugging
+  impossible.
 
 ## Project structure
 
-Flat and tidy on purpose -- no folder sprawl. Two artifacts side by side: the
-Python CLI (all logic) and the Delphi GUI (thin shell). Module names are
-indicative; modules may grow long rather than splitting into many tiny files.
+Flat on purpose -- no folder sprawl; modules may grow long rather than split into
+many tiny files.
 
 ```
 Theke/
-+-- theke/                    Python package for the CLI
-|   +-- __init__.py           all logic (split into more files later?)
-+-- pyproject.toml            package + console-script `theke`, dependencies
-+-- tests/                    pytest suite for the CLI
-+-- gui/                      Delphi desktop GUI (shells out to the CLI)
-+-- docker/                   image runs the Python CLI as entrypoint
-+-- analysis/                 temporary review notes + scratch scripts
-|                             (committed, not shipped)
++-- theke/            Python package (all logic)
+|   +-- __init__.py   config, DB layer, mirror, CLI
+|   +-- classify.py   metadata extraction (phase 3, part 1)
++-- pyproject.toml    package + console-script `theke`, dependencies
++-- tests/            pytest suite (test_theke.py, test_classify.py)
++-- gui/              Delphi GUI (phase 9+, not present yet)
++-- docker/           CLI image entrypoint (phase 9+, not present yet)
++-- analysis/         temporary review notes + scratch scripts (committed, not shipped)
 +-- CLAUDE.md
 +-- README.md
 ```
 
-Feel free to build such analysis scripts under `analysis/` whenever they help
-(e.g. probing `build/theke.db`); keep throwaway tooling `_`-prefixed.
+Build analysis scripts under `analysis/` whenever useful (e.g. probing
+`build/theke.db`); `_`-prefix throwaway tooling.
 
 ## Development and deployment
 
-- **Development** locally on Windows: CLI in a Python venv, GUI possibly in a
-  different language. Everything runs natively, scheduler included -- no Docker
-  for dev/debug.
-- **Delivery is split:** the **CLI** ships as a **Docker container** on the
-  **NAS** (phase 9; runs `theke run` once phase 10 exists), and on the **PC** the
-  same CLI ships as a **PyInstaller `.exe`** bundled with the GUI. The GUI
-  targets the PC only and is not part of the container.
-- From the start, **all paths and secrets via CLI parameters or config file**
-  (media folders, DB path, TMDB API key) -- nothing hard-coded, keeping the move
-  into the container painless. Precedence: **CLI parameters override the config
-  file**; the config is an `.ini`/`.json`-style file. Docker (phase 9) adds
-  environment variables as a third source.
+- **Dev:** locally on Windows, CLI in a Python **venv**; everything native,
+  scheduler included -- no Docker for dev/debug.
+- **Delivery is split:** CLI as a **Docker container** on the **NAS** (phase 9;
+  runs `theke run` from phase 10); on the **PC** the same CLI as a **PyInstaller
+  `.exe`** with the GUI (GUI is PC-only, not in the container).
+- **All paths/secrets via CLI params or config** (media folders, DB path, TMDB
+  key) -- nothing hard-coded. Precedence: **CLI params > config file**; config is
+  JSON (`theke.json` by default). Docker (phase 9) adds env vars as a third
+  source.
 
 ## Coding Guidelines
 
 ALWAYS:
-- **TDD (test-driven).** Write tests first (including edge cases), watch them
-  fail -> then commit -> then write the code that makes all tests pass -> then
-  commit (2 commits per step). Refactor with the test green (one commit).
-- **Green before commit.** Run the suite before each commit; never commit with
-  failing or skipped tests.
-- **When in doubt, ask.** If a requirement is ambiguous or a decision is
-  genuinely the user's, ask before implementing -- never guess and run with it.
-- **Minimal dependencies.** Justify every new dependency; prefer the standard
-  library. FFmpeg is the only external runtime dependency besides Python, and
-  HTTP is needed in exactly three places (film list, TMDB API, media download) --
-  keep it that lean.
-- **Compact code.** Let the code speak; a short comment per unit/routine is
-  enough, no sprawling comment blocks inside functions.
-- **Files may grow long** -- prefer a few clear, longer units over many tiny
-  ones. No file/folder sprawl.
-- put logic in the Python CLI; the GUI stays a thin shell with no logic.
-- **Keep command handlers thin.** `cmd_*` handlers orchestrate (parse args, wire
-  stages, emit JSON); the real work lives in helpers that take plain inputs and
-  return values, so they are unit-testable without a CLI invocation.
-- keep Stages **idempotent** and re-runnable; state lives in the DB, not memory.
-- ANSI / CP-1252 content only in every text file (see encoding rule on top).
+- **TDD.** Tests first (incl. edge cases), watch them fail -> commit -> write
+  code until green -> commit (2 commits per step). Refactor while green (1
+  commit).
+- **Green before commit.** Run the suite; never commit failing or skipped tests.
+- **When in doubt, ask.** Ambiguous requirement or a genuinely user-owned
+  decision -> ask, don't guess.
+- **Minimal dependencies.** Justify every one; prefer the stdlib. FFmpeg is the
+  only runtime dependency besides Python; HTTP only in three places (film list,
+  TMDB API, media download).
+- **Compact code.** Let it speak; one short comment per unit, no comment blocks
+  inside functions.
+- **Files may grow long** -- a few clear longer units over many tiny ones.
+- **Thin command handlers.** `cmd_*` orchestrate (parse args, wire stages, emit
+  JSON); real work lives in helpers taking plain inputs and returning values
+  (unit-testable without a CLI invocation). Logic in the CLI; the GUI stays a
+  shell.
+- **Idempotent stages,** re-runnable; state in the DB, not memory.
+- **CP-1252 content only** in every text file (see encoding rule on top).
 - **Python formatting:**
-  - Section dividers with the label up front, dashes filling the line:
-    `# -- config ------... (to col 80)`.
-  - Runs of parallel calls (e.g. `parser.add_argument(...)` lines) stay one
-    call per line -- no wrapping, long lines are fine there -- with equal
-    arguments vertically aligned across the run.
-  - Blank lines between logical blocks inside longer functions.
-  - Unused unpacking slots are a bare `_`, not a named placeholder.
-- **Python:** use **venv**, never pip install globally.
-- **Tests:** the expected value is always **hard-coded / pre-calculated**, never
-  computed in the test (a test that recomputes the result with the same logic
-  proves nothing). Compute hashes, dates, etc. once and paste the literal, with
-  a comment noting how it was derived. Only exception: relational assertions
-  that do not need a concrete value (e.g. "id of A differs from id of B").
-- **Language:** comments and variable names in English. README.md is the **only**
-  German file.
+  - Section dividers, label first, dashes to col 80: `# -- config ----...`.
+  - Runs of parallel calls (e.g. `add_argument`) stay one per line (long lines
+    fine), arguments vertically aligned across the run.
+  - Blank lines between logical blocks in longer functions.
+  - Unused unpacking slots are a bare `_`.
+- **venv,** never global pip.
+- **Tests:** expected values **hard-coded / pre-calculated**, never recomputed in
+  the test (paste the literal with a note how it was derived). Only exception:
+  relational assertions needing no concrete value (e.g. "id of A != id of B").
+- **Language:** comments and names in English; README.md is the only German file.
 
 KEEP IN MIND:
-- All paths, URLs and settings **must be configurable**, never hard-coded.
-- **Command wiring** lives in two explicit places: a subparser in
-  `build_parser` (its flags inline) and a `case` in `main`. Global options
-  (e.g. `--config`) and the command name are always on `args` and read directly;
-  subcommand flags exist only under their own command, so read them only in
-  that command's handler (e.g. `args.force` in `cmd_mirror`).
+- All paths, URLs, settings **configurable**, never hard-coded.
+- **Command wiring** in two places: a subparser in `build_parser` (flags inline)
+  and a `case` in `main`. Global options (e.g. `--config`) and the command name
+  read directly off `args`; subcommand flags only in that command's handler (e.g.
+  `args.force` in `cmd_mirror`).
 
 NEVER:
-- Spell out problems that no longer exist (or never applied). Describe the design
-  as it is -- do not justify a choice by contrasting it against a non-problem.
+- Describe problems that no longer exist (or never applied). State the design as
+  it is; don't justify a choice against a non-problem.
