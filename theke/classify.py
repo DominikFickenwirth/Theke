@@ -32,12 +32,20 @@ TRAILER = re.compile(r'\b(Trailer|Teaser|Vorschau|Vorab|Preview|Präview)\b', re
 # for it yet).
 MARKERS = [
     (re.compile(r'^Audiodeskription$|^Hörfassung$', re.I),                       ('flag', 'A')),
-    (re.compile(r'Gebärdensprache$|^ÖGS$', re.I),                                ('flag', 'S')),
+    (re.compile(r'^(?:mit\s+)?Gebärdensprache$|^ÖGS$', re.I),                     ('flag', 'S')),
+    (re.compile(r'^(?:in\s+)?(?:Einfache[r]?|Leichte[r]?)\s+Sprache$', re.I),     ('flag', 'E')),
     (re.compile(r'^Originalversion mit Untertitel$|^mit Untertitel$|^OmU$|^OmdU$', re.I), ('flag', 'U')),
     (re.compile(r'^Originalversion$|^OV$', re.I),                                 ('language', 'ov')),
     (re.compile(r'^engl\.?$|^Englisch$|^English$', re.I),                         ('language', 'en')),
     (re.compile(r'^frz\.?$|^franz\.?$|^französisch$', re.I),                      ('language', 'fr')),
     (re.compile(r'^stumm$|^ohne Ton$|^tlw\. stumm$', re.I),                       ('strip', None)),
+]
+# Accessibility markers that appear as a bare (non-parenthesized) trailing suffix
+# on the title/topic -> (regex, flag). Stripped off and flagged like the
+# parenthetical MARKERS above.
+SUFFIX_MARKERS = [
+    (re.compile(r'\s+in\s+Gebärdensprache$', re.I),                          'S'),
+    (re.compile(r'\s+in\s+(?:Einfacher|Leichter)\s+Sprache$', re.I),         'E'),
 ]
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
 TITLE_META_SENDERS = {'ZDF', '3Sat'}
@@ -81,7 +89,14 @@ def classify(sender, topic, title, description, duration) -> dict:
                     return ''                  # strip recognized marker
             return m.group(0)                  # keep unrecognized
         return re.sub(r'\s*\(([^()]{1,40})\)', repl, s)
-    t = take_parens(t)
+
+    def take_suffix(s):                        # bare accessibility suffix (no parens)
+        for rx, flag in SUFFIX_MARKERS:
+            m = rx.search(s)
+            if m: flags.add(flag); s = s[:m.start()]
+        return s
+    t = take_suffix(take_parens(t))
+    tp = take_suffix(take_parens(tp))          # markers also live in the topic
     if TRAILER.search(title or '') or TRAILER.search(tp):
         flags.add('T')
 

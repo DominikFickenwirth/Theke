@@ -586,7 +586,7 @@ def _classify_rows(conn, rows, batch=5000) -> int:
 REPORT_MIN_ROWS = 1000   # senders below this are omitted (long tail of one-offs)
 
 _REPORT_FIELDS = ["year", "country", "se", "cat", "unklar", "genre", "slot", "events",
-                  "flag_a", "flag_s", "flag_u", "flag_t"]
+                  "flag_a", "flag_e", "flag_s", "flag_u", "flag_t"]
 
 # Per-confidence-level buckets for --by-confidence: deterministic levels emitted
 # by classify._confidence (0.9/0.8/0.5/0.2). Counted always, summarized only when
@@ -629,7 +629,7 @@ def _tally(counter, row):
         for key, level in _CONF_LEVELS:
             if round(conf, 2) == level: counter[key] += 1
     flags = row["flags"] or ""
-    for letter in "asut":
+    for letter in "aesut":
         if letter.upper() in flags: counter["flag_" + letter] += 1
 
 
@@ -706,7 +706,7 @@ def _print_report_diff(diff):
 _REPORT_TABLE_COLS = [("year", "year"), ("country", "cntry"), ("se", "S/E"),
                       ("cat", "cat"), ("unklar", "unkl"), ("genre", "genre"),
                       ("slot", "slot"), ("events", "evt"), ("flag_a", "A"),
-                      ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
+                      ("flag_e", "E"), ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
 _CONF_TABLE_COLS = [("c90", "c.9"), ("c80", "c.8"), ("c50", "c.5"), ("c20", "c.2")]
 
 

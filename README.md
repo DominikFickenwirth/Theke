@@ -139,8 +139,9 @@ theke --db build/theke.db classify run            # classified = N
 theke --db build/theke.db classify run --force    # alles neu
 ```
 
-`flags` ist ein sortierter Buchstaben-String: `A` Audiodeskription, `S`
-Gebärdensprache, `U` eingebrannte Untertitel, `T` Trailer/Vorschau.
+`flags` ist ein sortierter Buchstaben-String: `A` Audiodeskription, `E` Einfache/
+Leichte Sprache, `S` Gebärdensprache, `U` eingebrannte Untertitel, `T`
+Trailer/Vorschau.
 `classify_confidence` ist deterministisch: `0.9` (Metazeile/ARTE-Topic), `0.8`
 (Topic ist selbst ein Kategoriewort), `0.5` (Dauer-Prior), `0.2` (`category` =
 `unklar`).
