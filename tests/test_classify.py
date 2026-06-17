@@ -124,6 +124,27 @@ def test_3sat_title_metazeile_with_director_prefix():
     assert r["classify_confidence"] == 0.9
 
 
+def test_metazeile_rejected_when_country_is_a_sentence_fragment():
+    # B8: META matches a CATWORD inside running description text, but the country
+    # slot is a sentence fragment ("ueber den ... aus dem Jahr"), not a country.
+    # The country-shape filter rejects the whole metazeile.
+    r = classify("ARD", "Wetter", "Wetter heute",
+                 "Eine Reportage über den Klimawandel aus dem Jahr 2019.", 2700)
+    assert r["category"] == "unklar"   # falls back to the duration prior
+    assert r["country"] is None
+    assert r["year"] is None
+    assert r["classify_confidence"] == 0.2
+
+
+def test_metazeile_rejected_when_country_is_a_broadcast_date():
+    # B6: "<...> Magazin vom <Datum>" must not turn the date into country/year.
+    r = classify("3Sat", "Slowenien Magazin",
+                 "Slowenien Magazin vom 21. September 2023", "", 1500)
+    assert r["category"] == "Beitrag/Episode"   # duration prior, not "Magazin"
+    assert r["country"] is None
+    assert r["year"] is None
+
+
 def test_mehrteiler_part_of_total():
     # "(1/2)" = part 1 of 2 (not a real season/episode).
     r = classify("ARD", "Reihe", "Der große Sturm (1/2)", "", 5400)
