@@ -257,6 +257,72 @@ def test_unklar_when_no_category_signal():
     assert r["classify_confidence"] == 0.2
 
 
+# -- B4: trailing "- <Format> von <Name>" credit in the title ----------------
+
+def test_title_credit_trailing_film_von_is_stripped():
+    r = classify("3Sat", "Dokumentarfilm",
+                 "Zwischen Acker und Opiumkontrolle - Film von Anja Schlegel", "", 2700)
+    assert r["clean_title"] == "Zwischen Acker und Opiumkontrolle"
+    assert r["country"] is None and r["year"] is None
+
+
+def test_title_credit_trailing_reportage_von_is_stripped():
+    r = classify("3Sat", "Reportage",
+                 "Vom Türsteher zum Herbergsvater - Reportage von Ralph Alexowitz", "", 2700)
+    assert r["clean_title"] == "Vom Türsteher zum Herbergsvater"
+
+
+def test_title_credit_midtitle_film_von_is_kept():
+    # No " - <Format> von" suffix -> not a credit, keep the title verbatim.
+    r = classify("ARD", "Kino+", "Neuer Film von Tobias Obentheuer", "", 600)
+    assert r["clean_title"] == "Neuer Film von Tobias Obentheuer"
+
+
+# -- B5: episode notation without parentheses (guarded) ----------------------
+
+def test_episode_teil_arabic():
+    r = classify("HR", "Ratgeber", "Kleider machen Leute - Teil 2", "", 1500)
+    assert r["episode"] == 2
+    assert r["clean_title"] == "Kleider machen Leute"
+
+
+def test_episode_teil_roman():
+    r = classify("ARD", "Reihe", "Der große Krieg - Teil III", "", 3600)
+    assert r["episode"] == 3
+    assert r["clean_title"] == "Der große Krieg"
+
+
+def test_episode_staffel_folge_without_parens():
+    r = classify("ARD", "Doku", "Der Fall Staffel 2, Folge 3", "", 3600)
+    assert r["season"] == 2
+    assert r["episode"] == 3
+    assert r["clean_title"] == "Der Fall"
+
+
+def test_episode_bare_part_of_total():
+    r = classify("ARD", "Doku", "Die Story 2/2", "", 3600)
+    assert r["episode"] == 2
+    assert r["episode_count"] == 2
+    assert r["clean_title"] == "Die Story"
+
+
+def test_no_episode_for_time_fraction():
+    # "3 1/2 Stunden" is a title, not an episode number.
+    r = classify("ARD", "Doku", "3 1/2 Stunden", "", 3600)
+    assert r["episode"] is None and r["episode_count"] is None
+
+
+def test_no_episode_for_24_7():
+    r = classify("ARD", "Doku", "24/7", "", 3600)
+    assert r["episode"] is None
+
+
+def test_no_episode_for_broadcast_date():
+    # ARTE date suffix "dd/mm/yyyy" must not parse as an episode.
+    r = classify("ARTE.FR", "Cinéma", "Invitation au voyage - 10/06/2026", "", 1500)
+    assert r["episode"] is None and r["episode_count"] is None
+
+
 # -- topic routing (B1+B2+B7): format/genre/slot/event vs. real series --------
 
 def test_topic_routing_format_word_sets_category_not_series():
