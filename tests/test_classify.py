@@ -249,6 +249,49 @@ def test_arte_topic_taxonomy_category():
     assert r["classify_confidence"] == 0.9
 
 
+def test_arte_taxonomy_french():
+    # ARTE.FR: the sub-label "Films" -> Spielfilm; series_name stays empty.
+    r = classify("ARTE.FR", "Cinéma - Films", "Le Havre", "", 5400)
+    assert r["category"] == "Spielfilm"
+    assert r["language"] == "fr"
+    assert r["series_name"] is None
+    assert r["classify_confidence"] == 0.9
+
+
+def test_arte_taxonomy_french_super_label():
+    # No film sub-label -> the super-label "Histoire" decides (Doku).
+    r = classify("ARTE.FR", "Histoire - XXe siècle", "Pompeji", "", 3600)
+    assert r["category"] == "Doku"
+    assert r["language"] == "fr"
+    assert r["classify_confidence"] == 0.9
+
+
+def test_arte_taxonomy_english():
+    r = classify("ARTE.EN", "Politics and society - Investigation and reports",
+                 "Story", "", 3600)
+    assert r["category"] == "Reportage"
+    assert r["language"] == "en"
+    assert r["classify_confidence"] == 0.9
+
+
+def test_arte_taxonomy_spanish():
+    r = classify("ARTE.ES", "Cine - Películas", "La pelicula", "", 5400)
+    assert r["category"] == "Spielfilm"
+    assert r["language"] == "es"
+
+
+def test_arte_taxonomy_italian():
+    r = classify("ARTE.IT", "Storia - XX° secolo", "Storia", "", 3600)
+    assert r["category"] == "Doku"
+    assert r["language"] == "it"
+
+
+def test_arte_taxonomy_polish():
+    r = classify("ARTE.PL", "Kino - Filmy", "Film", "", 5400)
+    assert r["category"] == "Spielfilm"
+    assert r["language"] == "pl"
+
+
 def test_unklar_when_no_category_signal():
     # Long non-fiction without any metazeile/taxonomy -> honest low-confidence.
     r = classify("ARD", "Hallo Niedersachsen", "Hallo Niedersachsen vom 14.06.",
