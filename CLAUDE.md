@@ -114,7 +114,7 @@ indicative.
 - **mediathek** -- mirror of the film list, refreshed periodically.
   `mediathek_id` is MediathekView's identity (SHA-256 over
   sender+thema+url+website, UTF-16LE); `status` is one character
-  ('0' new, '1' old). language/tmdb_id/imdb_id/match_confidence are filled by
+  ('0' new, '1' classified). language/tmdb_id/imdb_id/match_confidence are filled by
   phase 3 and preserved across refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
   size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
