@@ -180,6 +180,35 @@ def test_flag_sign_language_both_spellings():
     assert orf["flags"] == "S"
 
 
+def test_flag_sign_language_marker_in_topic():
+    # B9: the marker sits in the topic ("(mit Gebärdensprache)" / "(ÖGS)"); it
+    # must set the flag and be stripped from the series_name, not stored verbatim.
+    ard = classify("ARD", "tagesschau (mit Gebärdensprache)", "Tagesschau", "", 900)
+    orf = classify("ORF", "Zeit im Bild (ÖGS)", "ZIB", "", 900)
+    assert ard["flags"] == "S"
+    assert ard["series_name"] == "tagesschau"
+    assert orf["flags"] == "S"
+    assert orf["series_name"] == "Zeit im Bild"
+
+
+def test_flag_sign_language_suffix_without_parens():
+    # B10: " in Gebärdensprache" as a bare suffix (no parens), in title and topic.
+    r = classify("SRF", "Tagesschau in Gebärdensprache",
+                 "Tagesschau in Gebärdensprache", "", 900)
+    assert r["flags"] == "S"
+    assert r["clean_title"] == "Tagesschau"
+    assert r["series_name"] == "Tagesschau"
+
+
+def test_flag_simple_language_suffix():
+    # B10: " in Einfacher Sprache" -> new flag E (simple-language edition).
+    r = classify("tagesschau24", "Nachrichten in Einfacher Sprache",
+                 "Nachrichten in Einfacher Sprache", "", 900)
+    assert r["flags"] == "E"
+    assert r["clean_title"] == "Nachrichten"
+    assert r["series_name"] == "Nachrichten"
+
+
 def test_flag_burned_in_subtitles():
     r = classify("ARD", "Film", "Der Film (mit Untertitel)", "", 5400)
     assert r["flags"] == "U"
@@ -341,7 +370,8 @@ def test_analyze_report_from_stored_columns(tmp_path):
             "n": 2, "year_pct": 50.0, "country_pct": 50.0, "se_pct": 0.0,
             "cat_pct": 50.0, "unklar_pct": 50.0,
             "genre_pct": 0.0, "slot_pct": 0.0, "events_pct": 0.0,
-            "flag_a_pct": 50.0, "flag_s_pct": 0.0, "flag_u_pct": 0.0, "flag_t_pct": 0.0,
+            "flag_a_pct": 50.0, "flag_e_pct": 0.0, "flag_s_pct": 0.0,
+            "flag_u_pct": 0.0, "flag_t_pct": 0.0,
         }}
     finally:
         conn.close()
@@ -361,7 +391,8 @@ def test_dry_run_report_is_live_and_writes_nothing(tmp_path):
             "n": 2, "year_pct": 50.0, "country_pct": 50.0, "se_pct": 0.0,
             "cat_pct": 50.0, "unklar_pct": 0.0,
             "genre_pct": 0.0, "slot_pct": 0.0, "events_pct": 0.0,
-            "flag_a_pct": 0.0, "flag_s_pct": 0.0, "flag_u_pct": 0.0, "flag_t_pct": 0.0,
+            "flag_a_pct": 0.0, "flag_e_pct": 0.0, "flag_s_pct": 0.0,
+            "flag_u_pct": 0.0, "flag_t_pct": 0.0,
         }}
         # read-only: nothing was written
         rows = conn.execute("SELECT status, category, year, flags FROM mediathek").fetchall()
