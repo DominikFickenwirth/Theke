@@ -67,6 +67,67 @@ SUFFIX_MARKERS = [
     (re.compile(r'\s+in\s+Gebärdensprache$', re.I),                          'S'),
     (re.compile(r'\s+in\s+(?:Einfacher|Leichter)\s+Sprache$', re.I),         'E'),
 ]
+# -- output taxonomy: medium (category) + TMDB genre ------------------------
+# Two orthogonal axes. category is the medium, a small custom set
+# (Movie/Episode/Clip/Event/None); genre is TMDB-only (no custom genres, so a
+# later TMDB lookup stays clean), multiple values comma-joined in this order.
+TMDB_ORDER = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Documentary',
+              'Drama', 'Family', 'Kids', 'Fantasy', 'History', 'Horror', 'Music',
+              'Mystery', 'News', 'Reality', 'Romance', 'SciFi', 'Soap', 'Talk',
+              'Thriller', 'War', 'Western']
+
+# German format/CATWORD label -> (category, genre-tuple). The word carries the
+# medium, sometimes also a genre (Dokumentarfilm = Movie + Documentary).
+LABEL_MAP = {
+    'Spielfilm':       ('Movie', ()),        'Spielfilmreihe':  ('Movie', ()),
+    'Fernsehfilm':     ('Movie', ()),        'TV-Film':         ('Movie', ()),
+    'Kurzfilm':        ('Movie', ()),        'Stummfilm':       ('Movie', ()),
+    'Film':            ('Movie', ()),
+    'Animationsfilm':  ('Movie', ('Animation',)),
+    'Zeichentrickfilm':('Movie', ('Animation',)),
+    'Trickfilm':       ('Movie', ('Animation',)),
+    'Kinderfilm':      ('Movie', ('Family',)),
+    'Komödie':         ('Movie', ('Comedy',)),
+    'Drama':           ('Movie', ('Drama',)),
+    'Thriller':        ('Movie', ('Thriller',)),
+    'Krimi':           ('Movie', ('Crime',)),
+    'Dokumentarfilm':  ('Movie', ('Documentary',)),
+    'Dokudrama':       ('Movie', ('Documentary', 'Drama')),
+    'Dokumentation':   ('Episode', ('Documentary',)),
+    'Doku':            ('Episode', ('Documentary',)),
+    'Doku-Reihe':      ('Episode', ('Documentary',)),
+    'Doku/Reportage':  ('Episode', ('Documentary',)),
+    'Reportage':       ('Episode', ('Documentary',)),
+    'Serie':           ('Episode', ()),
+    'Magazin':         ('Episode', ()),
+    'Konzert':         ('Clip', ('Music',)),
+}
+
+# Topic genre rubric -> TMDB genre-tuple (category stays the duration prior).
+# Non-fiction theme rubrics with no specific TMDB genre collapse to Documentary.
+GENRE_MAP = {
+    'Musik':            ('Music',),
+    'Geschichte':       ('Documentary', 'History'),
+    'Nachrichten':      ('News',),
+    'Politik':          ('News',),  'Politik und Gesellschaft': ('News',),
+    'Europa':           ('News',),  'Nahost': ('News',),  'Deutschland': ('News',),
+    'Wirtschaft':       ('News',),
+    'Märchen':          ('Family', 'Fantasy'),
+    'Reise':            ('Documentary',),  'Natur': ('Documentary',),
+    'Tiere':            ('Documentary',),  'Esskulturen': ('Documentary',),
+    'Kultur':           ('Documentary',),  'Kulturdoku': ('Documentary',),
+    'Wissen':           ('Documentary',),  'Wissenschaftsdoku': ('Documentary',),
+    'Gesellschaft':     ('Documentary',),  'Buch': ('Documentary',),
+    'Theater':          ('Documentary',),  'Sport': ('Documentary',),
+}
+
+
+def _genre_str(genres):
+    """A set/iterable of TMDB genres -> canonical comma-joined string (or None)."""
+    ordered = [g for g in TMDB_ORDER if g in set(genres)]
+    return ', '.join(ordered) or None
+
+
 # -- topic routing vocabulary (B1/B2/B7) ------------------------------------
 # A non-ARTE topic is usually a series, but is often a rubric: a bare format
 # word, a curated genre, a clip/container bucket, an event, or a Dachmarke|series
@@ -74,13 +135,9 @@ SUFFIX_MARKERS = [
 
 # Genre rubrics, matched EXACTLY (never as substring): these appear as a whole
 # topic only on the rubric senders (3sat/ZDF/DW/ARTE.DE) and are never a real
-# series elsewhere ("Sport" is a rubric, "Sport im Osten" is a series). Shared
-# with the classify audit's bare-topic check.
-GENRE_SET = {'Reise', 'Natur', 'Musik', 'Tiere', 'Geschichte', 'Politik',
-             'Politik und Gesellschaft', 'Sport', 'Nachrichten', 'Wirtschaft',
-             'Europa', 'Nahost', 'Deutschland', 'Esskulturen', 'Kultur',
-             'Kulturdoku', 'Gesellschaft', 'Wissen', 'Wissenschaftsdoku', 'Buch',
-             'Theater', 'Märchen'}
+# series elsewhere ("Sport" is a rubric, "Sport im Osten" is a series). The set
+# is the GENRE_MAP keys; shared with the classify audit's bare-topic check.
+GENRE_SET = set(GENRE_MAP)
 
 # Topic that is itself a format -> category, no series. Bare/compound rubrics map
 # to a canonical category; plain CATWORD topics keep their own word.
@@ -107,10 +164,14 @@ SECTION_WORDS = {'regionalmagazin', 'sportblitz', 'wetter', 'doku', 'extra',
                  'retro', 'geschichten', 'spezial'}
 
 
+LABEL_CF = {k.casefold(): k for k in LABEL_MAP}   # case-fold -> canonical label
+
+
 def _format_category(tp):
+    """A format topic -> its canonical LABEL_MAP key, else None."""
     c = FORMAT_TOPICS.get(tp.casefold())
     if c: return c
-    return tp if re.fullmatch(r'(' + CATWORD + r')', tp, re.I) else None
+    return LABEL_CF.get(tp.casefold()) if re.fullmatch(CATWORD, tp, re.I) else None
 
 
 def _is_container(tp):
@@ -128,8 +189,8 @@ def _side_is_slot(s):
 
 def route_topic(topic) -> dict:
     """Route a non-ARTE topic. Returns dict(series_name, genre, slot, category,
-    kat_src) with None where a slot does not apply."""
-    out = dict(series_name=None, genre=None, slot=None, category=None, kat_src=None)
+    kat_src); category is a medium value, genre a TMDB genre-tuple ()."""
+    out = dict(series_name=None, genre=(), slot=None, category=None, kat_src=None)
     tp = (topic or '').strip()
     if not tp:
         return out
@@ -142,15 +203,16 @@ def route_topic(topic) -> dict:
             if sb and not sa: out['slot'], out['series_name'] = b, a; return out
         out['series_name'] = tp                # both/neither slot -> keep whole
         return out
-    cat = _format_category(tp)
-    if cat:
-        out['category'] = cat; out['kat_src'] = 'topic'; return out
+    label = _format_category(tp)
+    if label:
+        out['category'], out['genre'] = LABEL_MAP[label]
+        out['kat_src'] = 'topic'; return out
     if _is_container(tp):
         return out                             # series None, category from prior
     if tp in GENRE_SET:
-        out['genre'] = tp; return out
+        out['genre'] = GENRE_MAP[tp]; return out
     if EVENT_RX.search(tp):
-        out['series_name'] = tp; out['category'] = 'Events'; out['kat_src'] = 'event'
+        out['series_name'] = tp; out['category'] = 'Event'; out['kat_src'] = 'event'
         return out
     out['series_name'] = tp                    # long tail: today's behavior
     return out
@@ -158,34 +220,38 @@ def route_topic(topic) -> dict:
 
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
 TITLE_META_SENDERS = {'ZDF', '3Sat'}
-# ARTE genre taxonomy "Ober - Unter"; the sub-label wins, else the super-label.
-# Keys are the source labels in every ARTE UI language (DE/FR/EN/ES/IT/PL); the
-# category values stay the German canonical set.
-ARTE_CAT = {'Kino':'Film','Fernsehfilme und Serien':'Serie/Fernsehfilm','ARTE Concert':'Konzert',
-            'Geschichte':'Doku','Wissenschaft':'Doku','Entdeckung der Welt':'Doku','Entdeckung':'Doku',
-            'Aktuelles und Gesellschaft':'Reportage','Kultur und Pop':'Kultur',
-            # FR
-            'Cinéma':'Film','Histoire':'Doku','Sciences':'Doku','Info et société':'Reportage',
-            'Séries et fictions':'Serie/Fernsehfilm','Culture et pop':'Kultur','Voyages et découvertes':'Doku',
-            # EN
-            'Cinema':'Film','History':'Doku','Politics and society':'Reportage',
-            'Series':'Serie/Fernsehfilm','Culture':'Kultur',
-            # ES
-            'Cine':'Film','Historia':'Doku','Ciencias':'Doku','Política y sociedad':'Reportage',
-            'Series y ficciones':'Serie/Fernsehfilm','Cultura y pop':'Kultur','Viajes y naturaleza':'Doku',
-            # IT
-            'Storia':'Doku','Scienze':'Doku','Politica e società':'Reportage',
-            'Serie e fiction':'Serie/Fernsehfilm','Cultura':'Kultur','Viaggi e scoperte':'Doku',
-            # PL
-            'Kino':'Film','Nauka':'Doku','Polityka i społeczeństwo':'Reportage',
-            'Seriale i filmy fabularne':'Serie/Fernsehfilm','Kultura':'Kultur','Odkrycia':'Doku'}
-ARTE_SUB = {'Filme':'Spielfilm','Kurzfilme':'Kurzfilm','Stummfilme':'Stummfilm',
-            'Serien':'Serie','Fernsehfilme':'Fernsehfilm',
-            'Films':'Spielfilm','Film':'Spielfilm','Películas':'Spielfilm','Filmy':'Spielfilm',
-            'Courts métrages':'Kurzfilm','Short films':'Kurzfilm','Cortometrajes':'Kurzfilm',
-            'Cortometraggi':'Kurzfilm','Filmy krótkometrażowe':'Kurzfilm',
-            'Séries':'Serie','Series':'Serie','Serie':'Serie','Seriale':'Serie',
-            'Webseries':'Serie','Webseriale':'Serie'}
+# ARTE taxonomy "Ober - Unter": the super-label (Ober) carries the genre, the
+# sub-label (Unter) the medium. A recognized super-label suppresses the duration
+# prior, so an unknown sub-label leaves category NULL (honest), never a guess.
+# Keys are the source labels in every ARTE UI language (DE/FR/EN/ES/IT/PL).
+# Super-label -> (category, genre-tuple); category usually None (medium unknown).
+ARTE_OBER = {'Kino':(None,()),'Cinéma':(None,()),'Cinema':(None,()),'Cine':(None,()),
+             'Fernsehfilme und Serien':(None,()),'Séries et fictions':(None,()),
+             'Series':(None,()),'Series y ficciones':(None,()),'Serie e fiction':(None,()),
+             'Seriale i filmy fabularne':(None,()),
+             'ARTE Concert':('Clip',('Music',)),
+             'Geschichte':(None,('Documentary','History')),'Histoire':(None,('Documentary','History')),
+             'History':(None,('Documentary','History')),'Historia':(None,('Documentary','History')),
+             'Storia':(None,('Documentary','History')),
+             'Wissenschaft':(None,('Documentary',)),'Sciences':(None,('Documentary',)),
+             'Ciencias':(None,('Documentary',)),'Scienze':(None,('Documentary',)),
+             'Nauka':(None,('Documentary',)),
+             'Entdeckung der Welt':(None,('Documentary',)),'Entdeckung':(None,('Documentary',)),
+             'Voyages et découvertes':(None,('Documentary',)),'Viajes y naturaleza':(None,('Documentary',)),
+             'Viaggi e scoperte':(None,('Documentary',)),'Odkrycia':(None,('Documentary',)),
+             'Aktuelles und Gesellschaft':(None,('News',)),'Info et société':(None,('News',)),
+             'Politics and society':(None,('News',)),'Política y sociedad':(None,('News',)),
+             'Politica e società':(None,('News',)),'Polityka i społeczeństwo':(None,('News',)),
+             'Kultur und Pop':(None,('Documentary',)),'Culture et pop':(None,('Documentary',)),
+             'Culture':(None,('Documentary',)),'Cultura y pop':(None,('Documentary',)),
+             'Cultura':(None,('Documentary',)),'Kultura':(None,('Documentary',))}
+# Sub-label -> medium category.
+ARTE_SUB = {'Filme':'Movie','Films':'Movie','Film':'Movie','Películas':'Movie','Filmy':'Movie',
+            'Kurzfilme':'Movie','Courts métrages':'Movie','Short films':'Movie','Cortometrajes':'Movie',
+            'Cortometraggi':'Movie','Filmy krótkometrażowe':'Movie',
+            'Stummfilme':'Movie','Fernsehfilme':'Movie',
+            'Serien':'Episode','Séries':'Episode','Series':'Episode','Serie':'Episode',
+            'Seriale':'Episode','Webseries':'Episode','Webseriale':'Episode'}
 
 # Columns classify writes; the returned dict has exactly these keys. status and
 # mediathek_id are handled by the DB layer, not here.
@@ -198,13 +264,14 @@ def _confidence(kat_src, category):
     """Deterministic confidence from how the category was found."""
     if kat_src in ('metazeile', 'arte-topic'): return 0.9
     if kat_src in ('topic', 'event'):           return 0.8
-    return 0.2 if category == 'unklar' else 0.5
+    return 0.2 if category is None else 0.5
 
 
 def classify(sender, topic, title, description, duration) -> dict:
     """A mediathek row -> extracted metadata dict (keys == CLASSIFY_COLS)."""
     t = title or ''; d = (description or '').strip(); tp = topic or ''
     flags = set()
+    genres = set()
     kat_src = None
     r = dict(clean_title=None, series_name=None, genre=None, slot=None, season=None,
              episode=None, episode_count=None, category=None, year=None, country=None,
@@ -275,7 +342,8 @@ def classify(sender, topic, title, description, duration) -> dict:
         country = m.group(2).strip(' ,-')
         if ',' in country: country = country.split(',')[-1].strip()   # drop "von <Regisseur>," prefix
         if looks_like_country(country):        # else it is a sentence fragment/date -> reject
-            r['category'] = m.group(1); kat_src = 'metazeile'
+            cat, gset = LABEL_MAP.get(m.group(1), (m.group(1), ()))
+            r['category'] = cat; genres.update(gset); kat_src = 'metazeile'
             r['country'] = country; r['year'] = r['year'] or int(m.group(3))
             if sender in TITLE_META_SENDERS:   # strip "- Spielfilm, ... YEAR" from title
                 t = t[:m.start()].rstrip(' -–')
@@ -284,19 +352,22 @@ def classify(sender, topic, title, description, duration) -> dict:
     if sender not in ARTE_LANG:
         routed = route_topic(tp)
         r['series_name'] = routed['series_name']
-        r['genre'] = routed['genre']; r['slot'] = routed['slot']
+        genres.update(routed['genre']); r['slot'] = routed['slot']
         if routed['category'] and not r['category']:   # metazeile (Pass 3) wins
             r['category'] = routed['category']; kat_src = routed['kat_src']
         t = PIPESUF.sub('', t)                 # drop " | Reihe" suffix from title
 
-    # -- Pass 5: category from ARTE taxonomy / duration prior -------------
+    # -- Pass 5: ARTE taxonomy (Ober=genre, Unter=medium) / duration prior -
     if sender in ARTE_LANG and ' - ' in tp:
         ober, _, unter = tp.partition(' - ')
-        r['category'] = ARTE_SUB.get(unter.strip(), ARTE_CAT.get(ober.strip()))
-        kat_src = 'arte-topic'
-    if not r['category']:                      # no reliable signal -> honest low-conf prior
+        if ober.strip() in ARTE_OBER:
+            ocat, gset = ARTE_OBER[ober.strip()]
+            cat = ARTE_SUB.get(unter.strip()) or ocat
+            if cat and not r['category']: r['category'] = cat
+            genres.update(gset); kat_src = 'arte-topic'
+    if not r['category'] and kat_src != 'arte-topic':   # honest low-conf prior
         s = duration or 0
-        r['category'] = ('Clip' if s < 120 else 'Beitrag/Episode' if s < 1800 else 'unklar')
+        r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
         kat_src = 'duration-prior'
 
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
@@ -309,6 +380,7 @@ def classify(sender, topic, title, description, duration) -> dict:
         t = t[:my.start()]
     r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:')
 
+    r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
     r['flags'] = ''.join(sorted(flags))        # canonical alphabetical order (A<S<T<U)
     r['classify_confidence'] = _confidence(kat_src, r['category'])
     return r

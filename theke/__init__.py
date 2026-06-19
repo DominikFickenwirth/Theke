@@ -621,10 +621,10 @@ def _tally(counter, row):
     if row["season"] is not None or row["episode"] is not None: counter["se"] += 1
     conf = row["classify_confidence"]
     if conf is not None and conf >= 0.8: counter["cat"] += 1   # category from a real signal
-    if row["category"] == "unklar": counter["unklar"] += 1
+    if row["category"] is None:     counter["unklar"] += 1     # NULL = unknown medium
     if row["genre"] is not None:    counter["genre"] += 1
     if row["slot"] is not None:     counter["slot"] += 1
-    if row["category"] == "Events": counter["events"] += 1
+    if row["category"] == "Event":  counter["events"] += 1
     if conf is not None:
         for key, level in _CONF_LEVELS:
             if round(conf, 2) == level: counter[key] += 1
