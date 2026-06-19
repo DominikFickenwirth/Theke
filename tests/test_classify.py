@@ -83,7 +83,8 @@ def test_ard_metazeile_in_description():
     # ARD school: "<Kategorie> <Land> <Jahr>" prefix in the description, no comma.
     r = classify("ARD", "Filmmittwoch im Ersten", "Der Fall",
                  "Spielfilm Deutschland/USA 2003 Ein spannender Kriminalfall.", 5400)
-    assert r["category"] == "Spielfilm"
+    assert r["category"] == "Movie"        # Spielfilm -> medium Movie
+    assert r["genre"] is None              # ... carries no genre
     assert r["year"] == 2003
     assert r["country"] == "Deutschland/USA"
     assert r["clean_title"] == "Der Fall"
@@ -117,7 +118,8 @@ def test_3sat_title_metazeile_with_director_prefix():
     r = classify("3Sat", "Dokumentarfilm",
                  "Der Lauf der Dinge - Dokumentarfilm von Regina Schilling, Deutschland 2023",
                  "", 5400)
-    assert r["category"] == "Dokumentarfilm"
+    assert r["category"] == "Movie"           # Dokumentarfilm -> Movie ...
+    assert r["genre"] == "Documentary"        # ... + Documentary genre
     assert r["year"] == 2023
     assert r["country"] == "Deutschland"
     assert r["clean_title"] == "Der Lauf der Dinge"
@@ -130,7 +132,7 @@ def test_metazeile_rejected_when_country_is_a_sentence_fragment():
     # The country-shape filter rejects the whole metazeile.
     r = classify("ARD", "Wetter", "Wetter heute",
                  "Eine Reportage über den Klimawandel aus dem Jahr 2019.", 2700)
-    assert r["category"] == "unklar"   # falls back to the duration prior
+    assert r["category"] is None        # falls back to the duration prior (>1800s)
     assert r["country"] is None
     assert r["year"] is None
     assert r["classify_confidence"] == 0.2
@@ -140,7 +142,7 @@ def test_metazeile_rejected_when_country_is_a_broadcast_date():
     # B6: "<...> Magazin vom <Datum>" must not turn the date into country/year.
     r = classify("3Sat", "Slowenien Magazin",
                  "Slowenien Magazin vom 21. September 2023", "", 1500)
-    assert r["category"] == "Beitrag/Episode"   # duration prior, not "Magazin"
+    assert r["category"] == "Episode"   # duration prior (120-1800s), not "Magazin"
     assert r["country"] is None
     assert r["year"] is None
 
@@ -242,7 +244,8 @@ def test_arte_topic_taxonomy_category():
     # ARTE.DE: genre comes from the two-level topic taxonomy, not a metazeile;
     # series_name stays empty (topic is a genre, not a show name).
     r = classify("ARTE.DE", "Kino - Filme", "Le Havre", "", 5400)
-    assert r["category"] == "Spielfilm"
+    assert r["category"] == "Movie"        # sub-label "Filme" -> Movie
+    assert r["genre"] is None              # super-label "Kino" carries no genre
     assert r["language"] == "de"
     assert r["series_name"] is None
     assert r["clean_title"] == "Le Havre"
@@ -252,16 +255,18 @@ def test_arte_topic_taxonomy_category():
 def test_arte_taxonomy_french():
     # ARTE.FR: the sub-label "Films" -> Spielfilm; series_name stays empty.
     r = classify("ARTE.FR", "Cinéma - Films", "Le Havre", "", 5400)
-    assert r["category"] == "Spielfilm"
+    assert r["category"] == "Movie"
     assert r["language"] == "fr"
     assert r["series_name"] is None
     assert r["classify_confidence"] == 0.9
 
 
 def test_arte_taxonomy_french_super_label():
-    # No film sub-label -> the super-label "Histoire" decides (Doku).
+    # No medium sub-label -> category stays NULL (honest); the super-label
+    # "Histoire" sets the genre (Documentary, History).
     r = classify("ARTE.FR", "Histoire - XXe siècle", "Pompeji", "", 3600)
-    assert r["category"] == "Doku"
+    assert r["category"] is None
+    assert r["genre"] == "Documentary, History"
     assert r["language"] == "fr"
     assert r["classify_confidence"] == 0.9
 
@@ -269,26 +274,28 @@ def test_arte_taxonomy_french_super_label():
 def test_arte_taxonomy_english():
     r = classify("ARTE.EN", "Politics and society - Investigation and reports",
                  "Story", "", 3600)
-    assert r["category"] == "Reportage"
+    assert r["category"] is None         # no medium sub-label -> NULL
+    assert r["genre"] == "News"          # super-label -> News
     assert r["language"] == "en"
     assert r["classify_confidence"] == 0.9
 
 
 def test_arte_taxonomy_spanish():
     r = classify("ARTE.ES", "Cine - Películas", "La pelicula", "", 5400)
-    assert r["category"] == "Spielfilm"
+    assert r["category"] == "Movie"
     assert r["language"] == "es"
 
 
 def test_arte_taxonomy_italian():
     r = classify("ARTE.IT", "Storia - XX° secolo", "Storia", "", 3600)
-    assert r["category"] == "Doku"
+    assert r["category"] is None
+    assert r["genre"] == "Documentary, History"
     assert r["language"] == "it"
 
 
 def test_arte_taxonomy_polish():
     r = classify("ARTE.PL", "Kino - Filmy", "Film", "", 5400)
-    assert r["category"] == "Spielfilm"
+    assert r["category"] == "Movie"
     assert r["language"] == "pl"
 
 
@@ -296,7 +303,7 @@ def test_unklar_when_no_category_signal():
     # Long non-fiction without any metazeile/taxonomy -> honest low-confidence.
     r = classify("ARD", "Hallo Niedersachsen", "Hallo Niedersachsen vom 14.06.",
                  "Aktuelle Nachrichten aus der Region.", 2700)
-    assert r["category"] == "unklar"
+    assert r["category"] is None
     assert r["classify_confidence"] == 0.2
 
 
@@ -372,23 +379,23 @@ def test_topic_routing_format_word_sets_category_not_series():
     # A topic that is itself a format word is not a series; it sets the category
     # and leaves series_name empty.
     r = classify("3Sat", "Spielfilm", "Der Lauf der Dinge", "", 5400)
-    assert r["category"] == "Spielfilm"
+    assert r["category"] == "Movie"
     assert r["series_name"] is None
     assert r["classify_confidence"] == 0.8
 
 
 def test_topic_routing_format_rubric_phrase():
-    # Multi-word format rubric -> generic "Film" category, no series.
+    # Multi-word format rubric -> generic Movie category, no series.
     r = classify("ARD", "Filme in der ARD", "Tatort", "", 5400)
-    assert r["category"] == "Film"
+    assert r["category"] == "Movie"
     assert r["series_name"] is None
 
 
 def test_topic_routing_genre_word_sets_genre_not_series():
     r = classify("3Sat", "Natur", "Wildes Skandinavien", "", 2700)
-    assert r["genre"] == "Natur"
+    assert r["genre"] == "Documentary"   # Natur rubric -> Documentary
     assert r["series_name"] is None
-    assert r["category"] == "unklar"   # genre is not a format -> duration prior
+    assert r["category"] is None         # genre is not a medium -> duration prior (>1800s)
 
 
 def test_topic_routing_genre_is_exact_not_substring():
@@ -400,7 +407,7 @@ def test_topic_routing_genre_is_exact_not_substring():
 
 def test_topic_routing_event_sets_events_category():
     r = classify("3Sat", "Berlinale", "Eröffnungsgala", "", 3600)
-    assert r["category"] == "Events"
+    assert r["category"] == "Event"
     assert r["series_name"] == "Berlinale"
     assert r["classify_confidence"] == 0.8
 
@@ -436,6 +443,69 @@ def test_topic_routing_plain_series_unchanged():
     r = classify("ARD", "Tatort", "Der Fall", "", 5400)
     assert r["series_name"] == "Tatort"
     assert r["genre"] is None and r["slot"] is None
+
+
+# -- category/genre split: medium (category) vs TMDB genre -------------------
+# category in {Movie, Episode, Clip, Event, NULL}; genre is TMDB-only, multiple
+# values comma-joined in canonical TMDB order.
+
+def test_genre_word_maps_to_movie_plus_tmdb_genre():
+    # A bare fiction genre word as topic -> Movie medium + the TMDB genre.
+    r = classify("ARD", "Krimi", "Der Kommissar", "", 5400)
+    assert r["category"] == "Movie"
+    assert r["genre"] == "Crime"
+    assert r["series_name"] is None
+
+
+def test_dokumentation_topic_maps_to_episode_documentary():
+    r = classify("3Sat", "Dokumentation", "Die Story", "", 2700)
+    assert r["category"] == "Episode"
+    assert r["genre"] == "Documentary"
+
+
+def test_dokumentarfilm_topic_maps_to_movie_documentary():
+    # -film words are a film medium even when they carry a genre.
+    r = classify("3Sat", "Dokumentarfilm", "Der Lauf der Dinge", "", 5400)
+    assert r["category"] == "Movie"
+    assert r["genre"] == "Documentary"
+
+
+def test_konzert_maps_to_clip_music():
+    # ARTE Concert super-label: Clip medium (TV-special) + Music genre.
+    r = classify("ARTE.DE", "ARTE Concert - Jazz", "Live in Berlin", "", 5400)
+    assert r["category"] == "Clip"
+    assert r["genre"] == "Music"
+
+
+def test_arte_ambiguous_super_label_is_null_category():
+    # "Fernsehfilme und Serien" with no medium sub-label: Movie-vs-series
+    # undecidable -> NULL, and that super-label carries no genre.
+    r = classify("ARTE.DE", "Fernsehfilme und Serien - Kurz und witzig", "X", "", 1500)
+    assert r["category"] is None
+    assert r["genre"] is None
+
+
+def test_arte_series_sub_label_maps_to_episode():
+    r = classify("ARTE.FR", "Séries et fictions - Séries", "Episode 1", "", 2700)
+    assert r["category"] == "Episode"
+
+
+def test_rubric_multi_genre_is_canonical_order():
+    # Maerchen -> two TMDB genres, joined in canonical TMDB order (Family<Fantasy).
+    r = classify("ARD", "Märchen", "Schneewittchen", "", 3000)
+    assert r["genre"] == "Family, Fantasy"
+
+
+def test_news_rubric_maps_to_news():
+    r = classify("DW", "Wirtschaft", "Marktbericht", "", 600)
+    assert r["genre"] == "News"
+
+
+def test_duration_prior_clip_episode_null():
+    # No category signal: <120s Clip, 120-1800s Episode, >1800s NULL.
+    assert classify("ARD", "Beiträge", "A", "", 60)["category"] == "Clip"
+    assert classify("ARD", "Beiträge", "A", "", 900)["category"] == "Episode"
+    assert classify("ARD", "Beiträge", "A", "", 3600)["category"] is None
 
 
 # -- cmd_classify: DB write side ---------------------------------------------
@@ -474,7 +544,7 @@ def test_cmd_classify_fills_columns_and_flips_status(tmp_path):
         assert result == {"classified": 1}
         row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='a'").fetchone()
         assert row["status"] == "1"
-        assert row["category"] == "Spielfilm"
+        assert row["category"] == "Movie"
         assert row["year"] == 2003
         assert row["country"] == "Deutschland"
         assert row["flags"] == "A"
@@ -542,10 +612,10 @@ def test_cli_classify_json_on_stdout_progress_on_stderr(tmp_path, capsys):
 def test_analyze_report_from_stored_columns(tmp_path):
     conn = open_db(tmp_path)
     try:
-        # two ARD rows: one fully classified film, one unclassified-ish "unklar"
+        # two ARD rows: one fully classified film, one NULL-category fallback
         insert_classified(conn, "a", year=2003, country="Deutschland",
-                          category="Spielfilm", classify_confidence=0.9, flags="A")
-        insert_classified(conn, "b", category="unklar", classify_confidence=0.2,
+                          category="Movie", classify_confidence=0.9, flags="A")
+        insert_classified(conn, "b", category=None, classify_confidence=0.2,
                           flags="")
         report = classify_report(conn, live=False, min_rows=1)
         assert report == {"ARD": {
@@ -592,13 +662,13 @@ def test_report_counts_genre_slot_events(tmp_path):
     try:
         # four ARD rows: one with a genre, one with a slot, one an Events
         # category, one plain -> each new column at 25 %.
-        insert_classified(conn, "a", genre="Natur", category="unklar",
+        insert_classified(conn, "a", genre="Documentary", category=None,
                           classify_confidence=0.2, flags="")
-        insert_classified(conn, "b", slot="hr Retro", category="unklar",
+        insert_classified(conn, "b", slot="hr Retro", category=None,
                           classify_confidence=0.2, flags="")
-        insert_classified(conn, "c", series_name="Berlinale", category="Events",
+        insert_classified(conn, "c", series_name="Berlinale", category="Event",
                           classify_confidence=0.8, flags="")
-        insert_classified(conn, "d", category="unklar", classify_confidence=0.2, flags="")
+        insert_classified(conn, "d", category=None, classify_confidence=0.2, flags="")
         st = classify_report(conn, live=False, min_rows=1)["ARD"]
         assert st["genre_pct"] == 25.0
         assert st["slot_pct"] == 25.0
@@ -676,7 +746,7 @@ def test_report_diff_reports_per_field_churn(tmp_path):
         assert ard["category"]["changed"] == 1
         assert ard["year"]["changed"] == 1
         assert ard["category"]["samples"][0] == {
-            "id": "a", "before": "OldCat", "after": "Spielfilm"}
+            "id": "a", "before": "OldCat", "after": "Movie"}
         assert ard["year"]["samples"][0] == {"id": "a", "before": 1999, "after": 2003}
         assert "clean_title" not in ard   # unchanged fields are omitted
         # read-only: stored columns are untouched
