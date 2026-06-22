@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import theke
-from theke import Config, db_connect
+from theke import Config, ConfigError, cmd_match, db_connect
 from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches)
 
@@ -194,5 +194,107 @@ def test_find_matches_respects_min_conf(tmp_path):
         insert_movie(conn, "m2", "Das Boot Extended", 1981, 9000)
         matches = find_matches(conn, BOOT, min_conf=0.99)
         assert [m["mediathek_id"] for m in matches] == ["m1"]
+    finally:
+        conn.close()
+
+
+# -- cmd_match (CLI write/read side) -----------------------------------------
+
+CFG = Config(tmdb_api_key="KEY")
+
+
+def margs(match_cmd="run", tmdb="1234", type="movie", dry_run=False,
+          min_conf=None, limit=20, json=False):
+    return SimpleNamespace(match_cmd=match_cmd, tmdb=tmdb, type=type,
+                           dry_run=dry_run, min_conf=min_conf, limit=limit, json=json)
+
+
+def boot_db(tmp_path, monkeypatch):
+    """A DB with two matching movie rows (m1 exact, m2 substring) + one miss,
+    and http_get stubbed to the canned Das Boot payload."""
+    monkeypatch.setattr(theke, "http_get",
+                        lambda url: json.dumps(TMDB_BOOT).encode("utf-8"))
+    conn = open_db(tmp_path)
+    insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+    insert_movie(conn, "m2", "Das Boot Extended", 1981, 9000)
+    insert_movie(conn, "m3", "Heat", 1995, 6000)   # rejected (title floor)
+    return conn
+
+
+def tmdb_of(conn, mediathek_id):
+    return conn.execute("SELECT tmdb_id, match_confidence FROM mediathek "
+                        "WHERE mediathek_id=?", (mediathek_id,)).fetchone()
+
+
+def test_cmd_match_run_writes_id_and_confidence(tmp_path, monkeypatch):
+    conn = boot_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, margs())
+        assert result == {"tmdb_id": "1234", "title": "Das Boot",
+                          "candidates": 2, "written": 2}
+        assert tuple(tmdb_of(conn, "m1")) == ("1234", 1.0)
+        assert tuple(tmdb_of(conn, "m2")) == ("1234", 0.95)
+        assert tmdb_of(conn, "m3")["tmdb_id"] == ""   # rejected, untouched
+    finally:
+        conn.close()
+
+
+def test_cmd_match_run_dry_run_writes_nothing(tmp_path, monkeypatch):
+    conn = boot_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, margs(dry_run=True))
+        assert result["candidates"] == 2 and result["written"] == 0
+        assert tmdb_of(conn, "m1")["tmdb_id"] == ""
+    finally:
+        conn.close()
+
+
+def test_cmd_match_run_keeps_existing_other_id(tmp_path, monkeypatch):
+    conn = boot_db(tmp_path, monkeypatch)
+    try:
+        conn.execute("UPDATE mediathek SET tmdb_id='999' WHERE mediathek_id='m1'")
+        result = cmd_match(conn, CFG, margs())
+        assert result["written"] == 1            # m2 written, m1 conflict-skipped
+        assert tmdb_of(conn, "m1")["tmdb_id"] == "999"
+        assert tmdb_of(conn, "m2")["tmdb_id"] == "1234"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_run_min_conf_override(tmp_path, monkeypatch):
+    conn = boot_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, margs(min_conf=0.99))
+        assert result == {"tmdb_id": "1234", "title": "Das Boot",
+                          "candidates": 1, "written": 1}
+    finally:
+        conn.close()
+
+
+def test_cmd_match_show_is_read_only(tmp_path, monkeypatch):
+    conn = boot_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, margs(match_cmd="show", json=True))
+        assert result["tmdb_id"] == "1234"
+        assert [m["mediathek_id"] for m in result["matches"]] == ["m1", "m2"]
+        assert tmdb_of(conn, "m1")["tmdb_id"] == ""   # nothing written
+    finally:
+        conn.close()
+
+
+def test_cmd_match_requires_api_key(tmp_path, monkeypatch):
+    conn = boot_db(tmp_path, monkeypatch)
+    try:
+        with pytest.raises(ConfigError, match="API key"):
+            cmd_match(conn, Config(), margs())
+    finally:
+        conn.close()
+
+
+def test_cmd_match_unsupported_type(tmp_path, monkeypatch):
+    conn = boot_db(tmp_path, monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="movie"):
+            cmd_match(conn, CFG, margs(type="tv"))
     finally:
         conn.close()
