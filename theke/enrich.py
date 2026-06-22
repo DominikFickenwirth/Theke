@@ -9,7 +9,7 @@ CATWORD = (r'Spielfilm|Fernsehfilm|TV-Film|Dokumentarfilm|Dokumentation|Dokudram
 META    = re.compile(r'\b(' + CATWORD + r'),?\s+(.{2,40}?)\s+((?:19|20)\d\d)\b')
 # A metazeile country slot only counts when it actually looks like a country (or
 # a list of them): an uppercase start and no function words / date fragments.
-# Shared with the classify audit's country-shape check.
+# Shared with the enrich audit's country-shape check.
 COUNTRY_BAD = re.compile(r'^[a-zäöü·"]|\b(von|über|aus|im|mit|der|die|das|und'
                          r'|dem|den|eine?r?|Jahr|vom)\b')
 
@@ -136,7 +136,7 @@ def _genre_str(genres):
 # Genre rubrics, matched EXACTLY (never as substring): these appear as a whole
 # topic only on the rubric senders (3sat/ZDF/DW/ARTE.DE) and are never a real
 # series elsewhere ("Sport" is a rubric, "Sport im Osten" is a series). The set
-# is the GENRE_MAP keys; shared with the classify audit's bare-topic check.
+# is the GENRE_MAP keys; shared with the enrich audit's bare-topic check.
 GENRE_SET = set(GENRE_MAP)
 
 # Topic that is itself a format -> category, no series. Bare/compound rubrics map
@@ -253,11 +253,11 @@ ARTE_SUB = {'Filme':'Movie','Films':'Movie','Film':'Movie','Películas':'Movie',
             'Serien':'Episode','Séries':'Episode','Series':'Episode','Serie':'Episode',
             'Seriale':'Episode','Webseries':'Episode','Webseriale':'Episode'}
 
-# Columns classify writes; the returned dict has exactly these keys. status and
+# Columns enrich writes; the returned dict has exactly these keys. status and
 # mediathek_id are handled by the DB layer, not here.
-CLASSIFY_COLS = ['clean_title', 'series_name', 'genre', 'slot', 'season', 'episode',
+ENRICH_COLS = ['clean_title', 'series_name', 'genre', 'slot', 'season', 'episode',
                  'episode_count', 'category', 'year', 'country', 'language', 'flags',
-                 'classify_confidence']
+                 'enrich_confidence']
 
 
 def _confidence(kat_src, category):
@@ -267,15 +267,15 @@ def _confidence(kat_src, category):
     return 0.2 if category is None else 0.5
 
 
-def classify(sender, topic, title, description, duration) -> dict:
-    """A mediathek row -> extracted metadata dict (keys == CLASSIFY_COLS)."""
+def enrich(sender, topic, title, description, duration) -> dict:
+    """A mediathek row -> extracted metadata dict (keys == ENRICH_COLS)."""
     t = title or ''; d = (description or '').strip(); tp = topic or ''
     flags = set()
     genres = set()
     kat_src = None
     r = dict(clean_title=None, series_name=None, genre=None, slot=None, season=None,
              episode=None, episode_count=None, category=None, year=None, country=None,
-             language=ARTE_LANG.get(sender, 'de'), flags='', classify_confidence=None)
+             language=ARTE_LANG.get(sender, 'de'), flags='', enrich_confidence=None)
 
     # -- Pass 1: parenthetical markers (extract + strip) -------------------
     def take_parens(s):
@@ -382,5 +382,5 @@ def classify(sender, topic, title, description, duration) -> dict:
 
     r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
     r['flags'] = ''.join(sorted(flags))        # canonical alphabetical order (A<S<T<U)
-    r['classify_confidence'] = _confidence(kat_src, r['category'])
+    r['enrich_confidence'] = _confidence(kat_src, r['category'])
     return r

@@ -1,6 +1,6 @@
 # -- match (phase 3, part 2: wish-first TMDB matching, movies) ----------------
 # Drive from a canonical TMDB id: pull its title variants + year + runtime once,
-# then search the classify-normalized columns for matching mediathek rows. Pure
+# then search the enrich-normalized columns for matching mediathek rows. Pure
 # helpers (normalize/score) are network-free and unit-testable; tmdb_movie is the
 # only IO and goes through theke.http_get (monkeypatched in tests).
 import difflib

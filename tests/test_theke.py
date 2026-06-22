@@ -430,9 +430,9 @@ def test_parse_film_id_uses_inherited_sender_and_topic():
         "693ce7b99d4ac82947edbc4f97530825b8eddf69c13f81828388abaafb8250a1"
 
 
-def test_parse_status_always_unclassified():
-    # mirror marks every row status '0' (unclassified); the source 'neu' flag no
-    # longer drives status -- classify flips it to '1'.
+def test_parse_status_always_unenriched():
+    # mirror marks every row status '0' (unenriched); the source 'neu' flag no
+    # longer drives status -- enrich flips it to '1'.
     rows = [make_x(titel="new", neu="true"),
             make_x(titel="old", neu="false"),
             make_x(titel="blank")]
@@ -481,7 +481,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 3   # phase 2 schema + phase 3 classify cols (two steps)
+        assert user_version(conn) == 4   # phase 2 schema + phase 3 enrich cols + rename
     finally:
         conn.close()
 
@@ -503,7 +503,7 @@ def test_full_import_inserts_rows(tmp_path):
         assert rows[0]["status"] == "0"
         assert rows[0]["duration"] == 60
         assert rows[0]["date"] == "2026-06-14 20:15:00"
-        assert rows[1]["status"] == "0"   # every mirrored row is unclassified
+        assert rows[1]["status"] == "0"   # every mirrored row is unenriched
     finally:
         conn.close()
 
@@ -557,23 +557,23 @@ def test_full_import_preserves_phase3_ids(tmp_path):
 
 
 # A refresh overwrites a row in place (same mediathek_id) only resets status to
-# '0' when a classify-relevant column changed; sender/topic are baked into the id
+# '0' when a enrich-relevant column changed; sender/topic are baked into the id
 # so only title/description/duration can actually differ on an overwrite.
 _REIMPORT_BASE = dict(sender="ARD", thema="T", titel="A", url="u", website="w",
                       beschreibung="d", dauer="00:01:00")
 
 
-def test_overwrite_preserves_status_when_only_nonclassify_changes(tmp_path):
+def test_overwrite_preserves_status_when_only_nonenrich_changes(tmp_path):
     conn = open_db(tmp_path)
     try:
         import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
-        conn.execute("UPDATE mediathek SET status='1'")          # classified
+        conn.execute("UPDATE mediathek SET status='1'")          # enriched
         changed = dict(_REIMPORT_BASE, groesse_mb="999", geo="DE-AT")
         import_films(conn, *reversed(make_list([make_x(**changed)])))
         rows = film_rows(conn)
         assert len(rows) == 1                # same id -> overwrite, not a new row
         assert rows[0]["size_mb"] == 999     # mirror column updated
-        assert rows[0]["status"] == "1"      # classification preserved
+        assert rows[0]["status"] == "1"      # enrichment preserved
     finally:
         conn.close()
 
@@ -583,7 +583,7 @@ def test_overwrite_preserves_status_when_only_nonclassify_changes(tmp_path):
     ("beschreibung", "other"),
     ("dauer",        "00:02:00"),
 ])
-def test_overwrite_resets_status_when_classify_column_changes(tmp_path, field, new):
+def test_overwrite_resets_status_when_enrich_column_changes(tmp_path, field, new):
     conn = open_db(tmp_path)
     try:
         import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
@@ -592,7 +592,7 @@ def test_overwrite_resets_status_when_classify_column_changes(tmp_path, field, n
         import_films(conn, *reversed(make_list([make_x(**changed)])))
         rows = film_rows(conn)
         assert len(rows) == 1                # same id -> overwrite, not a new row
-        assert rows[0]["status"] == "0"      # classify input changed -> reclassify
+        assert rows[0]["status"] == "0"      # enrich input changed -> re-enrich
     finally:
         conn.close()
 
@@ -605,7 +605,7 @@ def test_overwrite_noop_preserves_status(tmp_path):
         import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
         rows = film_rows(conn)
         assert len(rows) == 1
-        assert rows[0]["status"] == "1"      # idempotent refresh does not reclassify
+        assert rows[0]["status"] == "1"      # idempotent refresh does not re-enrich
     finally:
         conn.close()
 

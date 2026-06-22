@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from theke.classify import classify, looks_like_country, GENRE_SET, CLASSIFY_COLS, CATWORD
+from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD
 from theke.match import tmdb_movie, find_matches
 
 CONFIG_DEFAULT_PATH = "theke.json"
@@ -95,7 +95,9 @@ class DbLockedError(Exception):
 
 # One tuple of SQL statements per schema version; each stage appends its own
 # migration when it lands. Entry 1 (phase 2) is the film-list mirror schema;
-# entry 2 (phase 3) adds the classify columns (extracted metadata).
+# entry 2 (phase 3) adds the enrich columns (extracted metadata) -- it keeps the
+# original column name classify_confidence so existing DBs upgrade cleanly; entry
+# 4 renames that column to enrich_confidence (the classify -> enrich rename).
 MIGRATIONS: list[tuple[str, ...]] = [
     (
         """CREATE TABLE mediathek (
@@ -137,6 +139,9 @@ MIGRATIONS: list[tuple[str, ...]] = [
     (
         "ALTER TABLE mediathek ADD COLUMN genre TEXT",
         "ALTER TABLE mediathek ADD COLUMN slot  TEXT",
+    ),
+    (
+        "ALTER TABLE mediathek RENAME COLUMN classify_confidence TO enrich_confidence",
     ),
 ]
 
@@ -376,15 +381,15 @@ def parse_filmliste(stream, chunk_size=1 << 16):
             yield film
 
 
-# Columns classify reads as input (== classify() signature). A refresh that
+# Columns enrich reads as input (== enrich() signature). A refresh that
 # leaves every one of these unchanged does not invalidate an existing
-# classification, so status is preserved on such an overwrite (see _UPSERT_SQL).
-CLASSIFY_INPUT_COLS = ["sender", "topic", "title", "description", "duration"]
+# enrichment, so status is preserved on such an overwrite (see _UPSERT_SQL).
+ENRICH_INPUT_COLS = ["sender", "topic", "title", "description", "duration"]
 
 # Columns written on every import. language/tmdb_id/imdb_id/match_confidence are
 # owned by phase 3 and never touched here, so an ID assignment survives every
-# refresh. status is special: an overwrite resets it to '0' (reclassify) only
-# when a classify-relevant column changed, else the existing status is kept.
+# refresh. status is special: an overwrite resets it to '0' (re-enrich) only
+# when a enrich-relevant column changed, else the existing status is kept.
 MIRROR_COLS = [
     "mediathek_id", "status", "sender", "topic", "title", "description",
     "date", "duration", "size_mb", "url_video", "url_video_small",
@@ -392,10 +397,10 @@ MIRROR_COLS = [
 ]
 
 # Null-safe (IS NOT) compare of the existing row against the incoming (excluded)
-# values; any classify-input change flips status to '0', otherwise it is kept.
+# values; any enrich-input change flips status to '0', otherwise it is kept.
 _STATUS_SET = (
     "status=CASE WHEN "
-    + " OR ".join(f"{c} IS NOT excluded.{c}" for c in CLASSIFY_INPUT_COLS)
+    + " OR ".join(f"{c} IS NOT excluded.{c}" for c in ENRICH_INPUT_COLS)
     + " THEN '0' ELSE status END"
 )
 
@@ -530,49 +535,49 @@ def cmd_fetch(conn, cfg, args: argparse.Namespace) -> dict:
     return _do_full(conn, cfg)
 
 
-# -- classify -----------------------------------------------------------------
+# -- enrich -----------------------------------------------------------------
 # Extract structured metadata from the free-text fields and flip status 0 -> 1.
 
-_CLASSIFY_READ = (
-    "SELECT mediathek_id, " + ", ".join(CLASSIFY_INPUT_COLS)
+_ENRICH_READ = (
+    "SELECT mediathek_id, " + ", ".join(ENRICH_INPUT_COLS)
     + " FROM mediathek WHERE status='0'"
 )
 
 _UPDATE_SQL = (
     "UPDATE mediathek SET {sets}, status='1' WHERE mediathek_id=:mediathek_id"
-).format(sets=", ".join(f"{c}=:{c}" for c in CLASSIFY_COLS))
+).format(sets=", ".join(f"{c}=:{c}" for c in ENRICH_COLS))
 
 
-def cmd_classify(conn, cfg, args: argparse.Namespace) -> dict:
-    """Dispatch a classify action: `run` writes the classify columns; the others
+def cmd_enrich(conn, cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a enrich action: `run` writes the enrich columns; the others
     (`report`/`audit`/`show`/`dist`) are read-only inspection tools."""
-    match args.classify_cmd:
-        case "run":    return _classify_run(conn, args)
-        case "report": return _classify_report_cmd(conn, args)
-        case "audit":  return _classify_audit_cmd(conn, args)
-        case "show":   return _classify_show_cmd(conn, args)
-        case "dist":   return _classify_dist_cmd(conn, args)
-        case _: raise DbError(f"unhandled classify action: {args.classify_cmd}")
+    match args.enrich_cmd:
+        case "run":    return _enrich_run(conn, args)
+        case "report": return _enrich_report_cmd(conn, args)
+        case "audit":  return _enrich_audit_cmd(conn, args)
+        case "show":   return _enrich_show_cmd(conn, args)
+        case "dist":   return _enrich_dist_cmd(conn, args)
+        case _: raise DbError(f"unhandled enrich action: {args.enrich_cmd}")
 
 
-def _classify_run(conn, args) -> dict:
-    """Classify mediathek rows into the classify columns and flip status 0 -> 1.
-    By default only unclassified rows (status '0'); --force reprocesses all."""
-    sql = _CLASSIFY_READ if not args.force else _CLASSIFY_READ.replace(
+def _enrich_run(conn, args) -> dict:
+    """Enrich mediathek rows into the enrich columns and flip status 0 -> 1.
+    By default only unenriched rows (status '0'); --force reprocesses all."""
+    sql = _ENRICH_READ if not args.force else _ENRICH_READ.replace(
         " WHERE status='0'", "")
-    log.info("classifying rows")
+    log.info("enriching rows")
     conn.execute("BEGIN")
     try:
-        count = _classify_rows(conn, conn.execute(sql))
+        count = _enrich_rows(conn, conn.execute(sql))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
         raise
-    return {"classified": count}
+    return {"enriched": count}
 
 
-def _classify_rows(conn, rows, batch=5000) -> int:
-    """Stream rows through classify(), write updates in batches; log every 50k."""
+def _enrich_rows(conn, rows, batch=5000) -> int:
+    """Stream rows through enrich(), write updates in batches; log every 50k."""
     count = 0
     reported = 0
     params = []
@@ -586,10 +591,10 @@ def _classify_rows(conn, rows, batch=5000) -> int:
         params.clear()
         if count - reported >= 50000:
             reported = count
-            log.info("classified %d rows", count)
+            log.info("enriched %d rows", count)
 
     for row in rows:
-        meta = classify(row["sender"], row["topic"], row["title"],
+        meta = enrich(row["sender"], row["topic"], row["title"],
                         row["description"], row["duration"])
         meta["mediathek_id"] = row["mediathek_id"]
         params.append(meta)
@@ -599,10 +604,10 @@ def _classify_rows(conn, rows, batch=5000) -> int:
     return count
 
 
-# -- classify coverage report (read-only) -------------------------------------
-# Per-sender coverage of the classify fields, for iterating the algorithm. Two
+# -- enrich coverage report (read-only) -------------------------------------
+# Per-sender coverage of the enrich fields, for iterating the algorithm. Two
 # sources, one tally: --analyze reads the stored columns, --dry-run runs
-# classify() live (writing nothing). Both expose the same keys per row.
+# enrich() live (writing nothing). Both expose the same keys per row.
 
 REPORT_MIN_ROWS = 1000   # senders below this are omitted (long tail of one-offs)
 
@@ -610,7 +615,7 @@ _REPORT_FIELDS = ["year", "country", "se", "cat", "unklar", "genre", "slot", "ev
                   "flag_a", "flag_e", "flag_s", "flag_u", "flag_t"]
 
 # Per-confidence-level buckets for --by-confidence: deterministic levels emitted
-# by classify._confidence (0.9/0.8/0.5/0.2). Counted always, summarized only when
+# by enrich._confidence (0.9/0.8/0.5/0.2). Counted always, summarized only when
 # requested, so the default report shape stays stable.
 _CONF_LEVELS = [("c90", 0.9), ("c80", 0.8), ("c50", 0.5), ("c20", 0.2)]
 
@@ -635,12 +640,12 @@ def _new_counter() -> dict:
 
 def _tally(counter, row):
     """Increment a sender's coverage counters from a row/dict (None-safe). Works
-    on both a sqlite3.Row (stored columns) and a classify() result dict."""
+    on both a sqlite3.Row (stored columns) and a enrich() result dict."""
     counter["n"] += 1
     if row["year"] is not None:    counter["year"] += 1
     if row["country"] is not None: counter["country"] += 1
     if row["season"] is not None or row["episode"] is not None: counter["se"] += 1
-    conf = row["classify_confidence"]
+    conf = row["enrich_confidence"]
     if conf is not None and conf >= 0.8: counter["cat"] += 1   # category from a real signal
     if row["category"] is None:     counter["unklar"] += 1     # NULL = unknown medium
     if row["genre"] is not None:    counter["genre"] += 1
@@ -663,10 +668,10 @@ def _summarize(counter, by_confidence=False) -> dict:
     return out
 
 
-def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
+def enrich_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
                     by_confidence=False) -> dict:
-    """Per-sender classify coverage. live=False summarizes the stored columns;
-    live=True runs classify() over the rows without writing. `senders` limits the
+    """Per-sender enrich coverage. live=False summarizes the stored columns;
+    live=True runs enrich() over the rows without writing. `senders` limits the
     scan to a list of senders; `by_confidence` adds per-confidence-level columns.
     Read-only -> no transaction."""
     acc = {}
@@ -675,34 +680,34 @@ def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
         rows = conn.execute("SELECT mediathek_id, sender, topic, title, "
                             "description, duration FROM mediathek " + where, params)
         for r in rows:
-            meta = classify(r["sender"], r["topic"], r["title"],
+            meta = enrich(r["sender"], r["topic"], r["title"],
                             r["description"], r["duration"])
             _tally(acc.setdefault(r["sender"], _new_counter()), meta)
     else:
         rows = conn.execute("SELECT sender, year, country, season, episode, "
-                            "category, classify_confidence, flags, genre, slot "
+                            "category, enrich_confidence, flags, genre, slot "
                             "FROM mediathek " + where, params)
         for r in rows:
             _tally(acc.setdefault(r["sender"], _new_counter()), r)
     return {s: _summarize(c, by_confidence) for s, c in acc.items() if c["n"] >= min_rows}
 
 
-def classify_report_diff(conn, senders=None, sample_limit=5) -> dict:
-    """Per sender/field churn between the stored classify columns and a live
-    classify() pass: how many rows would change, with a few before/after samples
+def enrich_report_diff(conn, senders=None, sample_limit=5) -> dict:
+    """Per sender/field churn between the stored enrich columns and a live
+    enrich() pass: how many rows would change, with a few before/after samples
     ({id, before, after}). Senders with no churn are omitted. Most useful after a
-    classify run (against unclassified rows everything looks 'changed').
+    enrich run (against unenriched rows everything looks 'changed').
     Read-only -> no transaction."""
     where, params = _sender_clause(senders)
     rows = conn.execute(
         "SELECT mediathek_id, sender, topic, title, description, duration, "
-        + ", ".join(CLASSIFY_COLS) + " FROM mediathek " + where, params)
+        + ", ".join(ENRICH_COLS) + " FROM mediathek " + where, params)
     acc = {}
     for r in rows:
-        live = classify(r["sender"], r["topic"], r["title"],
+        live = enrich(r["sender"], r["topic"], r["title"],
                         r["description"], r["duration"])
         bucket = acc.setdefault(r["sender"], {})
-        for f in CLASSIFY_COLS:
+        for f in ENRICH_COLS:
             if r[f] == live[f]:
                 continue
             fb = bucket.setdefault(f, {"changed": 0, "samples": []})
@@ -715,7 +720,7 @@ def classify_report_diff(conn, senders=None, sample_limit=5) -> dict:
 
 def _print_report_diff(diff):
     """Churn per sender/field to stdout: count + a couple of before/after samples."""
-    print("classify churn (stored vs live)")
+    print("enrich churn (stored vs live)")
     for sender in sorted(diff):
         print(f"{sender}:")
         for f in sorted(diff[sender]):
@@ -738,25 +743,25 @@ def _print_report_table(report, mode, by_confidence=False):
     if by_confidence:
         i = next(j for j, (f, _) in enumerate(cols) if f == "cat")
         cols = cols[:i] + _CONF_TABLE_COLS + cols[i + 1:]
-    print(f"classify coverage ({mode}, % of rows)")
+    print(f"enrich coverage ({mode}, % of rows)")
     print(f'{"SENDER":14}{"n":>8}' + "".join(f"{h:>7}" for _, h in cols))
     for sender, st in sorted(report.items(), key=lambda kv: -kv[1]["n"]):
         print(f'{sender:14}{st["n"]:>8}'
               + "".join(f'{st[f + "_pct"]:>7.1f}' for f, _ in cols))
 
 
-def _classify_report_cmd(conn, args) -> dict:
+def _enrich_report_cmd(conn, args) -> dict:
     senders = _split_csv(args.sender)
     if args.diff:
-        log.info("running classify() live to diff against the stored columns")
-        diff = classify_report_diff(conn, senders=senders)
+        log.info("running enrich() live to diff against the stored columns")
+        diff = enrich_report_diff(conn, senders=senders)
         if args.json:
             return {"mode": "diff", "senders": diff}
         _print_report_diff(diff)
         return {}
     if args.live:
-        log.info("running classify() live (no writes)")
-    report = classify_report(conn, live=args.live, min_rows=args.min_rows,
+        log.info("running enrich() live (no writes)")
+    report = enrich_report(conn, live=args.live, min_rows=args.min_rows,
                              senders=senders, by_confidence=args.by_confidence)
     mode = "live" if args.live else "stored"
     if args.json:
@@ -765,10 +770,10 @@ def _classify_report_cmd(conn, args) -> dict:
     return {}
 
 
-# -- classify audit (read-only findings scan) ---------------------------------
+# -- enrich audit (read-only findings scan) ---------------------------------
 # Promotes the analysis/_audit_sender.py battery into the CLI: per sender, the
 # rows where a heuristic visibly mishandled the input (counts coverage as filled
-# but not correct). Each check returns {sender: {count, examples}}; classify_audit
+# but not correct). Each check returns {sender: {count, examples}}; enrich_audit
 # assembles {sender: {check: ...}}. Read-only.
 
 # Topic that is itself a bare format/genre word (not a real series). CATWORD has
@@ -861,10 +866,10 @@ AUDIT_CHECKS = {
 }
 
 
-def classify_audit(conn, senders=None, checks=None, limit=5) -> dict:
+def enrich_audit(conn, senders=None, checks=None, limit=5) -> dict:
     """Run the findings checks (default all) and return {sender: {check: {count,
     examples}}}. country-shape/title-credit/episodic-unparsed only fire on
-    already-classified rows. Read-only -> no transaction."""
+    already-enriched rows. Read-only -> no transaction."""
     names = checks or list(AUDIT_CHECKS)
     unknown = [c for c in names if c not in AUDIT_CHECKS]
     if unknown:
@@ -880,7 +885,7 @@ def classify_audit(conn, senders=None, checks=None, limit=5) -> dict:
 
 def _print_audit(result):
     """Findings per sender/check to stdout: count + the collected examples."""
-    print("classify audit (findings: count + examples)")
+    print("enrich audit (findings: count + examples)")
     for sender in sorted(result):
         print(f"{sender}:")
         for check in sorted(result[sender]):
@@ -890,8 +895,8 @@ def _print_audit(result):
                 print(f"      {ex!r}")
 
 
-def _classify_audit_cmd(conn, args) -> dict:
-    result = classify_audit(conn, senders=_split_csv(args.sender),
+def _enrich_audit_cmd(conn, args) -> dict:
+    result = enrich_audit(conn, senders=_split_csv(args.sender),
                             checks=_split_csv(args.check), limit=args.limit)
     if args.json:
         return {"senders": result}
@@ -899,14 +904,14 @@ def _classify_audit_cmd(conn, args) -> dict:
     return {}
 
 
-# -- classify show / dist (read-only inspection) ------------------------------
-# show dumps the classify columns of matching rows; dist tallies one field's
+# -- enrich show / dist (read-only inspection) ------------------------------
+# show dumps the enrich columns of matching rows; dist tallies one field's
 # value distribution. Both validate field names against the live mediathek
 # columns so a name can be interpolated into SQL safely (values stay bound).
 
 _SHOW_COLS = ["sender", "topic", "title", "clean_title", "series_name",
               "category", "country", "year", "season", "episode", "flags",
-              "classify_confidence"]
+              "enrich_confidence"]
 
 
 def _valid_fields(conn) -> set:
@@ -938,13 +943,13 @@ def _build_show_where(conn, args):
     for field in args.not_null or []:
         conds.append(f"{_check_field(field, valid)} IS NOT NULL")
     if args.min_conf is not None:
-        conds.append("classify_confidence >= ?"); params.append(args.min_conf)
+        conds.append("enrich_confidence >= ?"); params.append(args.min_conf)
     if args.max_conf is not None:
-        conds.append("classify_confidence <= ?"); params.append(args.max_conf)
+        conds.append("enrich_confidence <= ?"); params.append(args.max_conf)
     return ("WHERE " + " AND ".join(conds) if conds else ""), params
 
 
-def classify_show(conn, where_sql, params, limit) -> list:
+def enrich_show(conn, where_sql, params, limit) -> list:
     """Rows matching where_sql, as dicts over mediathek_id + the inspection
     columns. Read-only -> no transaction."""
     rows = conn.execute(
@@ -959,21 +964,21 @@ def _print_show(rows):
     for r in rows:
         print(f'[{r["sender"]}] {r["clean_title"]!r}  cat={r["category"]!r} '
               f'country={r["country"]!r} year={r["year"]} '
-              f'S/E={r["season"]}/{r["episode"]} conf={r["classify_confidence"]}')
+              f'S/E={r["season"]}/{r["episode"]} conf={r["enrich_confidence"]}')
         print(f'      topic={r["topic"]!r} title={r["title"]!r} '
               f'series={r["series_name"]!r} flags={r["flags"]!r}')
 
 
-def _classify_show_cmd(conn, args) -> dict:
+def _enrich_show_cmd(conn, args) -> dict:
     where, params = _build_show_where(conn, args)
-    rows = classify_show(conn, where, params, args.limit)
+    rows = enrich_show(conn, where, params, args.limit)
     if args.json:
         return {"rows": rows}
     _print_show(rows)
     return {}
 
 
-def classify_dist(conn, field, senders=None, limit=30) -> list:
+def enrich_dist(conn, field, senders=None, limit=30) -> list:
     """Top-N (value, count) of one field, descending by count. `field` is
     validated against the table columns. Read-only -> no transaction."""
     field = _check_field(field, _valid_fields(conn))
@@ -991,8 +996,8 @@ def _print_dist(field, dist):
         print(f"   {count:8}  {value!r}")
 
 
-def _classify_dist_cmd(conn, args) -> dict:
-    dist = classify_dist(conn, args.field, senders=_split_csv(args.sender),
+def _enrich_dist_cmd(conn, args) -> dict:
+    dist = enrich_dist(conn, args.field, senders=_split_csv(args.sender),
                          limit=args.limit)
     if args.json:
         return {"field": args.field, "values": dist}
@@ -1094,18 +1099,18 @@ def build_parser() -> argparse.ArgumentParser:
     fetch = sub.add_parser("fetch", help="refresh the film-list mirror (~30 s)", description="Refresh the film-list mirror; a full download and import takes about 30 seconds. Progress is printed to stderr.")
     fetch.add_argument("--force", action="store_true", help="always download the full list")
 
-    classify = sub.add_parser("classify", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
-    csub = classify.add_subparsers(dest="classify_cmd", required=True, metavar="action")
-    crun = csub.add_parser("run",    help="classify mirrored rows (writes the classify columns)", description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the classify columns and flip status 0 -> 1.")
-    crep = csub.add_parser("report", help="read-only per-sender coverage report",                 description="Per-sender coverage of the classify fields. Reads the stored columns by default; --live re-runs classify() without writing.")
-    caud = csub.add_parser("audit",  help="read-only findings scan (wrong/suspicious values)",    description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-classified rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
-    csho = csub.add_parser("show",   help="read-only sample of rows with their classify columns", description="Dump the classify columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
-    cdis = csub.add_parser("dist",   help="read-only value distribution of one field",            description="Top-N value frequencies of a single classify field (or any mediathek column).")
-    crun.add_argument("--force",         action="store_true",                                    help="reclassify all rows, not just unclassified")
+    enrich = sub.add_parser("enrich", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
+    csub = enrich.add_subparsers(dest="enrich_cmd", required=True, metavar="action")
+    crun = csub.add_parser("run",    help="enrich mirrored rows (writes the enrich columns)", description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the enrich columns and flip status 0 -> 1.")
+    crep = csub.add_parser("report", help="read-only per-sender coverage report",                 description="Per-sender coverage of the enrich fields. Reads the stored columns by default; --live re-runs enrich() without writing.")
+    caud = csub.add_parser("audit",  help="read-only findings scan (wrong/suspicious values)",    description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-enriched rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
+    csho = csub.add_parser("show",   help="read-only sample of rows with their enrich columns", description="Dump the enrich columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
+    cdis = csub.add_parser("dist",   help="read-only value distribution of one field",            description="Top-N value frequencies of a single enrich field (or any mediathek column).")
+    crun.add_argument("--force",         action="store_true",                                    help="re-enrich all rows, not just unenriched")
     crep.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
     crep.add_argument("--min-rows",      metavar="N", type=int, default=REPORT_MIN_ROWS,         help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
-    crep.add_argument("--live",          action="store_true",                                    help="run classify() live instead of reading the stored columns")
-    crep.add_argument("--diff",          action="store_true",                                    help="report per-field churn: stored columns vs a live classify() pass")
+    crep.add_argument("--live",          action="store_true",                                    help="run enrich() live instead of reading the stored columns")
+    crep.add_argument("--diff",          action="store_true",                                    help="report per-field churn: stored columns vs a live enrich() pass")
     crep.add_argument("--by-confidence", action="store_true",                                    help="split the category column into per-confidence-level columns")
     caud.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
     caud.add_argument("--check",         metavar="NAME[,NAME]",                                  help="run only these checks (default all)")
@@ -1115,8 +1120,8 @@ def build_parser() -> argparse.ArgumentParser:
     csho.add_argument("--eq",            metavar=("FIELD", "VALUE"),   nargs=2, action="append", help="FIELD = VALUE (repeatable)")
     csho.add_argument("--null",          action="append", metavar="FIELD",                       help="FIELD IS NULL (repeatable)")
     csho.add_argument("--not-null",      action="append", metavar="FIELD",                       help="FIELD IS NOT NULL (repeatable)")
-    csho.add_argument("--min-conf",      type=float, metavar="X",                                help="classify_confidence >= X")
-    csho.add_argument("--max-conf",      type=float, metavar="X",                                help="classify_confidence <= X")
+    csho.add_argument("--min-conf",      type=float, metavar="X",                                help="enrich_confidence >= X")
+    csho.add_argument("--max-conf",      type=float, metavar="X",                                help="enrich_confidence <= X")
     csho.add_argument("--limit",         type=int, default=20, metavar="N",                      help="max rows to dump (default 20)")
     cdis.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
     cdis.add_argument("--field",         required=True, metavar="NAME",                          help="the column to tally")
@@ -1168,9 +1173,9 @@ def main(argv=None) -> int:
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_fetch(conn, cfg, args)
                 finally: conn.close()
-            case "classify":
+            case "enrich":
                 conn = db_connect(cfg.db_path)
-                try:     result = cmd_classify(conn, cfg, args)
+                try:     result = cmd_enrich(conn, cfg, args)
                 finally: conn.close()
             case "match":
                 conn = db_connect(cfg.db_path)
