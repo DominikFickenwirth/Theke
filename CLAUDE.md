@@ -18,14 +18,14 @@ source is the public Mediatheken via the **MediathekView film list** (a plain
 download from liste.mediathekview.de).
 
 **One home for the logic:** the **Python CLI** holds *all* logic and is the only
-thing on the NAS; the **Delphi desktop GUI** holds none and shells out to the
-CLI for everything.
+thing on the NAS; the only UI is a **web UI** (last phase) that holds no logic and
+drives the CLI through a **REST API**. No desktop GUI.
 
 ## Phases (implementation order)
 
 Each phase is usable on its own. Phases 1-2 are planned; **3+ is tentative** --
 don't over-engineer ahead. Middle-phase ordering: build the full **manual
-acquisition path** as one vertical slice (search --> queue --> approve -->
+acquisition path** as one vertical slice (pick by id --> queue --> approve -->
 download --> remux), then add the **wishlist** as automation on the same
 machinery.
 
@@ -39,29 +39,30 @@ machinery.
    structured metadata (clean title, series/season/episode, category, year,
    country, language, flags) from free text, flip `status` '0' -> '1'. classify
    is local and cheap (no API) and is the search base for everything below.
-   **enrich + match** (to come) are **demand-driven, not bulk**: TMDB/IMDB IDs are
+   **enrich + match** (to come) are **demand-driven, not bulk**: TMDB IDs are
    resolved only for what is actually wanted (wishlist entries, manual picks), and
    a resolved ID is cached on the row so the enriched part of the catalog grows
    with use instead of hammering TMDB for hundreds of thousands of unwanted rows.
-   match runs **wish-first** (a canonical TMDB/IMDB ID --> matching mediathek
-   rows), not catalog-first. A refresh must preserve existing ID assignments;
-   vanished entries are kept (the mirror only grows/updates, never deletes).
-4. **DB search** -- read-only query/browse; a pick by ID becomes a review-queue
-   entry (phase 5), not a download.
-5. **Review queue + gate** -- staging of proposals/picks + approval gate. Still
-   no download.
-6. **Downloader** -- plain HTTP download of approved items (DE/EN separate,
+   match runs **wish-first** (a canonical TMDB ID --> matching mediathek rows),
+   not catalog-first. A refresh must preserve existing ID assignments; vanished
+   entries are kept (the mirror only grows/updates, never deletes).
+4. **Review queue + gate** -- staging of proposals/picks + approval gate. Still
+   no download. A manual pick is a `mediathek_id` (found via DBBrowser for now)
+   fed to a CLI command that creates a queue entry; browsable search is a web-UI
+   concern (last phase).
+5. **Downloader** -- plain HTTP download of approved items (DE/EN separate,
    subtitles), manual via CLI.
-7. **Remuxer** -- FFmpeg pipeline into the Jellyfin folders. **Manual path
+6. **Remuxer** -- FFmpeg pipeline into the Jellyfin folders. **Manual path
    complete here.**
-8. **Wishlist** -- entries by TMDB/IMDB ID, auto availability checks feeding the
-   same queue. Pure automation on phases 4-7.
-9. **Docker + NAS deployment** -- containerize, deploy (smoke test, manual).
-10. **Scheduler** -- in-app scheduler; runs unattended.
-11. **Jellyfin indexer** -- parse NFO files, cache the library. Needed for 12.
-12. **Quality upgrades + series completion** -- detect higher resolutions /
+7. **Wishlist** -- entries by TMDB ID, auto availability checks feeding the same
+   queue. Pure automation on phases 4-6.
+8. **Docker + NAS deployment** -- containerize, deploy (smoke test, manual).
+9. **Scheduler** -- in-app scheduler; runs unattended.
+10. **Jellyfin indexer** -- parse NFO files, cache the library. Needed for 11.
+11. **Quality upgrades + series completion** -- detect higher resolutions /
     missing episodes (needs the indexer).
-13. **Web UI** -- review dashboard, settings, history.
+12. **Web UI** -- the only UI: review dashboard, settings, history, and read-only
+    browse/search over the catalog (REST API to the CLI).
 
 ## The gate (optional human-in-the-loop)
 
@@ -75,8 +76,8 @@ Review is a **configurable gate**, not a hard rule:
 **Side-effect boundary:** DB-only operations run automatically; anything that
 writes/deletes files in the library sits behind the gate.
 
-- Automatic (DB-only): mirror, classify, enrich, match, DB search, wishlist
-  checks, proposal generation.
+- Automatic (DB-only): mirror, classify, enrich, match, wishlist checks,
+  proposal generation. Read-only browse is external for now (DBBrowser).
 - Gated (touches the library): starting downloads, replacing files.
 - After approval, automatic: download, remux, placement.
 - Quality upgrades are most sensitive (they delete files): proposal automatic,
@@ -85,14 +86,14 @@ writes/deletes files in the library sits behind the gate.
 ## Architecture / pipeline
 
 ```
-liste.mediathekview.de --> [Mirror] --> mediathek table <-- [ID Enricher (TMDB/IMDB), on demand]
+liste.mediathekview.de --> [Mirror] --> mediathek table <-- [ID Enricher (TMDB), on demand]
                                               |
-Jellyfin (NFO files) --> [Indexer] -----------+  (phase 11)
+Jellyfin (NFO files) --> [Indexer] -----------+  (phase 10)
                                               |
                                               V
                                          [Matcher]
                                               |
-     [DB search] (manual pick) ------------>  +  <------------ [Wishlist] (auto)
+   [Manual pick] (CLI, by id) ------------->  +  <------------ [Wishlist] (auto)
                                               |
                                               V
                                          queue table
@@ -104,7 +105,7 @@ Jellyfin (NFO files) --> [Indexer] -----------+  (phase 11)
                                    NAS / Jellyfin media folders
 ```
 
-Two producers feed the queue (a manual DB-search pick, the wishlist). Stages are
+Two producers feed the queue (a manual pick by id, the wishlist). Stages are
 decoupled and idempotent -- each persists its state to the DB, so aborts/re-runs
 are safe and every stage is callable on its own.
 
@@ -115,57 +116,51 @@ Single SQLite file `theke.db`. Field lists indicative.
 - **mediathek** -- film-list mirror, refreshed periodically. `status` is one char
   ('0' new, '1' classified). classify (phase 3) fills `language` +
   clean_title/series_name/season/episode/episode_count/category/year/country/
-  flags/classify_confidence and flips status to '1'; tmdb_id/imdb_id/
-  match_confidence are filled later by enrich+match **on demand** (only for rows a
-  wishlist entry or manual pick resolves) and cached here. All phase-3 columns
-  survive refreshes.
+  flags/classify_confidence and flips status to '1'; tmdb_id/match_confidence
+  are filled later by enrich+match **on demand** (only for rows a wishlist entry
+  or manual pick resolves) and cached here. All phase-3 columns survive refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
   size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
-  url_history, geo, language, tmdb_id, imdb_id, match_confidence, clean_title,
+  url_history, geo, language, tmdb_id, match_confidence, clean_title,
   series_name, season, episode, episode_count, category, year, country, flags,
   classify_confidence`
   Plus a `meta` key/value table (filmliste_id, filmliste_created).
 - **queue** -- review queue + download record in one. Lifecycle
   `proposed -> approved -> downloading -> done / failed / cancelled`.
-  `status, id, mediathek_id, source (match/search/wishlist), language,
+  `status, id, mediathek_id, source (match/pick/wishlist), language,
   confidence, target_path, resolution, error, created_at, updated_at`
-- **wishlist** (phase 8) -- `tmdb_id, imdb_id, type, season, episode, status,
-  added_at`
-- **library** -- from MP4s + their NFO files (XML already carries TMDB/IMDB IDs,
-  so matching here is trivial). Replaces `wishlist` in phase 11 (wishlist entries
+- **wishlist** (phase 7) -- `tmdb_id, type, season, episode, status, added_at`
+- **library** -- from MP4s + their NFO files (XML already carries the TMDB ID, so
+  matching here is trivial). Replaces `wishlist` in phase 10 (wishlist entries
   become library entries with status="wishlist").
-  `status, type (movie/episode), title, year, tmdb_id, imdb_id, season, episode,
+  `status, type (movie/episode), title, year, tmdb_id, season, episode,
   path, resolution, languages, added_at`
 
 ## Stage details
 
-**DB search (phase 4):** read-only over the **classify-normalized** catalog
-(clean_title/series_name/topic substring, year, sender, date, category; plus
-TMDB/IMDB ID and match status where already resolved). Works without TMDB -- the
-classify columns are filled locally for every row. A pick by ID goes to the queue
-(phase 5), not a direct download, and triggers TMDB resolution **on demand** for
-that row (cached afterwards). The minimal manual path the wishlist later
-automates; both feed the same queue. Needs indexes on searched columns; FTS5 over
-title/topic/description is an option to evaluate.
+**Manual pick (phase 4):** until the web UI exists, browsing the catalog is done
+externally (DBBrowser for SQLite, read-only). A pick is a `mediathek_id` handed
+to a CLI command that creates a queue entry and triggers TMDB resolution **on
+demand** for that row (cached afterwards). Same queue the wishlist later feeds.
+The browsable search itself (over the classify-normalized columns, indexes / FTS5
+to evaluate) lands with the web UI (last phase).
 
 **Matching (core problem):** the hard part is fuzzy-matching messy German
 film-list free text against a canonical title -- that cost is unavoidable; the
 design only controls *when* and *how often* it runs. Theke runs it **wish-first
-and lazy**: drive from a canonical TMDB/IMDB ID (a wishlist entry or a resolved
-manual pick), take that entry's title variants (DE + original + alternates) + year
-+ (for series) the season/episode list from TMDB, and search the
-classify-normalized columns for matching mediathek rows -- instead of bulk-
-enriching the whole catalog catalog-first (MV-row --> which ID?). Confirm a candidate with duration,
-release year, optional synopsis; compute a confidence score, below threshold ->
-manual review (goal: few false positives). For series, season/episode matching is
-far more reliable than title alone. TMDB exposes the IMDB ID as an external ID, so
-matching TMDB and taking IMDB from there usually suffices. One TMDB/IMDB ID maps
-to **many** mediathek rows (senders, SD/HD, repeats); the resolved IDs are cached
-on those rows, the queue dedups on target (tmdb/imdb id + language + resolution),
-search may still list all rows. AI (embeddings/classifier) or web search is a
-**later** fallback only if the classic hit rate is poor.
+and lazy**: drive from a canonical TMDB ID (a wishlist entry or a resolved manual
+pick), take that entry's title variants (DE + original + alternates) + year + (for
+series) the season/episode list from TMDB, and search the classify-normalized
+columns for matching mediathek rows -- instead of bulk-enriching the whole catalog
+catalog-first (MV-row --> which ID?). Confirm a candidate with duration, release
+year, optional synopsis; compute a confidence score, below threshold -> manual
+review (goal: few false positives). For series, season/episode matching is far
+more reliable than title alone. One TMDB ID maps to **many** mediathek rows
+(senders, SD/HD, repeats); the resolved IDs are cached on those rows, the queue
+dedups on target (tmdb id + language + resolution). AI (embeddings/classifier) or
+web search is a **later** fallback only if the classic hit rate is poor.
 
-**Download (phase 6):** source is the film list (direct media URLs). Transport:
+**Download (phase 5):** source is the film list (direct media URLs). Transport:
 plain HTTP GET for mp4/mp3/m4v/flv/m4a streamed to disk; ffmpeg for m3u8 (like
 MV's "Programmset"). HTTP is needed in exactly three places: film list, TMDB REST
 API, media download. DE/EN downloaded **separately** when present; subtitles
@@ -187,42 +182,43 @@ status in DB, no silent loss.
   external audio with this naming; set correct **language tags** on remux (else
   Jellyfin mislabels); check naming against current Jellyfin docs.
 
-**Quality upgrades (phase 12):** track current resolution (from the Jellyfin
+**Quality upgrades (phase 11):** track current resolution (from the Jellyfin
 cache); a higher resolution in the film list -> upgrade proposal. After approval:
 download + verify the new file, then swap **atomically** (library never broken).
 
-**Wishlist (phase 8):** entries by TMDB/IMDB ID, periodically checked against the
+**Wishlist (phase 7):** entries by TMDB ID, periodically checked against the
 mirror; a hit -> download proposal in the queue (subject to the gate). Just the
-automated producer reusing the manual-path machinery (phases 4-7); for movies and
-(phase 12) missing episodes.
+automated producer reusing the manual-path machinery (phases 4-6); for movies and
+(phase 11) missing episodes.
 
 ## Tech stack
 
 - **CLI (Python)** holds *all* logic -- stages config, mirror, classify, enrich,
-  match, search, review, download, remux, run (`config`/`mirror`/`classify`
-  exist; the rest land with their phases). One command per stage; the only thing
-  on the NAS and the Docker entrypoint. A stage with several modes nests them as
-  sub-actions: `classify run` writes the columns; `classify report`/`audit`/
-  `show`/`dist` are read-only inspection tools for iterating the heuristics
-  (per-sender coverage incl. `--by-confidence`/`--diff`, findings scan, row
-  sampler, value distribution). **Machine-readable mode** (`--json`, stable exit
-  codes, stable grammar) so the GUI can drive and parse it.
+  match, review, download, remux, run (`config`/`mirror`/`classify` exist; the
+  rest land with their phases). One command per stage; the only thing on the NAS
+  and the Docker entrypoint. A stage with several modes nests them as sub-actions:
+  `classify run` writes the columns; `classify report`/`audit`/`show`/`dist` are
+  read-only inspection tools for iterating the heuristics (per-sender coverage
+  incl. `--by-confidence`/`--diff`, findings scan, row sampler, value
+  distribution). **Machine-readable mode** (`--json`, stable exit codes, stable
+  grammar) so the REST layer / web UI can drive and parse it.
   - **stdout vs stderr:** stdout carries only the result (the single JSON object
     in `--json`); progress/diagnostics go to **stderr** as plain text, so a long
     stage stays visible without polluting the parseable result.
-- **Desktop GUI (Delphi):** thin shell for the test phase and non-technical
-  users; every action is a CLI call, renders the JSON. On the PC the CLI ships as
-  a **PyInstaller `.exe`** bundled with the GUI (no Python install); the GUI
-  locates and invokes it.
-- **Web UI (phase 13):** review dashboard/settings, possibly REST over `--json`.
-- **DB:** one SQLite file, accessed **only by the CLI**. **Single-user:** one
-  process at a time may open it -- during a scheduled `theke run` no other CLI
-  process works.
+- **Web UI (phase 12):** the only UI -- review dashboard, settings, history, and
+  read-only browse/search over the catalog. Talks to the CLI through a **REST
+  API** (REST over the `--json` layer); holds no logic. May later be wrapped
+  (Electron/Tauri) to run on the PC against the same API -- not formulated
+  further yet.
+- **DB:** one SQLite file. The **CLI is the only writer**; other tools may open it
+  **read-only** (DBBrowser, the web UI). **Single-writer:** at most one process
+  writes at a time -- during a scheduled `theke run` no other CLI write runs;
+  concurrent readers are fine (WAL).
 - **Video:** FFmpeg as an external process (remux/extraction) -- the only
   external runtime dependency besides Python; must be present on NAS / in the
   image.
 
-## Scheduler (in-app, phase 10)
+## Scheduler (in-app, phase 9)
 
 - `theke run` loops the stages at configured intervals in pipeline order
   (mirror -> enrich -> match -> wishlist check -> ...). Part of the app, not the
@@ -247,8 +243,8 @@ Theke/
 |   +-- classify.py   metadata extraction (phase 3, part 1)
 +-- pyproject.toml    package + console-script `theke`, dependencies
 +-- tests/            pytest suite (test_theke.py, test_classify.py)
-+-- gui/              Delphi GUI (phase 9+, not present yet)
-+-- docker/           CLI image entrypoint (phase 9+, not present yet)
++-- webui/            Web UI + REST API (phase 12, not present yet)
++-- docker/           CLI image entrypoint (phase 8+, not present yet)
 +-- analysis/         temporary review notes + scratch scripts (committed, not shipped)
 +-- CLAUDE.md
 +-- README.md
@@ -261,12 +257,12 @@ Build analysis scripts under `analysis/` whenever useful (e.g. probing
 
 - **Dev:** locally on Windows, CLI in a Python **venv**; everything native,
   scheduler included -- no Docker for dev/debug.
-- **Delivery is split:** CLI as a **Docker container** on the **NAS** (phase 9;
-  runs `theke run` from phase 10); on the **PC** the same CLI as a **PyInstaller
-  `.exe`** with the GUI (GUI is PC-only, not in the container).
+- **Delivery:** CLI as a **Docker container** on the **NAS** (phase 8; runs
+  `theke run` from phase 9). The web UI (phase 12) is served against the same CLI
+  over REST; packaging it for the PC (Electron/Tauri) is undecided and deferred.
 - **All paths/secrets via CLI params or config** (media folders, DB path, TMDB
   key) -- nothing hard-coded. Precedence: **CLI params > config file**; config is
-  JSON (`theke.json` by default). Docker (phase 9) adds env vars as a third
+  JSON (`theke.json` by default). Docker (phase 8) adds env vars as a third
   source.
 
 ## Coding Guidelines
@@ -286,7 +282,7 @@ ALWAYS:
 - **Files may grow long** -- a few clear longer units over many tiny ones.
 - **Thin command handlers.** `cmd_*` orchestrate (parse args, wire stages, emit
   JSON); real work lives in helpers taking plain inputs and returning values
-  (unit-testable without a CLI invocation). Logic in the CLI; the GUI stays a
+  (unit-testable without a CLI invocation). Logic in the CLI; the UI stays a
   shell.
 - **Idempotent stages,** re-runnable; state in the DB, not memory.
 - **CP-1252 content only** in every text file (see encoding rule on top).
