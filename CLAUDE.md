@@ -31,23 +31,14 @@ machinery.
 
 1. **Scaffolding** -- config, DB layer, CLI skeleton.
 2. **Film list fetch** (`theke fetch`) -- download and import into SQLite table
-   `mediathek` (the local mirror of the film list), keyed by `mediathek_id`
-   (MediathekView's identity: SHA-256 over sender+thema+url+website, each
-   UTF-16LE). Follows MV's update logic: check the server list id, skip if
-   unchanged; else apply the diff list (`Filmliste-diff.xz`) when usable, else
-   full download (`--force` forces full).
-3. **Enrich + match** (done). **enrich** (`theke enrich`): extract structured
-   metadata (clean title, series/season/episode, category, year, country,
-   language, flags) from free text, flip `status` '0' -> '1'. enrich is local and
-   cheap (no API) and is the search base for everything below. **match**
-   (`theke match`) is **demand-driven, not bulk**: TMDB IDs are resolved only for
-   what is actually wanted (wishlist entries, manual picks), and a resolved ID is
-   cached on the row so the resolved part of the catalog grows with use instead of
-   hammering TMDB for hundreds of thousands of unwanted rows. match runs
-   **wish-first** (a canonical TMDB ID --> matching mediathek rows), not
-   catalog-first, and flips `status` '1' -> '2' on the rows it writes. A refresh
-   must preserve existing ID assignments; vanished entries are kept (the mirror
-   only grows/updates, never deletes).
+   `mediathek` (the local mirror of the film list), keyed by `mediathek_id`.
+   Follows MV's update logic: check the server list id, skip if unchanged; else
+   apply the diff list (`Filmliste-diff.xz`) when usable, else full download.
+3. **Enrich + match**. `theke enrich` extracts structured metadata (clean title,
+   series/season/episode, category, year, country, language, flags) from free text,
+   flips `status` '0' -> '1'. It is local and cheap (no API) and is the search base
+   for everything below. `theke match` matches a given TMDB ID with mediathek rows,
+   flips `status` '1' -> '2'.
 4. **Review queue + gate** -- staging of proposals/picks + approval gate. Still
    no download. A manual pick is a `mediathek_id` (found via DBBrowser for now)
    fed to a CLI command (`theke add`) that creates a queue entry; browsable search
