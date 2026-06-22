@@ -556,6 +556,60 @@ def test_full_import_preserves_phase3_ids(tmp_path):
         conn.close()
 
 
+# A refresh overwrites a row in place (same mediathek_id) only resets status to
+# '0' when a classify-relevant column changed; sender/topic are baked into the id
+# so only title/description/duration can actually differ on an overwrite.
+_REIMPORT_BASE = dict(sender="ARD", thema="T", titel="A", url="u", website="w",
+                      beschreibung="d", dauer="00:01:00")
+
+
+def test_overwrite_preserves_status_when_only_nonclassify_changes(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
+        conn.execute("UPDATE mediathek SET status='1'")          # classified
+        changed = dict(_REIMPORT_BASE, groesse_mb="999", geo="DE-AT")
+        import_films(conn, *reversed(make_list([make_x(**changed)])))
+        rows = film_rows(conn)
+        assert len(rows) == 1                # same id -> overwrite, not a new row
+        assert rows[0]["size_mb"] == 999     # mirror column updated
+        assert rows[0]["status"] == "1"      # classification preserved
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("field,new", [
+    ("titel",        "B"),
+    ("beschreibung", "other"),
+    ("dauer",        "00:02:00"),
+])
+def test_overwrite_resets_status_when_classify_column_changes(tmp_path, field, new):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
+        conn.execute("UPDATE mediathek SET status='1'")
+        changed = dict(_REIMPORT_BASE, **{field: new})
+        import_films(conn, *reversed(make_list([make_x(**changed)])))
+        rows = film_rows(conn)
+        assert len(rows) == 1                # same id -> overwrite, not a new row
+        assert rows[0]["status"] == "0"      # classify input changed -> reclassify
+    finally:
+        conn.close()
+
+
+def test_overwrite_noop_preserves_status(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
+        conn.execute("UPDATE mediathek SET status='1'")
+        import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
+        rows = film_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["status"] == "1"      # idempotent refresh does not reclassify
+    finally:
+        conn.close()
+
+
 def test_import_keeps_vanished(tmp_path):
     conn = open_db(tmp_path)
     try:
