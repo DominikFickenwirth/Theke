@@ -41,6 +41,10 @@ class Config:
     filmliste_url:      str = "https://liste.mediathekview.de/Filmliste-akt.xz"
     filmliste_diff_url: str = "https://liste.mediathekview.de/Filmliste-diff.xz"
     filmliste_id_url:   str = "https://liste.mediathekview.de/filmliste.id"
+    tmdb_api_key:         str   = ""
+    tmdb_api_url:         str   = "https://api.themoviedb.org/3"
+    tmdb_language:        str   = "de-DE"
+    match_min_confidence: float = 0.6
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
