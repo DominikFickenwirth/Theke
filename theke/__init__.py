@@ -195,7 +195,7 @@ def db_set_meta(conn, key, value):
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
 
-# -- mirror -------------------------------------------------------------------
+# -- fetch --------------------------------------------------------------------
 # Download the MediathekView film list and import it into the mediathek table.
 # The list is an XZ-compressed, flat JSON object with duplicate keys
 # ("Filmliste" twice, then many "X"); each "X" is a 20-field array.
@@ -515,7 +515,7 @@ def _do_diff(conn, cfg):
     return {"action": "diff", **import_films(conn, films, meta)}
 
 
-def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
+def cmd_fetch(conn, cfg, args: argparse.Namespace) -> dict:
     """Refresh the film-list mirror (MediathekView update logic)"""
     if args.force or db_get_meta(conn, "filmliste_id") is None:
         return _do_full(conn, cfg)
@@ -1091,8 +1091,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("config", help="show the effective configuration")
 
-    mirror = sub.add_parser("mirror", help="refresh the film-list mirror (~30 s)", description="Refresh the film-list mirror; a full download and import takes about 30 seconds. Progress is printed to stderr.")
-    mirror.add_argument("--force", action="store_true", help="always download the full list")
+    fetch = sub.add_parser("fetch", help="refresh the film-list mirror (~30 s)", description="Refresh the film-list mirror; a full download and import takes about 30 seconds. Progress is printed to stderr.")
+    fetch.add_argument("--force", action="store_true", help="always download the full list")
 
     classify = sub.add_parser("classify", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
     csub = classify.add_subparsers(dest="classify_cmd", required=True, metavar="action")
@@ -1164,9 +1164,9 @@ def main(argv=None) -> int:
         match args.command:
             case "config":
                 result = cmd_config(cfg)
-            case "mirror":
+            case "fetch":
                 conn = db_connect(cfg.db_path)
-                try:     result = cmd_mirror(conn, cfg, args)
+                try:     result = cmd_fetch(conn, cfg, args)
                 finally: conn.close()
             case "classify":
                 conn = db_connect(cfg.db_path)
