@@ -63,6 +63,11 @@ machinery.
     missing episodes (needs the indexer).
 12. **Web UI** -- the only UI: review dashboard, settings, history, and read-only
     browse/search over the catalog (REST API to the CLI).
+13. **Catalog-wide ID browse** -- eager bulk-enrich of the movie subset
+    (`category='Movie'`, ~thousands of rows via `search/movie`, cheap) so the
+    whole movie catalog is browsable by TMDB ID, not just wish-resolved rows.
+    Same confirm step as wish-first match (year/runtime/alt-title), so no
+    unverified top hit is cached. Pure browse accelerator on top of phase 12.
 
 ## The gate (optional human-in-the-loop)
 
