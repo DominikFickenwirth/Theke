@@ -1034,8 +1034,8 @@ def _match_run(conn, cfg, args) -> dict:
                 if cur and cur != meta["tmdb_id"]:
                     log.warning("skip %s: already tmdb_id %s", m["mediathek_id"], cur)
                     continue
-                conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=? "
-                             "WHERE mediathek_id=?",
+                conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
+                             "status='2' WHERE mediathek_id=?",
                              (meta["tmdb_id"], m["confidence"], m["mediathek_id"]))
                 written += 1
             conn.execute("COMMIT")

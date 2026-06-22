@@ -251,6 +251,11 @@ def tmdb_of(conn, mediathek_id):
                         "WHERE mediathek_id=?", (mediathek_id,)).fetchone()
 
 
+def status_of(conn, mediathek_id):
+    return conn.execute("SELECT status FROM mediathek WHERE mediathek_id=?",
+                        (mediathek_id,)).fetchone()["status"]
+
+
 def test_cmd_match_run_writes_id_and_confidence(tmp_path, monkeypatch):
     conn = boot_db(tmp_path, monkeypatch)
     try:
@@ -260,6 +265,9 @@ def test_cmd_match_run_writes_id_and_confidence(tmp_path, monkeypatch):
         assert tuple(tmdb_of(conn, "m1")) == ("1234", 1.0)
         assert tuple(tmdb_of(conn, "m2")) == ("1234", 0.95)
         assert tmdb_of(conn, "m3")["tmdb_id"] == ""   # rejected, untouched
+        assert status_of(conn, "m1") == "2"           # written -> matched
+        assert status_of(conn, "m2") == "2"
+        assert status_of(conn, "m3") == "1"           # rejected, status untouched
     finally:
         conn.close()
 
@@ -270,6 +278,7 @@ def test_cmd_match_run_dry_run_writes_nothing(tmp_path, monkeypatch):
         result = cmd_match(conn, CFG, margs(dry_run=True))
         assert result["candidates"] == 2 and result["written"] == 0
         assert tmdb_of(conn, "m1")["tmdb_id"] == ""
+        assert status_of(conn, "m1") == "1"   # nothing written, status untouched
     finally:
         conn.close()
 
@@ -282,6 +291,8 @@ def test_cmd_match_run_keeps_existing_other_id(tmp_path, monkeypatch):
         assert result["written"] == 1            # m2 written, m1 conflict-skipped
         assert tmdb_of(conn, "m1")["tmdb_id"] == "999"
         assert tmdb_of(conn, "m2")["tmdb_id"] == "1234"
+        assert status_of(conn, "m1") == "1"      # conflict-skipped, status untouched
+        assert status_of(conn, "m2") == "2"
     finally:
         conn.close()
 

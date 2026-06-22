@@ -44,8 +44,9 @@ machinery.
    a resolved ID is cached on the row so the enriched part of the catalog grows
    with use instead of hammering TMDB for hundreds of thousands of unwanted rows.
    match runs **wish-first** (a canonical TMDB ID --> matching mediathek rows),
-   not catalog-first. A refresh must preserve existing ID assignments; vanished
-   entries are kept (the mirror only grows/updates, never deletes).
+   not catalog-first, and flips `status` '1' -> '2' on the rows it writes. A
+   refresh must preserve existing ID assignments; vanished entries are kept (the
+   mirror only grows/updates, never deletes).
 4. **Review queue + gate** -- staging of proposals/picks + approval gate. Still
    no download. A manual pick is a `mediathek_id` (found via DBBrowser for now)
    fed to a CLI command that creates a queue entry; browsable search is a web-UI
@@ -119,11 +120,12 @@ are safe and every stage is callable on its own.
 Single SQLite file `theke.db`. Field lists indicative.
 
 - **mediathek** -- film-list mirror, refreshed periodically. `status` is one char
-  ('0' new, '1' classified). classify (phase 3) fills `language` +
+  ('0' new, '1' classified, '2' matched). classify (phase 3) fills `language` +
   clean_title/series_name/season/episode/episode_count/category/year/country/
   flags/classify_confidence and flips status to '1'; tmdb_id/match_confidence
   are filled later by enrich+match **on demand** (only for rows a wishlist entry
-  or manual pick resolves) and cached here. All phase-3 columns survive refreshes.
+  or manual pick resolves), cached here, and flip status to '2'. All phase-3
+  columns survive refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
   size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
   url_history, geo, language, tmdb_id, match_confidence, clean_title,
