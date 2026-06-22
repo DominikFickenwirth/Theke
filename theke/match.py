@@ -14,11 +14,13 @@ import theke   # for http_get, resolved at call time (avoids an import cycle)
 # hard gate (production year assumed); runtime is a soft confirmer.
 TITLE_FLOOR            = 0.85
 SUBSTR_SIM             = 0.95   # tmdb title is a whole-token run inside clean_title
+SUBSTR_COVERAGE        = 0.60   # ...and covers at least this share of the longer side
 YEAR_TOLERANCE         = 2      # |year - release_year| above this -> rejected
 YEAR_PENALTY           = 0.03   # per year of distance, within tolerance
 NO_YEAR_FACTOR         = 0.85   # row has no year -> no gate, capped confidence
 RUNTIME_TOLERANCE      = 0.15   # relative runtime distance still counted as a hit
 RUNTIME_PENALTY_FACTOR = 0.90   # beyond tolerance: soft penalty, never a reject
+RUNTIME_FLOOR_RATIO    = 0.50   # duration below this share of runtime -> rejected (clip)
 
 ARTICLES = {"der", "die", "das", "ein", "eine", "the", "a", "an"}
 
@@ -60,13 +62,15 @@ def _is_token_run(short: list, long: list) -> bool:
 
 
 def _pair_sim(a: str, b: str) -> float:
-    """Similarity of two normalized strings: exact, whole-token containment,
-    else a character-level difflib ratio."""
+    """Similarity of two normalized strings: exact, whole-token containment with
+    enough coverage (so a short franchise/series name inside a long title does
+    not over-score), else a character-level difflib ratio."""
     if a == b:
         return 1.0
     ta, tb = a.split(), b.split()
     if _is_token_run(ta, tb) or _is_token_run(tb, ta):
-        return SUBSTR_SIM
+        if min(len(ta), len(tb)) / max(len(ta), len(tb)) >= SUBSTR_COVERAGE:
+            return SUBSTR_SIM
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
@@ -109,8 +113,12 @@ def score_match(tmdb_meta, row) -> dict:
     if rt and dur:
         dur_min = dur / 60
         runtime_delta = int(round(dur_min - rt))
-        rel = abs(dur_min - rt) / rt
-        runtime_factor = 1.0 if rel <= RUNTIME_TOLERANCE else RUNTIME_PENALTY_FACTOR
+        if dur_min < rt * RUNTIME_FLOOR_RATIO:   # clip/trailer/excerpt, not the film
+            rejected = True
+            runtime_factor = 0.0
+        else:
+            rel = abs(dur_min - rt) / rt
+            runtime_factor = 1.0 if rel <= RUNTIME_TOLERANCE else RUNTIME_PENALTY_FACTOR
     else:
         runtime_delta = None
         runtime_factor = 1.0
@@ -151,10 +159,12 @@ def tmdb_movie(cfg, tmdb_id) -> dict:
 def find_matches(conn, tmdb_meta, min_conf) -> list:
     """Scan the movie subset, score each row, return the matches (confidence >=
     min_conf, not rejected) sorted by confidence desc, then mediathek_id."""
-    rows = conn.execute("SELECT mediathek_id, clean_title, year, duration "
+    rows = conn.execute("SELECT mediathek_id, clean_title, year, duration, flags "
                         "FROM mediathek WHERE category='Movie'")
     out = []
     for r in rows:
+        if r["flags"] and "T" in r["flags"]:   # trailers are never the wanted film
+            continue
         s = score_match(tmdb_meta, r)
         if s["rejected"] or s["confidence"] < min_conf:
             continue
