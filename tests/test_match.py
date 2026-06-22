@@ -57,9 +57,16 @@ def test_title_similarity_article_cross_match():
     assert title_similarity(["Hard"], "Die Hard") == 1.0
 
 
-def test_title_similarity_whole_token_substring_is_high():
-    # tmdb title is a contiguous token-run inside clean_title (trailing artifact).
-    assert title_similarity(["Tatort"], "Tatort Der rote Schatten") == 0.95
+def test_title_similarity_substring_high_only_with_coverage():
+    # tmdb title is most of clean_title (just a trailing artifact) -> high.
+    assert title_similarity(["Bibi & Tina - Der Film"],
+                            "Bibi & Tina - Der Film HD") == 0.95
+
+
+def test_title_similarity_low_coverage_substring_not_high():
+    # a short generic title inside a long clean_title (a franchise/series name)
+    # must NOT earn the substring bonus -> falls to the fuzzy ratio, below floor.
+    assert title_similarity(["Tatort"], "Tatort Der rote Schatten") < 0.85
 
 
 def test_title_similarity_fuzzy_uses_ratio():
@@ -113,10 +120,18 @@ def test_score_missing_year_caps_confidence():
 
 
 def test_score_runtime_off_soft_penalty():
-    # title 1.0 * year 1.0 * runtime_factor 0.90; 3600 s = 60 min vs 149 min
-    s = score_match(BOOT, row(duration=3600))
+    # within the floor (>=50% of 149) but beyond tolerance: 120 min vs 149 min
+    # -> title 1.0 * year 1.0 * runtime_factor 0.90
+    s = score_match(BOOT, row(duration=7200))   # 7200 s = 120 min
     assert s["confidence"] == 0.9
-    assert s["runtime_delta"] == -89   # 60 - 149
+    assert s["runtime_delta"] == -29   # 120 - 149
+
+
+def test_score_runtime_grossly_short_is_rejected():
+    # 30 min is below 50% of 149 min -> clip/trailer, rejected outright
+    s = score_match(BOOT, row(duration=1800))   # 1800 s = 30 min
+    assert s["rejected"] is True
+    assert s["confidence"] == 0.0
 
 
 def test_score_below_title_floor_is_rejected():
@@ -194,6 +209,16 @@ def test_find_matches_respects_min_conf(tmp_path):
         insert_movie(conn, "m2", "Das Boot Extended", 1981, 9000)
         matches = find_matches(conn, BOOT, min_conf=0.99)
         assert [m["mediathek_id"] for m in matches] == ["m1"]
+    finally:
+        conn.close()
+
+
+def test_find_matches_excludes_trailers(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)   # would score 1.0
+        conn.execute("UPDATE mediathek SET flags='T' WHERE mediathek_id='m1'")
+        assert find_matches(conn, BOOT, min_conf=0.6) == []
     finally:
         conn.close()
 
