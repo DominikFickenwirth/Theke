@@ -371,14 +371,28 @@ def parse_filmliste(stream, chunk_size=1 << 16):
             yield film
 
 
+# Columns classify reads as input (== classify() signature). A refresh that
+# leaves every one of these unchanged does not invalidate an existing
+# classification, so status is preserved on such an overwrite (see _UPSERT_SQL).
+CLASSIFY_INPUT_COLS = ["sender", "topic", "title", "description", "duration"]
+
 # Columns written on every import. language/tmdb_id/imdb_id/match_confidence are
 # owned by phase 3 and never touched here, so an ID assignment survives every
-# refresh.
+# refresh. status is special: an overwrite resets it to '0' (reclassify) only
+# when a classify-relevant column changed, else the existing status is kept.
 MIRROR_COLS = [
     "mediathek_id", "status", "sender", "topic", "title", "description",
     "date", "duration", "size_mb", "url_video", "url_video_small",
     "url_video_hd", "url_subtitle", "url_website", "url_history", "geo",
 ]
+
+# Null-safe (IS NOT) compare of the existing row against the incoming (excluded)
+# values; any classify-input change flips status to '0', otherwise it is kept.
+_STATUS_SET = (
+    "status=CASE WHEN "
+    + " OR ".join(f"{c} IS NOT excluded.{c}" for c in CLASSIFY_INPUT_COLS)
+    + " THEN '0' ELSE status END"
+)
 
 _UPSERT_SQL = (
     "INSERT INTO mediathek ({cols}) VALUES ({vals}) "
@@ -386,7 +400,9 @@ _UPSERT_SQL = (
 ).format(
     cols=", ".join(MIRROR_COLS),
     vals=", ".join(":" + c for c in MIRROR_COLS),
-    sets=", ".join(f"{c}=excluded.{c}" for c in MIRROR_COLS if c != "mediathek_id"),
+    sets=", ".join([_STATUS_SET]
+                   + [f"{c}=excluded.{c}" for c in MIRROR_COLS
+                      if c not in ("mediathek_id", "status")]),
 )
 
 
@@ -513,8 +529,8 @@ def cmd_mirror(conn, cfg, args: argparse.Namespace) -> dict:
 # Extract structured metadata from the free-text fields and flip status 0 -> 1.
 
 _CLASSIFY_READ = (
-    "SELECT mediathek_id, sender, topic, title, description, duration "
-    "FROM mediathek WHERE status='0'"
+    "SELECT mediathek_id, " + ", ".join(CLASSIFY_INPUT_COLS)
+    + " FROM mediathek WHERE status='0'"
 )
 
 _UPDATE_SQL = (
