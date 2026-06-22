@@ -481,7 +481,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 2   # phase 2 schema + phase 3 classify cols
+        assert user_version(conn) == 3   # phase 2 schema + phase 3 classify cols (two steps)
     finally:
         conn.close()
 

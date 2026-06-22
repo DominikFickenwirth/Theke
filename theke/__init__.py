@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from theke.classify import classify, CLASSIFY_COLS, CATWORD
+from theke.classify import classify, looks_like_country, GENRE_SET, CLASSIFY_COLS, CATWORD
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -128,6 +128,10 @@ MIGRATIONS: list[tuple[str, ...]] = [
         "ALTER TABLE mediathek ADD COLUMN country             TEXT",
         "ALTER TABLE mediathek ADD COLUMN flags               TEXT",
         "ALTER TABLE mediathek ADD COLUMN classify_confidence REAL",
+    ),
+    (
+        "ALTER TABLE mediathek ADD COLUMN genre TEXT",
+        "ALTER TABLE mediathek ADD COLUMN slot  TEXT",
     ),
 ]
 
@@ -581,8 +585,8 @@ def _classify_rows(conn, rows, batch=5000) -> int:
 
 REPORT_MIN_ROWS = 1000   # senders below this are omitted (long tail of one-offs)
 
-_REPORT_FIELDS = ["year", "country", "se", "cat", "unklar",
-                  "flag_a", "flag_s", "flag_u", "flag_t"]
+_REPORT_FIELDS = ["year", "country", "se", "cat", "unklar", "genre", "slot", "events",
+                  "flag_a", "flag_e", "flag_s", "flag_u", "flag_t"]
 
 # Per-confidence-level buckets for --by-confidence: deterministic levels emitted
 # by classify._confidence (0.9/0.8/0.5/0.2). Counted always, summarized only when
@@ -617,12 +621,15 @@ def _tally(counter, row):
     if row["season"] is not None or row["episode"] is not None: counter["se"] += 1
     conf = row["classify_confidence"]
     if conf is not None and conf >= 0.8: counter["cat"] += 1   # category from a real signal
-    if row["category"] == "unklar": counter["unklar"] += 1
+    if row["category"] is None:     counter["unklar"] += 1     # NULL = unknown medium
+    if row["genre"] is not None:    counter["genre"] += 1
+    if row["slot"] is not None:     counter["slot"] += 1
+    if row["category"] == "Event":  counter["events"] += 1
     if conf is not None:
         for key, level in _CONF_LEVELS:
             if round(conf, 2) == level: counter[key] += 1
     flags = row["flags"] or ""
-    for letter in "asut":
+    for letter in "aesut":
         if letter.upper() in flags: counter["flag_" + letter] += 1
 
 
@@ -652,8 +659,8 @@ def classify_report(conn, live: bool, min_rows=REPORT_MIN_ROWS, senders=None,
             _tally(acc.setdefault(r["sender"], _new_counter()), meta)
     else:
         rows = conn.execute("SELECT sender, year, country, season, episode, "
-                            "category, classify_confidence, flags FROM mediathek "
-                            + where, params)
+                            "category, classify_confidence, flags, genre, slot "
+                            "FROM mediathek " + where, params)
         for r in rows:
             _tally(acc.setdefault(r["sender"], _new_counter()), r)
     return {s: _summarize(c, by_confidence) for s, c in acc.items() if c["n"] >= min_rows}
@@ -697,8 +704,9 @@ def _print_report_diff(diff):
 
 
 _REPORT_TABLE_COLS = [("year", "year"), ("country", "cntry"), ("se", "S/E"),
-                      ("cat", "cat"), ("unklar", "unkl"), ("flag_a", "A"),
-                      ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
+                      ("cat", "cat"), ("unklar", "unkl"), ("genre", "genre"),
+                      ("slot", "slot"), ("events", "evt"), ("flag_a", "A"),
+                      ("flag_e", "E"), ("flag_s", "S"), ("flag_u", "U"), ("flag_t", "T")]
 _CONF_TABLE_COLS = [("c90", "c.9"), ("c80", "c.8"), ("c50", "c.5"), ("c20", "c.2")]
 
 
@@ -743,17 +751,11 @@ def _classify_report_cmd(conn, args) -> dict:
 # assembles {sender: {check: ...}}. Read-only.
 
 # Topic that is itself a bare format/genre word (not a real series). CATWORD has
-# no bare "Film"/"Doku"; add them and the curated genre rubrics.
-_BARE_TOPIC = set(re.split(r"\|", CATWORD)) | {
-    "Film", "Doku", "Reise", "Natur", "Musik", "Tiere", "Geschichte", "Politik",
-    "Politik und Gesellschaft", "Sport", "Nachrichten", "Wirtschaft", "Europa",
-    "Nahost", "Deutschland", "Esskulturen", "Kultur", "Kulturdoku",
-    "Gesellschaft", "Wissen", "Wissenschaftsdoku", "Buch", "Theater", "Märchen"}
+# no bare "Film"/"Doku"; add them and the curated genre rubrics (GENRE_SET).
+_BARE_TOPIC = set(re.split(r"\|", CATWORD)) | {"Film", "Doku"} | GENRE_SET
 _TOPIC_MARKER = re.compile(
     r"\((?:mit\s+)?(?:Gebärdensprache|Audiodeskription|Hörfassung|klare Sprache"
     r"|Originalversion|mit Untertitel|OmU|OmdU|ÖGS|OV)\)?", re.I)
-_BAD_COUNTRY = re.compile(
-    r"^[a-zäöü·\"]|\b(von|über|aus|im|mit|der|die|das|und|dem|den|eine?r?|Jahr|vom)\b")
 _TITLE_CREDIT = re.compile(r"\b(?:Film|" + CATWORD + r")\s+von\s+\S", re.I)
 _EPISODIC = re.compile(r"Staffel.*Folge|,\s*Folge\s+\d|\bTeil\s+\d|\b\d+\s*/\s*\d+\b", re.I)
 
@@ -790,7 +792,7 @@ def _check_topic_marker(conn, where, params, limit):
 
 def _check_country_shape(conn, where, params, limit):
     return _audit_scan(conn, where, params, "country",
-                       lambda r: r["country"] if r["country"] and _BAD_COUNTRY.search(r["country"]) else None, limit)
+                       lambda r: r["country"] if r["country"] and not looks_like_country(r["country"]) else None, limit)
 
 
 def _check_title_credit(conn, where, params, limit):

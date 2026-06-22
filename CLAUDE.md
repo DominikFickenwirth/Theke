@@ -37,10 +37,15 @@ machinery.
    (`Filmliste-diff.xz`) when usable, else full download (`--force` forces full).
 3. **Classify + enrich + match** (partly done). **classify** (done): extract
    structured metadata (clean title, series/season/episode, category, year,
-   country, language, flags) from free text, flip `status` '0' -> '1'.
-   **enrich + match** (to come): add TMDB/IMDB IDs, fuzzy match with confidence.
-   A refresh must preserve existing ID assignments; vanished entries are kept
-   (the mirror only grows/updates, never deletes).
+   country, language, flags) from free text, flip `status` '0' -> '1'. classify
+   is local and cheap (no API) and is the search base for everything below.
+   **enrich + match** (to come) are **demand-driven, not bulk**: TMDB/IMDB IDs are
+   resolved only for what is actually wanted (wishlist entries, manual picks), and
+   a resolved ID is cached on the row so the enriched part of the catalog grows
+   with use instead of hammering TMDB for hundreds of thousands of unwanted rows.
+   match runs **wish-first** (a canonical TMDB/IMDB ID --> matching mediathek
+   rows), not catalog-first. A refresh must preserve existing ID assignments;
+   vanished entries are kept (the mirror only grows/updates, never deletes).
 4. **DB search** -- read-only query/browse; a pick by ID becomes a review-queue
    entry (phase 5), not a download.
 5. **Review queue + gate** -- staging of proposals/picks + approval gate. Still
@@ -80,7 +85,7 @@ writes/deletes files in the library sits behind the gate.
 ## Architecture / pipeline
 
 ```
-liste.mediathekview.de --> [Mirror] --> mediathek table --> [ID Enricher (TMDB/IMDB)]
+liste.mediathekview.de --> [Mirror] --> mediathek table <-- [ID Enricher (TMDB/IMDB), on demand]
                                               |
 Jellyfin (NFO files) --> [Indexer] -----------+  (phase 11)
                                               |
@@ -111,7 +116,9 @@ Single SQLite file `theke.db`. Field lists indicative.
   ('0' new, '1' classified). classify (phase 3) fills `language` +
   clean_title/series_name/season/episode/episode_count/category/year/country/
   flags/classify_confidence and flips status to '1'; tmdb_id/imdb_id/
-  match_confidence wait for enrich+match. All phase-3 columns survive refreshes.
+  match_confidence are filled later by enrich+match **on demand** (only for rows a
+  wishlist entry or manual pick resolves) and cached here. All phase-3 columns
+  survive refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
   size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
   url_history, geo, language, tmdb_id, imdb_id, match_confidence, clean_title,
@@ -132,21 +139,31 @@ Single SQLite file `theke.db`. Field lists indicative.
 
 ## Stage details
 
-**DB search (phase 4):** read-only over the enriched catalog (title/topic
-substring, TMDB/IMDB ID, sender, date, match status). A pick by ID goes to the
-queue (phase 5), not a direct download -- the minimal manual path the wishlist
-later automates; both feed the same queue. Needs indexes on searched columns;
-FTS5 over title/topic/description is an option to evaluate.
+**DB search (phase 4):** read-only over the **classify-normalized** catalog
+(clean_title/series_name/topic substring, year, sender, date, category; plus
+TMDB/IMDB ID and match status where already resolved). Works without TMDB -- the
+classify columns are filled locally for every row. A pick by ID goes to the queue
+(phase 5), not a direct download, and triggers TMDB resolution **on demand** for
+that row (cached afterwards). The minimal manual path the wishlist later
+automates; both feed the same queue. Needs indexes on searched columns; FTS5 over
+title/topic/description is an option to evaluate.
 
-**Matching (core problem):** film-list row <-> TMDB/IMDB ID, pragmatically: fuzzy
-match on title+year (token/Levenshtein); for series also season/episode (far more
-reliable); confirm with duration, release year, optional synopsis; compute a
-confidence score, below threshold -> manual review (goal: few false positives).
-TMDB exposes the IMDB ID as an external ID, so matching TMDB and taking IMDB from
-there usually suffices. One TMDB/IMDB ID maps to **many** mediathek rows (senders,
-SD/HD, repeats); the queue dedups on target (tmdb/imdb id + language +
-resolution), search may still list all rows. AI (embeddings/classifier) or web
-search is a **later** fallback only if the classic hit rate is poor.
+**Matching (core problem):** the hard part is fuzzy-matching messy German
+film-list free text against a canonical title -- that cost is unavoidable; the
+design only controls *when* and *how often* it runs. Theke runs it **wish-first
+and lazy**: drive from a canonical TMDB/IMDB ID (a wishlist entry or a resolved
+manual pick), take that entry's title variants (DE + original + alternates) + year
++ (for series) the season/episode list from TMDB, and search the
+classify-normalized columns for matching mediathek rows -- instead of bulk-
+enriching the whole catalog catalog-first (MV-row --> which ID?). Confirm a candidate with duration,
+release year, optional synopsis; compute a confidence score, below threshold ->
+manual review (goal: few false positives). For series, season/episode matching is
+far more reliable than title alone. TMDB exposes the IMDB ID as an external ID, so
+matching TMDB and taking IMDB from there usually suffices. One TMDB/IMDB ID maps
+to **many** mediathek rows (senders, SD/HD, repeats); the resolved IDs are cached
+on those rows, the queue dedups on target (tmdb/imdb id + language + resolution),
+search may still list all rows. AI (embeddings/classifier) or web search is a
+**later** fallback only if the classic hit rate is poor.
 
 **Download (phase 6):** source is the film list (direct media URLs). Transport:
 plain HTTP GET for mp4/mp3/m4v/flv/m4a streamed to disk; ffmpeg for m3u8 (like
