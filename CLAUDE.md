@@ -30,27 +30,19 @@ download --> remux), then add the **wishlist** as automation on the same
 machinery.
 
 1. **Scaffolding** -- config, DB layer, CLI skeleton.
-2. **Film list mirror** -- download and import into SQLite table `mediathek`,
-   keyed by `mediathek_id` (MediathekView's identity: SHA-256 over
-   sender+thema+url+website, each UTF-16LE). Follows MV's update logic: check the
-   server list id, skip if unchanged; else apply the diff list
-   (`Filmliste-diff.xz`) when usable, else full download (`--force` forces full).
-3. **Classify + enrich + match** (partly done). **classify** (done): extract
-   structured metadata (clean title, series/season/episode, category, year,
-   country, language, flags) from free text, flip `status` '0' -> '1'. classify
-   is local and cheap (no API) and is the search base for everything below.
-   **enrich + match** (to come) are **demand-driven, not bulk**: TMDB IDs are
-   resolved only for what is actually wanted (wishlist entries, manual picks), and
-   a resolved ID is cached on the row so the enriched part of the catalog grows
-   with use instead of hammering TMDB for hundreds of thousands of unwanted rows.
-   match runs **wish-first** (a canonical TMDB ID --> matching mediathek rows),
-   not catalog-first, and flips `status` '1' -> '2' on the rows it writes. A
-   refresh must preserve existing ID assignments; vanished entries are kept (the
-   mirror only grows/updates, never deletes).
+2. **Film list fetch** (`theke fetch`) -- download and import into SQLite table
+   `mediathek` (the local mirror of the film list), keyed by `mediathek_id`.
+   Follows MV's update logic: check the server list id, skip if unchanged; else
+   apply the diff list (`Filmliste-diff.xz`) when usable, else full download.
+3. **Enrich + match**. `theke enrich` extracts structured metadata (clean title,
+   series/season/episode, category, year, country, language, flags) from free text,
+   flips `status` '0' -> '1'. It is local and cheap (no API) and is the search base
+   for everything below. `theke match` matches a given TMDB ID with mediathek rows,
+   flips `status` '1' -> '2'.
 4. **Review queue + gate** -- staging of proposals/picks + approval gate. Still
    no download. A manual pick is a `mediathek_id` (found via DBBrowser for now)
-   fed to a CLI command that creates a queue entry; browsable search is a web-UI
-   concern (last phase).
+   fed to a CLI command (`theke add`) that creates a queue entry; browsable search
+   is a web-UI concern (last phase).
 5. **Downloader** -- plain HTTP download of approved items (DE/EN separate,
    subtitles), manual via CLI.
 6. **Remuxer** -- FFmpeg pipeline into the Jellyfin folders. **Manual path
@@ -64,11 +56,12 @@ machinery.
     missing episodes (needs the indexer).
 12. **Web UI** -- the only UI: review dashboard, settings, history, and read-only
     browse/search over the catalog (REST API to the CLI).
-13. **Catalog-wide ID browse** -- eager bulk-enrich of the movie subset
-    (`category='Movie'`, ~thousands of rows via `search/movie`, cheap) so the
-    whole movie catalog is browsable by TMDB ID, not just wish-resolved rows.
-    Same confirm step as wish-first match (year/runtime/alt-title), so no
-    unverified top hit is cached. Pure browse accelerator on top of phase 12.
+13. **Catalog-wide ID browse** (`theke match --bulk`) -- eager bulk-match of the
+    movie subset (`category='Movie'`, ~thousands of rows via `search/movie`,
+    cheap) so the whole movie catalog is browsable by TMDB ID, not just
+    wish-resolved rows. Same confirm step as wish-first match
+    (year/runtime/alt-title), so no unverified top hit is cached. Pure browse
+    accelerator on top of phase 12.
 
 ## The gate (optional human-in-the-loop)
 
@@ -82,8 +75,8 @@ Review is a **configurable gate**, not a hard rule:
 **Side-effect boundary:** DB-only operations run automatically; anything that
 writes/deletes files in the library sits behind the gate.
 
-- Automatic (DB-only): mirror, classify, enrich, match, wishlist checks,
-  proposal generation. Read-only browse is external for now (DBBrowser).
+- Automatic (DB-only): fetch, enrich, match, wishlist checks, proposal
+  generation. Read-only browse is external for now (DBBrowser).
 - Gated (touches the library): starting downloads, replacing files.
 - After approval, automatic: download, remux, placement.
 - Quality upgrades are most sensitive (they delete files): proposal automatic,
@@ -92,13 +85,16 @@ writes/deletes files in the library sits behind the gate.
 ## Architecture / pipeline
 
 ```
-liste.mediathekview.de --> [Mirror] --> mediathek table <-- [ID Enricher (TMDB), on demand]
+liste.mediathekview.de --> [Fetch] --> mediathek table
+                                              |
+                                       [Enrich] (metadata, local)
+                                              |
+                                              V
+                              [Match] (TMDB, on demand) tags rows
                                               |
 Jellyfin (NFO files) --> [Indexer] -----------+  (phase 10)
                                               |
                                               V
-                                         [Matcher]
-                                              |
    [Manual pick] (CLI, by id) ------------->  +  <------------ [Wishlist] (auto)
                                               |
                                               V
@@ -120,17 +116,17 @@ are safe and every stage is callable on its own.
 Single SQLite file `theke.db`. Field lists indicative.
 
 - **mediathek** -- film-list mirror, refreshed periodically. `status` is one char
-  ('0' new, '1' classified, '2' matched). classify (phase 3) fills `language` +
+  ('0' new, '1' enriched, '2' matched). enrich (phase 3) fills `language` +
   clean_title/series_name/season/episode/episode_count/category/year/country/
-  flags/classify_confidence and flips status to '1'; tmdb_id/match_confidence
-  are filled later by enrich+match **on demand** (only for rows a wishlist entry
+  flags/enrich_confidence and flips status to '1'; tmdb_id/match_confidence
+  are filled later by match **on demand** (only for rows a wishlist entry
   or manual pick resolves), cached here, and flip status to '2'. All phase-3
   columns survive refreshes.
   `status, mediathek_id, sender, topic, title, description, date, duration,
   size_mb, url_video, url_video_small, url_video_hd, url_subtitle, url_website,
   url_history, geo, language, tmdb_id, match_confidence, clean_title,
   series_name, season, episode, episode_count, category, year, country, flags,
-  classify_confidence`
+  enrich_confidence`
   Plus a `meta` key/value table (filmliste_id, filmliste_created).
 - **queue** -- review queue + download record in one. Lifecycle
   `proposed -> approved -> downloading -> done / failed / cancelled`.
@@ -149,7 +145,7 @@ Single SQLite file `theke.db`. Field lists indicative.
 externally (DBBrowser for SQLite, read-only). A pick is a `mediathek_id` handed
 to a CLI command that creates a queue entry and triggers TMDB resolution **on
 demand** for that row (cached afterwards). Same queue the wishlist later feeds.
-The browsable search itself (over the classify-normalized columns, indexes / FTS5
+The browsable search itself (over the enrich-normalized columns, indexes / FTS5
 to evaluate) lands with the web UI (last phase).
 
 **Matching (core problem):** the hard part is fuzzy-matching messy German
@@ -157,8 +153,8 @@ film-list free text against a canonical title -- that cost is unavoidable; the
 design only controls *when* and *how often* it runs. Theke runs it **wish-first
 and lazy**: drive from a canonical TMDB ID (a wishlist entry or a resolved manual
 pick), take that entry's title variants (DE + original + alternates) + year + (for
-series) the season/episode list from TMDB, and search the classify-normalized
-columns for matching mediathek rows -- instead of bulk-enriching the whole catalog
+series) the season/episode list from TMDB, and search the enrich-normalized
+columns for matching mediathek rows -- instead of bulk-matching the whole catalog
 catalog-first (MV-row --> which ID?). Confirm a candidate with duration, release
 year, optional synopsis; compute a confidence score, below threshold -> manual
 review (goal: few false positives). For series, season/episode matching is far
@@ -200,11 +196,12 @@ automated producer reusing the manual-path machinery (phases 4-6); for movies an
 
 ## Tech stack
 
-- **CLI (Python)** holds *all* logic -- stages config, mirror, classify, enrich,
-  match, review, download, remux, run (`config`/`mirror`/`classify` exist; the
-  rest land with their phases). One command per stage; the only thing on the NAS
-  and the Docker entrypoint. A stage with several modes nests them as sub-actions:
-  `classify run` writes the columns; `classify report`/`audit`/`show`/`dist` are
+- **CLI (Python)** holds *all* logic -- stages config, fetch, enrich, match, add,
+  download, remux, run (`config`/`fetch`/`enrich`/`match` exist; the rest land
+  with their phases). Command names follow **git-subcommand conventions**
+  (`fetch`, `add`, ...). One command per stage; the only thing on the NAS and the
+  Docker entrypoint. A stage with several modes nests them as sub-actions:
+  `enrich run` writes the columns; `enrich report`/`audit`/`show`/`dist` are
   read-only inspection tools for iterating the heuristics (per-sender coverage
   incl. `--by-confidence`/`--diff`, findings scan, row sampler, value
   distribution). **Machine-readable mode** (`--json`, stable exit codes, stable
@@ -228,7 +225,7 @@ automated producer reusing the manual-path machinery (phases 4-6); for movies an
 ## Scheduler (in-app, phase 9)
 
 - `theke run` loops the stages at configured intervals in pipeline order
-  (mirror -> enrich -> match -> wishlist check -> ...). Part of the app, not the
+  (fetch -> enrich -> match -> wishlist check -> ...). Part of the app, not the
   deployment.
 - **One entrypoint, two modes:** a single stage once (`theke <stage>`) or the
   full loop (`theke run`). One-shot exists from the start so the image ships and
@@ -246,10 +243,10 @@ many tiny files.
 ```
 Theke/
 +-- theke/            Python package (all logic)
-|   +-- __init__.py   config, DB layer, mirror, CLI
-|   +-- classify.py   metadata extraction (phase 3, part 1)
+|   +-- __init__.py   config, DB layer, fetch, match, CLI
+|   +-- enrich.py     metadata extraction (phase 3, part 1)
 +-- pyproject.toml    package + console-script `theke`, dependencies
-+-- tests/            pytest suite (test_theke.py, test_classify.py)
++-- tests/            pytest suite (test_theke.py, test_enrich.py, test_match.py)
 +-- webui/            Web UI + REST API (phase 12, not present yet)
 +-- docker/           CLI image entrypoint (phase 8+, not present yet)
 +-- analysis/         temporary review notes + scratch scripts (committed, not shipped)
@@ -310,7 +307,7 @@ KEEP IN MIND:
 - **Command wiring** in two places: a subparser in `build_parser` (flags inline)
   and a `case` in `main`. Global options (e.g. `--config`) and the command name
   read directly off `args`; subcommand flags only in that command's handler (e.g.
-  `args.force` in `cmd_mirror`).
+  `args.force` in `cmd_fetch`).
 
 NEVER:
 - Describe problems that no longer exist (or never applied). State the design as

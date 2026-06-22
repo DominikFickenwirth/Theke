@@ -7,8 +7,8 @@ eine dünne Delphi-Desktop-GUI steuert dieselbe CLI.
 
 Architektur und Phasenplan siehe `CLAUDE.md`.
 
-Status: Phasen 1-2 fertig, Phase 3 (classify) teilweise -- verfügbar sind die
-Befehle `config`, `mirror` und `classify`.
+Status: Phasen 1-3 fertig -- verfügbar sind die Befehle `config`, `fetch`,
+`enrich` und `match`.
 
 ## Voraussetzungen
 
@@ -99,7 +99,7 @@ theke config                     # db_path = theke.db, filmliste_url = ...
 theke --db build/theke.db --json config
 ```
 
-## `theke mirror`
+## `theke fetch`
 
 Aktualisiert den Filmlisten-Spiegel (Tabelle `mediathek`) nach der
 MediathekView-Update-Logik: Server-Listen-ID prüfen -> bei Gleichstand
@@ -112,22 +112,22 @@ aktualisiert, gelöscht wird nie.
 | `--force` | Immer die volle Liste laden (Diff/Skip übergehen).  |
 
 ```powershell
-theke --db build/theke.db mirror           # action = full|diff|skip, imported = N
-theke --db build/theke.db mirror --force   # erzwingt vollen Download
+theke --db build/theke.db fetch           # action = full|diff|skip, imported = N
+theke --db build/theke.db fetch --force   # erzwingt vollen Download
 ```
 
-## `theke classify`
+## `theke enrich`
 
 Stufe 3 (Teil 1): extrahiert strukturierte Metadaten aus den Freitextfeldern.
 Ein Pflicht-Unterbefehl wählt die Aktion: `run` schreibt, die übrigen
 (`report`/`audit`/`show`/`dist`) sind reine Lese-Werkzeuge zum Iterieren an der
 Heuristik.
 
-### `classify run`
+### `enrich run`
 
-Klassifiziert Zeilen in die classify-Spalten (`clean_title`, `series_name`,
+Reichert Zeilen an: füllt die enrich-Spalten (`clean_title`, `series_name`,
 `genre`, `slot`, `season`, `episode`, `episode_count`, `category`, `year`,
-`country`, `language`, `flags`, `classify_confidence`) und setzt `status` 0 -> 1.
+`country`, `language`, `flags`, `enrich_confidence`) und setzt `status` 0 -> 1.
 Standardmäßig nur neue Zeilen (`status='0'`). `series_name` trägt nur echte
 Serien-/Sendungsnamen; Rubriken landen in `genre` (kuratiertes Set), Dachmarken/
 Sendeplätze in `slot`, reine Format-Topics in `category` (Wert `Events` für
@@ -135,45 +135,45 @@ Festivals/Preise).
 
 | Option    | Wirkung                                          |
 | --------- | ------------------------------------------------ |
-| `--force` | Alle Zeilen neu klassifizieren, nicht nur neue.  |
+| `--force` | Alle Zeilen neu anreichern, nicht nur neue.      |
 
 ```powershell
-theke --db build/theke.db classify run            # classified = N
-theke --db build/theke.db classify run --force    # alles neu
+theke --db build/theke.db enrich run            # enriched = N
+theke --db build/theke.db enrich run --force    # alles neu
 ```
 
 `flags` ist ein sortierter Buchstaben-String: `A` Audiodeskription, `E` Einfache/
 Leichte Sprache, `S` Gebärdensprache, `U` eingebrannte Untertitel, `T`
 Trailer/Vorschau.
-`classify_confidence` ist deterministisch: `0.9` (Metazeile/ARTE-Topic), `0.8`
+`enrich_confidence` ist deterministisch: `0.9` (Metazeile/ARTE-Topic), `0.8`
 (Topic ist selbst ein Kategoriewort oder ein Event), `0.5` (Dauer-Prior), `0.2`
 (`category` = `unklar`).
 
-### `classify report`
+### `enrich report`
 
-Per-Sender-Abdeckung der classify-Felder (% gefüllter Zeilen). Liest standardmäßig
+Per-Sender-Abdeckung der enrich-Felder (% gefüllter Zeilen). Liest standardmäßig
 die gespeicherten Spalten.
 
 | Option            | Wirkung                                                          |
 | ----------------- | ---------------------------------------------------------------- |
 | `--sender X[,Y]`  | Nur diese Sender (kommagetrennt).                                |
 | `--min-rows N`    | Sender mit weniger Zeilen weglassen (Standard 1000; `0` = alle). |
-| `--live`          | `classify()` live ausführen statt gespeicherte Spalten zu lesen. |
+| `--live`          | `enrich()` live ausführen statt gespeicherte Spalten zu lesen. |
 | `--diff`          | Churn je Feld: gespeicherte Spalten vs. ein Live-Lauf.           |
 | `--by-confidence` | Die `cat`-Spalte in Spalten je Konfidenzstufe aufteilen.         |
 
 ```powershell
-theke --db build/theke.db classify report                     # alle Sender (>=1000)
-theke --db build/theke.db classify report --sender ZDF,ARTE.DE --by-confidence
-theke --db build/theke.db classify report --live --diff       # Wirkung einer Heuristik-Änderung
+theke --db build/theke.db enrich report                     # alle Sender (>=1000)
+theke --db build/theke.db enrich report --sender ZDF,ARTE.DE --by-confidence
+theke --db build/theke.db enrich report --live --diff       # Wirkung einer Heuristik-Änderung
 ```
 
-### `classify audit`
+### `enrich audit`
 
 Findet Zeilen, die eine Heuristik sichtbar falsch behandelt hat (Abdeckung zählt
 als gefüllt, aber nicht korrekt). Je Sender/Check `count` + Beispiele. Die Checks
 `country-shape`, `title-credit`, `episodic-unparsed` greifen nur auf bereits
-klassifizierten Zeilen.
+angereicherten Zeilen.
 
 | Option               | Wirkung                                            |
 | -------------------- | -------------------------------------------------- |
@@ -185,13 +185,13 @@ Checks: `bare-topic`, `case-variants`, `topic-pipe`, `topic-marker`,
 `country-shape`, `title-credit`, `episodic-unparsed`.
 
 ```powershell
-theke --db build/theke.db classify audit
-theke --db build/theke.db classify audit --check country-shape,title-credit --sender ZDF
+theke --db build/theke.db enrich audit
+theke --db build/theke.db enrich audit --check country-shape,title-credit --sender ZDF
 ```
 
-### `classify show`
+### `enrich show`
 
-Stichprobe: gibt die classify-Spalten passender Zeilen aus. Filter werden
+Stichprobe: gibt die enrich-Spalten passender Zeilen aus. Filter werden
 UND-verknüpft; `FIELD` muss eine `mediathek`-Spalte sein (Werte werden gebunden,
 nie interpoliert).
 
@@ -202,16 +202,16 @@ nie interpoliert).
 | `--eq FIELD VALUE`      | `FIELD = VALUE` (wiederholbar).                  |
 | `--null FIELD`          | `FIELD IS NULL` (wiederholbar).                  |
 | `--not-null FIELD`      | `FIELD IS NOT NULL` (wiederholbar).              |
-| `--min-conf X`          | `classify_confidence >= X`.                      |
-| `--max-conf X`          | `classify_confidence <= X`.                      |
+| `--min-conf X`          | `enrich_confidence >= X`.                      |
+| `--max-conf X`          | `enrich_confidence <= X`.                      |
 | `--limit N`             | Maximale Zeilenzahl (Standard 20).               |
 
 ```powershell
-theke --db build/theke.db classify show --eq category unklar --limit 10
-theke --db build/theke.db classify show --sender ARTE.DE --not-null season --like title "%Staffel%"
+theke --db build/theke.db enrich show --eq category unklar --limit 10
+theke --db build/theke.db enrich show --sender ARTE.DE --not-null season --like title "%Staffel%"
 ```
 
-### `classify dist`
+### `enrich dist`
 
 Top-N-Häufigkeiten der Werte eines Feldes (absteigend), z. B. zum Sichten der
 Kategorie- oder Länder-Verteilung.
@@ -223,6 +223,6 @@ Kategorie- oder Länder-Verteilung.
 | `--limit N`      | Top-N Werte (Standard 30).               |
 
 ```powershell
-theke --db build/theke.db classify dist --field category
-theke --db build/theke.db classify dist --field country --sender ARTE.DE --limit 15
+theke --db build/theke.db enrich dist --field category
+theke --db build/theke.db enrich dist --field country --sender ARTE.DE --limit 15
 ```

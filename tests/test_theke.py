@@ -254,11 +254,11 @@ def test_cli_broken_config_json_error(tmp_path, capsys):
 
 def test_cli_locked_db_exits_3(tmp_path, capsys, monkeypatch):
     import theke
-    monkeypatch.setattr(theke, "cmd_mirror", lambda conn, cfg, args: {"ok": True})
+    monkeypatch.setattr(theke, "cmd_fetch", lambda conn, cfg, args: {"ok": True})
     db = str(tmp_path / "t.db")
     conn = db_connect(db, migrations=[])
     try:
-        assert main(["--json", "--db", db, "mirror"]) == 3
+        assert main(["--json", "--db", db, "fetch"]) == 3
         assert "error" in json.loads(capsys.readouterr().out)
     finally:
         conn.close()
@@ -272,7 +272,7 @@ def test_cli_missing_command_exits_2(capsys):
     assert main([]) == 2
 
 
-# -- mirror: conversions -----------------------------------------------------
+# -- fetch: conversions -----------------------------------------------------
 
 def test_film_id_matches_utf16le_sha256_spec():
     # sha256("ARDTatorthttp://v/1.mp4http://w/1".encode("utf-16-le"))
@@ -354,7 +354,7 @@ def test_parse_date_garbage_is_none():
     assert parse_date("not-a-date", "xx", "nope") is None
 
 
-# -- mirror: parse_filmliste -------------------------------------------------
+# -- fetch: parse_filmliste -------------------------------------------------
 
 # Column-name header (second "Filmliste"); content is ignored by the parser.
 _COLNAMES = ["Sender", "Thema", "Titel", "Datum", "Zeit", "Dauer"]
@@ -430,9 +430,9 @@ def test_parse_film_id_uses_inherited_sender_and_topic():
         "693ce7b99d4ac82947edbc4f97530825b8eddf69c13f81828388abaafb8250a1"
 
 
-def test_parse_status_always_unclassified():
-    # mirror marks every row status '0' (unclassified); the source 'neu' flag no
-    # longer drives status -- classify flips it to '1'.
+def test_parse_status_always_unenriched():
+    # mirror marks every row status '0' (unenriched); the source 'neu' flag no
+    # longer drives status -- enrich flips it to '1'.
     rows = [make_x(titel="new", neu="true"),
             make_x(titel="old", neu="false"),
             make_x(titel="blank")]
@@ -463,7 +463,7 @@ def test_parse_metadata_only_no_films():
     assert films == []
 
 
-# -- mirror: migration + full import -----------------------------------------
+# -- fetch: migration + full import -----------------------------------------
 
 def open_db(tmp_path):
     return db_connect(str(tmp_path / "theke.db"))  # uses real MIGRATIONS
@@ -481,7 +481,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 3   # phase 2 schema + phase 3 classify cols (two steps)
+        assert user_version(conn) == 4   # phase 2 schema + phase 3 enrich cols + rename
     finally:
         conn.close()
 
@@ -503,7 +503,7 @@ def test_full_import_inserts_rows(tmp_path):
         assert rows[0]["status"] == "0"
         assert rows[0]["duration"] == 60
         assert rows[0]["date"] == "2026-06-14 20:15:00"
-        assert rows[1]["status"] == "0"   # every mirrored row is unclassified
+        assert rows[1]["status"] == "0"   # every mirrored row is unenriched
     finally:
         conn.close()
 
@@ -557,23 +557,23 @@ def test_full_import_preserves_phase3_ids(tmp_path):
 
 
 # A refresh overwrites a row in place (same mediathek_id) only resets status to
-# '0' when a classify-relevant column changed; sender/topic are baked into the id
+# '0' when a enrich-relevant column changed; sender/topic are baked into the id
 # so only title/description/duration can actually differ on an overwrite.
 _REIMPORT_BASE = dict(sender="ARD", thema="T", titel="A", url="u", website="w",
                       beschreibung="d", dauer="00:01:00")
 
 
-def test_overwrite_preserves_status_when_only_nonclassify_changes(tmp_path):
+def test_overwrite_preserves_status_when_only_nonenrich_changes(tmp_path):
     conn = open_db(tmp_path)
     try:
         import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
-        conn.execute("UPDATE mediathek SET status='1'")          # classified
+        conn.execute("UPDATE mediathek SET status='1'")          # enriched
         changed = dict(_REIMPORT_BASE, groesse_mb="999", geo="DE-AT")
         import_films(conn, *reversed(make_list([make_x(**changed)])))
         rows = film_rows(conn)
         assert len(rows) == 1                # same id -> overwrite, not a new row
         assert rows[0]["size_mb"] == 999     # mirror column updated
-        assert rows[0]["status"] == "1"      # classification preserved
+        assert rows[0]["status"] == "1"      # enrichment preserved
     finally:
         conn.close()
 
@@ -583,7 +583,7 @@ def test_overwrite_preserves_status_when_only_nonclassify_changes(tmp_path):
     ("beschreibung", "other"),
     ("dauer",        "00:02:00"),
 ])
-def test_overwrite_resets_status_when_classify_column_changes(tmp_path, field, new):
+def test_overwrite_resets_status_when_enrich_column_changes(tmp_path, field, new):
     conn = open_db(tmp_path)
     try:
         import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
@@ -592,7 +592,7 @@ def test_overwrite_resets_status_when_classify_column_changes(tmp_path, field, n
         import_films(conn, *reversed(make_list([make_x(**changed)])))
         rows = film_rows(conn)
         assert len(rows) == 1                # same id -> overwrite, not a new row
-        assert rows[0]["status"] == "0"      # classify input changed -> reclassify
+        assert rows[0]["status"] == "0"      # enrich input changed -> re-enrich
     finally:
         conn.close()
 
@@ -605,7 +605,7 @@ def test_overwrite_noop_preserves_status(tmp_path):
         import_films(conn, *reversed(make_list([make_x(**_REIMPORT_BASE)])))
         rows = film_rows(conn)
         assert len(rows) == 1
-        assert rows[0]["status"] == "1"      # idempotent refresh does not reclassify
+        assert rows[0]["status"] == "1"      # idempotent refresh does not re-enrich
     finally:
         conn.close()
 
@@ -643,7 +643,7 @@ def test_get_meta_missing_key_is_none(tmp_path):
         conn.close()
 
 
-# -- mirror: diff import + update decision ------------------------------------
+# -- fetch: diff import + update decision ------------------------------------
 
 NOON_UTC = datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc)
 
@@ -704,7 +704,7 @@ def test_diff_import_preserves_phase3_ids(tmp_path):
         conn.close()
 
 
-# -- mirror: cmd_mirror decision (mocked network) ----------------------------
+# -- fetch: cmd_fetch decision (mocked network) ----------------------------
 
 CFG = SimpleNamespace(filmliste_url="FULL", filmliste_diff_url="DIFF",
                       filmliste_id_url="ID")
@@ -737,12 +737,12 @@ def args(force=False):
     return SimpleNamespace(force=force)
 
 
-def test_cmd_mirror_full_on_empty_db(tmp_path, monkeypatch):
+def test_cmd_fetch_full_on_empty_db(tmp_path, monkeypatch):
     install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
                                                        url="a")], "id1")})
     conn = open_db(tmp_path)
     try:
-        result = cmd_mirror(conn, CFG, args())
+        result = cmd_fetch(conn, CFG, args())
         assert result["action"] == "full"
         assert result["imported"] == 1
         assert db_get_meta(conn, "filmliste_id") == "id1"
@@ -750,31 +750,31 @@ def test_cmd_mirror_full_on_empty_db(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_cmd_mirror_force_redownloads_full(tmp_path, monkeypatch):
+def test_cmd_fetch_force_redownloads_full(tmp_path, monkeypatch):
     install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
                                                        url="a")], "id1",
                                                recent_created())})
     conn = open_db(tmp_path)
     try:
-        cmd_mirror(conn, CFG, args())                 # seed local list
-        result = cmd_mirror(conn, CFG, args(force=True))
+        cmd_fetch(conn, CFG, args())                 # seed local list
+        result = cmd_fetch(conn, CFG, args(force=True))
         assert result["action"] == "full"             # despite fresh local list
     finally:
         conn.close()
 
 
-def test_cmd_mirror_skip_when_id_unchanged(tmp_path, monkeypatch):
+def test_cmd_fetch_skip_when_id_unchanged(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
         install_http(monkeypatch, {"ID": b"id1\n"})
-        result = cmd_mirror(conn, CFG, args())
+        result = cmd_fetch(conn, CFG, args())
         assert result == {"action": "skip"}
     finally:
         conn.close()
 
 
-def test_cmd_mirror_skip_when_fresh_but_id_unchanged(tmp_path, monkeypatch):
+def test_cmd_fetch_skip_when_fresh_but_id_unchanged(tmp_path, monkeypatch):
     # Fresh local list (can_use_diff is true), but the server id is unchanged:
     # the id check must skip *before* a diff is fetched. Only "ID" is mocked, so
     # any diff/full download attempt would raise on the unmapped url.
@@ -782,13 +782,13 @@ def test_cmd_mirror_skip_when_fresh_but_id_unchanged(tmp_path, monkeypatch):
     try:
         import_films(conn, [], {"id": "id1", "erstellt_am": recent_created()})
         install_http(monkeypatch, {"ID": b"id1\n"})
-        result = cmd_mirror(conn, CFG, args())
+        result = cmd_fetch(conn, CFG, args())
         assert result == {"action": "skip"}
     finally:
         conn.close()
 
 
-def test_cmd_mirror_full_when_id_changed(tmp_path, monkeypatch):
+def test_cmd_fetch_full_when_id_changed(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
@@ -796,14 +796,14 @@ def test_cmd_mirror_full_when_id_changed(tmp_path, monkeypatch):
                                    "FULL": xz_list([make_x(sender="ARD",
                                                            titel="A", url="a")],
                                                    "id2")})
-        result = cmd_mirror(conn, CFG, args())
+        result = cmd_fetch(conn, CFG, args())
         assert result["action"] == "full"
         assert db_get_meta(conn, "filmliste_id") == "id2"
     finally:
         conn.close()
 
 
-def test_cmd_mirror_full_when_id_unreachable(tmp_path, monkeypatch):
+def test_cmd_fetch_full_when_id_unreachable(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         import_films(conn, [], {"id": "id1", "erstellt_am": "01.01.2020, 00:00"})
@@ -811,13 +811,13 @@ def test_cmd_mirror_full_when_id_unreachable(tmp_path, monkeypatch):
                                    "FULL": xz_list([make_x(sender="ARD",
                                                            titel="A", url="a")],
                                                    "id2")})
-        result = cmd_mirror(conn, CFG, args())
+        result = cmd_fetch(conn, CFG, args())
         assert result["action"] == "full"
     finally:
         conn.close()
 
 
-def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
+def test_cmd_fetch_diff_when_fresh(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         import_films(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
@@ -827,7 +827,7 @@ def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
                                     "DIFF": xz_list([make_x(sender="ZDF",
                                                            titel="B", url="b")],
                                                    "id2", recent_created())})
-        result = cmd_mirror(conn, CFG, args())
+        result = cmd_fetch(conn, CFG, args())
         assert result["action"] == "diff"
         assert result["imported"] == 1
         assert {r["title"] for r in film_rows(conn)} == {"A", "B"}
@@ -835,7 +835,7 @@ def test_cmd_mirror_diff_when_fresh(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
+def test_cmd_fetch_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         import_films(conn, *reversed(make_list([make_x(sender="ARD", titel="A",
@@ -847,87 +847,87 @@ def test_cmd_mirror_empty_diff_falls_back_to_full(tmp_path, monkeypatch):
             "FULL": xz_list([make_x(sender="ARD", titel="A", url="a"),
                              make_x(sender="ZDF", titel="B", url="b")], "id2"),
         })
-        result = cmd_mirror(conn, CFG, args())
+        result = cmd_fetch(conn, CFG, args())
         assert result["action"] == "full"
         assert result["imported"] == 2
     finally:
         conn.close()
 
 
-def test_cmd_mirror_reports_progress(tmp_path, monkeypatch, caplog):
+def test_cmd_fetch_reports_progress(tmp_path, monkeypatch, caplog):
     install_http(monkeypatch, {"FULL": xz_list([make_x(sender="ARD", titel="A",
                                                        url="a")], "id1")})
     conn = open_db(tmp_path)
     try:
         with caplog.at_level(logging.INFO, logger="theke"):
-            cmd_mirror(conn, CFG, args())
+            cmd_fetch(conn, CFG, args())
     finally:
         conn.close()
     assert any("download" in m for m in caplog.messages)  # download phase logged
     assert any("import" in m for m in caplog.messages)    # import phase logged
 
 
-# -- mirror: theke mirror CLI end to end -------------------------------------
+# -- fetch: theke fetch CLI end to end --------------------------------------
 
 def one_film(list_id="id1", created="01.01.2020, 00:00"):
     return xz_list([make_x(sender="ARD", titel="A", url="a")], list_id, created)
 
 
-def test_cli_mirror_full_json(tmp_path, capsys, monkeypatch):
+def test_cli_fetch_full_json(tmp_path, capsys, monkeypatch):
     db = str(tmp_path / "t.db")
     install_http(monkeypatch, {Config().filmliste_url: one_film()})
-    assert main(["--json", "--db", db, "mirror"]) == 0
+    assert main(["--json", "--db", db, "fetch"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["action"] == "full"
     assert result["imported"] == 1
 
 
-def test_cli_mirror_progress_goes_to_stderr_not_stdout(tmp_path, capsys, monkeypatch):
+def test_cli_fetch_progress_goes_to_stderr_not_stdout(tmp_path, capsys, monkeypatch):
     # The --json contract: stdout is exactly one JSON object; progress (the work
     # visible during the ~30 s) must land on stderr instead.
     db = str(tmp_path / "t.db")
     install_http(monkeypatch, {Config().filmliste_url: one_film()})
-    assert main(["--json", "--db", db, "mirror"]) == 0
+    assert main(["--json", "--db", db, "fetch"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["action"] == "full"  # one parseable object
     assert captured.out.strip().count("\n") == 0          # ... and only that
     assert "-> downloading" in captured.err               # progress on stderr
 
 
-def test_cli_mirror_human_output(tmp_path, capsys, monkeypatch):
+def test_cli_fetch_human_output(tmp_path, capsys, monkeypatch):
     db = str(tmp_path / "t.db")
     install_http(monkeypatch, {Config().filmliste_url: one_film()})
-    assert main(["--db", db, "mirror"]) == 0
+    assert main(["--db", db, "fetch"]) == 0
     assert "action = full" in capsys.readouterr().out
 
 
-def test_cli_mirror_force_redownloads(tmp_path, capsys, monkeypatch):
+def test_cli_fetch_force_redownloads(tmp_path, capsys, monkeypatch):
     db = str(tmp_path / "t.db")
     # fresh local list: without --force the next run would attempt a diff (whose
     # URL is not mocked); --force must take the full path instead.
     install_http(monkeypatch, {Config().filmliste_url: one_film(
         created=recent_created())})
-    assert main(["--db", db, "mirror"]) == 0
+    assert main(["--db", db, "fetch"]) == 0
     capsys.readouterr()
-    assert main(["--json", "--db", db, "mirror", "--force"]) == 0
+    assert main(["--json", "--db", db, "fetch", "--force"]) == 0
     assert json.loads(capsys.readouterr().out)["action"] == "full"
 
 
-def test_cli_mirror_skip_on_unchanged_id(tmp_path, capsys, monkeypatch):
+def test_cli_fetch_skip_on_unchanged_id(tmp_path, capsys, monkeypatch):
     db = str(tmp_path / "t.db")
     install_http(monkeypatch, {Config().filmliste_url: one_film(list_id="id1")})
-    assert main(["--db", db, "mirror"]) == 0          # full, stores id1
+    assert main(["--db", db, "fetch"]) == 0          # full, stores id1
     capsys.readouterr()
     install_http(monkeypatch, {Config().filmliste_id_url: b"id1\n"})
-    assert main(["--json", "--db", db, "mirror"]) == 0
+    assert main(["--json", "--db", db, "fetch"]) == 0
     assert json.loads(capsys.readouterr().out) == {"action": "skip"}
 
 
-def test_cli_mirror_locked_db_exits_3(tmp_path, capsys, monkeypatch):
+def test_cli_fetch_locked_db_exits_3(tmp_path, capsys, monkeypatch):
     db = str(tmp_path / "t.db")
     install_http(monkeypatch, {Config().filmliste_url: one_film()})
     conn = db_connect(db, migrations=[])
     try:
-        assert main(["--json", "--db", db, "mirror"]) == 3
+        assert main(["--json", "--db", db, "fetch"]) == 3
     finally:
         conn.close()
