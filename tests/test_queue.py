@@ -535,3 +535,96 @@ def test_queue_cancel_cli(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["--json", "--config", str(cfgpath), "queue", "cancel", "1"]) == 0
     assert json.loads(capsys.readouterr().out) == {"cancelled": 1}
+
+
+# -- cmd_queue delete --------------------------------------------------------
+
+def queue_count(conn):
+    return conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
+
+
+def test_queue_delete_by_id(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="delete", ids=[qid(conn, "m_de")]))
+        assert result == {"deleted": 1}
+        assert [r["mediathek_id"] for r in queue_rows(conn)] == ["m_fr"]
+    finally:
+        conn.close()
+
+
+def test_queue_delete_all(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        assert cmd_queue(conn, CFG, qargs(queue_cmd="delete", all=True)) == {"deleted": 2}
+        assert queue_count(conn) == 0
+    finally:
+        conn.close()
+
+
+def test_queue_delete_by_state_combinable(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        insert_mediathek(conn, "m_keep", language="de")
+        cmd_queue(conn, CFG, qargs(mediathek_id=["m_keep"]))      # stays proposed
+        conn.execute("UPDATE queue SET status='C' WHERE mediathek_id='m_de'")
+        conn.execute("UPDATE queue SET status='D' WHERE mediathek_id='m_fr'")
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="delete", cancelled=True, done=True))
+        assert result == {"deleted": 2}
+        assert [r["mediathek_id"] for r in queue_rows(conn)] == ["m_keep"]
+    finally:
+        conn.close()
+
+
+def test_queue_delete_failed(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        conn.execute("UPDATE queue SET status='F' WHERE mediathek_id='m_fr'")
+        assert cmd_queue(conn, CFG, qargs(queue_cmd="delete", failed=True)) == {"deleted": 1}
+        assert [r["mediathek_id"] for r in queue_rows(conn)] == ["m_de"]
+    finally:
+        conn.close()
+
+
+def test_queue_delete_needs_a_selector(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="ids, status flags"):
+            cmd_queue(conn, CFG, qargs(queue_cmd="delete"))
+    finally:
+        conn.close()
+
+
+def test_queue_delete_rejects_mixed_modes(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        with pytest.raises(ValueError, match="ids, status flags"):
+            cmd_queue(conn, CFG, qargs(queue_cmd="delete",
+                                       ids=[qid(conn, "m_de")], cancelled=True))
+    finally:
+        conn.close()
+
+
+def test_queue_delete_cli(tmp_path, monkeypatch, capsys):
+    stub_tmdb(monkeypatch)
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY",
+                                   "languages": ["de"]}), encoding="utf-8")
+    conn = db_connect(db)
+    insert_mediathek(conn, "m_de", language="de")
+    conn.close()
+    assert main(["--config", str(cfgpath), "queue", "add", "--tmdb", "100"]) == 0
+    capsys.readouterr()
+    assert main(["--json", "--config", str(cfgpath), "queue", "delete", "--all"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"deleted": 1}
