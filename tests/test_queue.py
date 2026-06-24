@@ -244,6 +244,18 @@ def test_queue_add_by_mediathek_id_unmatched_uses_clean_title(tmp_path, monkeypa
         conn.close()
 
 
+def test_queue_add_missing_year_does_not_render_none(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_noyear", status="1", tmdb_id="", language="de",
+                         clean_title="Doku", year=None)
+        cmd_queue(conn, CFG, qargs(mediathek_id=["m_noyear"]))
+        assert queue_rows(conn)[0]["name"] == "Doku ()"   # not "Doku (None)"
+    finally:
+        conn.close()
+
+
 def test_queue_add_resolves_ov_via_tmdb_original_language(tmp_path, monkeypatch):
     stub_tmdb(monkeypatch)   # original_language 'en'
     conn = open_db(tmp_path)
