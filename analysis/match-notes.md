@@ -42,6 +42,16 @@ airings carry the "Krimi/Fernsehfilm" metazeile. So a series splits, e.g.:
 - "Der Bozen-Krimi": 71 Movie vs 4 Episode vs 2 Clip
 `series_name` IS set consistently across all of them, so match can regroup.
 
+Worst offenders are the famous crime-film series, scattered across all four
+media by per-airing labelling (live DB):
+- "Tatort":         672 None / 511 Movie / 181 Episode / 166 Clip
+- "Polizeiruf 110": 140 None /  42 Movie /  33 Episode /  21 Clip
+- "Krimi und Thriller" slot None bucket = 192 feature-length crime films
+  (Donna Leon, Usedom-Krimi, Blind ermittelt, Mordkommission Istanbul, ...).
+The None rows are the real loss: feature-length crime fiction invisible to any
+category-gated search. enrich cannot lift them per-row -- a 88-min None with no
+label is indistinguishable from a long talk show without cross-row context.
+
 ## What `match` must do (bridging logic)
 
 1. **Search across the Movie/Episode boundary for feature-length fiction.**
