@@ -47,14 +47,16 @@ TRAILER = re.compile(r'\b(Trailer|Teaser|Vorschau|Vorab|Preview|Präview)\b', re
 
 # Parenthetical marker vocabulary -> (target, value). 'flag' adds a letter to
 # the flags string (A audio-description, S sign-language, U burned-in subs;
-# T trailer is added separately). 'language' sets the spoken language. 'strip'
-# removes a known noise marker from the title without storing anything (no field
-# for it yet).
+# T trailer is added separately). 'language' sets the spoken language. 'sub_ov'
+# does both: an original-version-with-subtitles marker implies burned-in subs (U)
+# AND the original spoken language (ov), so the ARTE sender (= subtitle) language
+# does not stick. 'strip' removes a known noise marker without storing anything.
 MARKERS = [
     (re.compile(r'^Audiodeskription$|^Hörfassung$', re.I),                       ('flag', 'A')),
     (re.compile(r'^(?:mit\s+)?Gebärdensprache$|^ÖGS$', re.I),                     ('flag', 'S')),
     (re.compile(r'^(?:in\s+)?(?:Einfache[r]?|Leichte[r]?)\s+Sprache$', re.I),     ('flag', 'E')),
-    (re.compile(r'^Originalversion mit Untertitel$|^mit Untertitel$|^OmU$|^OmdU$', re.I), ('flag', 'U')),
+    (re.compile(r'^Originalversion mit Untertitel$|^OmU$|^OmdU$', re.I),          ('sub_ov', 'U')),
+    (re.compile(r'^mit Untertitel$', re.I),                                       ('flag', 'U')),
     (re.compile(r'^Originalversion$|^OV$', re.I),                                 ('language', 'ov')),
     (re.compile(r'^engl\.?$|^Englisch$|^English$', re.I),                         ('language', 'en')),
     (re.compile(r'^frz\.?$|^franz\.?$|^französisch$', re.I),                      ('language', 'fr')),
@@ -284,6 +286,7 @@ def enrich(sender, topic, title, description, duration) -> dict:
             for rx, (target, val) in MARKERS:
                 if rx.match(inner):
                     if target == 'flag':       flags.add(val)
+                    elif target == 'sub_ov':   flags.add(val); r['language'] = 'ov'
                     elif target == 'language': r['language'] = val
                     return ''                  # strip recognized marker
             return m.group(0)                  # keep unrecognized
@@ -301,11 +304,8 @@ def enrich(sender, topic, title, description, duration) -> dict:
 
     # -- Pass 2: episode notation -----------------------------------------
     m = SE_A.search(t)
-    if m:
-        if len(m.group(1)) == 4:               # 4-digit season = broadcast year
-            r['year'] = r['year'] or int(m.group(1))
-        else:
-            r['season'] = int(m.group(1)); r['episode'] = int(m.group(2))
+    if m:                                      # 4-digit season kept as-is, never year
+        r['season'] = int(m.group(1)); r['episode'] = int(m.group(2))
         t = SE_A.sub('', t)
     else:
         m = SE_B.search(t)                     # SRF "(Staffel N, Folge M)"/"(Folge M)"
