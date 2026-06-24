@@ -612,6 +612,67 @@ def test_cmd_enrich_preserves_phase3_ids(tmp_path):
         conn.close()
 
 
+# -- enrich reset (status 1/2 -> 0) ----------------------------------------
+
+def reset_args(status_only=False):
+    return SimpleNamespace(enrich_cmd="reset", status_only=status_only)
+
+
+def test_cmd_enrich_reset_flips_status_and_clears_columns(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        # one enriched ('1') and one matched ('2') row, both with derived data
+        insert_enriched(conn, "a", clean_title="Der Fall", year=2003,
+                        category="Movie", language="de", enrich_confidence=0.9)
+        insert_enriched(conn, "b", clean_title="Das Boot", year=1981,
+                        category="Movie", language="de", enrich_confidence=0.9)
+        conn.execute("UPDATE mediathek SET status='2', tmdb_id='123', "
+                     "match_confidence=0.8 WHERE mediathek_id='b'")
+        result = cmd_enrich(conn, Config(), reset_args())
+        assert result == {"reset": 2}
+        for mid in ("a", "b"):
+            row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id=?",
+                               (mid,)).fetchone()
+            assert row["status"] == "0"
+            assert row["clean_title"] is None
+            assert row["year"] is None
+            assert row["category"] is None
+            assert row["enrich_confidence"] is None
+            assert row["language"] == ""          # back to the fetch default
+            assert row["tmdb_id"] == ""
+            assert row["match_confidence"] is None
+    finally:
+        conn.close()
+
+
+def test_cmd_enrich_reset_status_only_keeps_columns(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_enriched(conn, "a", clean_title="Der Fall", year=2003,
+                        category="Movie", language="de", enrich_confidence=0.9)
+        result = cmd_enrich(conn, Config(), reset_args(status_only=True))
+        assert result == {"reset": 1}
+        row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='a'").fetchone()
+        assert row["status"] == "0"
+        assert row["clean_title"] == "Der Fall"   # untouched
+        assert row["year"] == 2003
+        assert row["enrich_confidence"] == 0.9
+    finally:
+        conn.close()
+
+
+def test_cmd_enrich_reset_leaves_new_rows(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_row(conn, "n", title="New")                  # status '0'
+        insert_enriched(conn, "a", clean_title="Der Fall")  # status '1'
+        assert cmd_enrich(conn, Config(), reset_args())["reset"] == 1
+        n = conn.execute("SELECT status FROM mediathek WHERE mediathek_id='n'").fetchone()
+        assert n["status"] == "0"   # already new -> untouched
+    finally:
+        conn.close()
+
+
 def test_cli_enrich_json_on_stdout_progress_on_stderr(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     conn = db_connect(db)

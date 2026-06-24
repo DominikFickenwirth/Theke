@@ -337,6 +337,67 @@ def test_cmd_match_show_is_read_only(tmp_path, monkeypatch):
         conn.close()
 
 
+# -- match reset (status 2 -> 1) ---------------------------------------------
+
+def reset_margs(status_only=False):
+    return SimpleNamespace(match_cmd="reset", status_only=status_only)
+
+
+def test_cmd_match_reset_flips_status_and_clears_id(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2', tmdb_id='1234', "
+                     "match_confidence=1.0 WHERE mediathek_id='m1'")
+        result = cmd_match(conn, CFG, reset_margs())
+        assert result == {"reset": 1}
+        row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='m1'").fetchone()
+        assert row["status"] == "1"
+        assert row["tmdb_id"] == ""
+        assert row["match_confidence"] is None
+        assert row["clean_title"] == "Das Boot"   # enrich data kept
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_status_only_keeps_id(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2', tmdb_id='1234', "
+                     "match_confidence=1.0 WHERE mediathek_id='m1'")
+        result = cmd_match(conn, CFG, reset_margs(status_only=True))
+        assert result == {"reset": 1}
+        row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='m1'").fetchone()
+        assert row["status"] == "1"
+        assert row["tmdb_id"] == "1234"          # untouched
+        assert row["match_confidence"] == 1.0
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_leaves_non_matched_rows(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)   # status '1'
+        result = cmd_match(conn, CFG, reset_margs())
+        assert result == {"reset": 0}                       # nothing at status '2'
+        assert status_of(conn, "m1") == "1"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_needs_no_api_key(tmp_path):
+    # reset is a pure DB op -> no TMDB key required (unlike run/show)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m1'")
+        assert cmd_match(conn, Config(), reset_margs()) == {"reset": 1}
+    finally:
+        conn.close()
+
+
 def test_cmd_match_requires_api_key(tmp_path, monkeypatch):
     conn = boot_db(tmp_path, monkeypatch)
     try:
