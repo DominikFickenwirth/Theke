@@ -1159,7 +1159,9 @@ def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
     match args.queue_cmd:
         case "add":     return _queue_add(conn, cfg, args)
         case "list":    return _queue_list(conn, args)
-        case "approve": return _queue_set_status(conn, args, ("0",), "A", "approved")
+        case "approve": return _queue_set_status(conn, args,
+                            tuple(QUEUE_STATUS.values()) if args.force else ("0",),
+                            "A", "approved")
         case "cancel":  return _queue_set_status(conn, args, QUEUE_ACTIVE, "C", "cancelled")
         case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
 
@@ -1374,9 +1376,10 @@ def build_parser() -> argparse.ArgumentParser:
     qadd.add_argument("--mediathek-id", action="append", metavar="ID", help="mediathek_id to stage directly (repeatable)")
     qlst = qsub.add_parser("list", help="list queue entries (default)", description="List queue entries, newest creation last. Filter by lifecycle state with --status.")
     qlst.add_argument("--status",       choices=list(QUEUE_STATUS), metavar="STATE", help="filter by state: " + ", ".join(QUEUE_STATUS))
-    qapp = qsub.add_parser("approve", help="approve proposed entries for download", description="Move proposed entries to approved (the gate to download). Give queue ids or --all.")
+    qapp = qsub.add_parser("approve", help="approve proposed entries for download", description="Move proposed entries to approved (the gate to download). Give queue ids or --all. With --force, re-approve entries in any state (e.g. cancelled or done).")
     qapp.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to approve")
     qapp.add_argument("--all",          action="store_true", help="approve every proposed entry")
+    qapp.add_argument("--force",        action="store_true", help="re-approve regardless of current state")
     qcan = qsub.add_parser("cancel", help="cancel active entries", description="Cancel active entries (proposed/approved/busy) -- a soft state change that keeps the record. Give queue ids or --all.")
     qcan.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to cancel")
     qcan.add_argument("--all",          action="store_true", help="cancel every active entry")

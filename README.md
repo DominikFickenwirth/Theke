@@ -375,16 +375,20 @@ theke --db build/theke.db --json queue list --status proposed
 ### `queue approve`
 
 Hebt `proposed`-Einträge auf `approved` (das Tor zum Download). Nur Zeilen im
-Zustand `proposed` werden berührt. Gibt `approved = N` aus.
+Zustand `proposed` werden berührt -- mit `--force` dagegen aus jedem Zustand
+(z. B. ein `cancelled`- oder `done`-Eintrag zurück auf `approved`). Gibt
+`approved = N` aus.
 
-| Option   | Wirkung                                |
-| -------- | -------------------------------------- |
-| `ID ...` | Zu genehmigende Eintrags-IDs.          |
-| `--all`  | Alle `proposed`-Einträge genehmigen.   |
+| Option    | Wirkung                                                      |
+| --------- | ------------------------------------------------------------ |
+| `ID ...`  | Zu genehmigende Eintrags-IDs.                                |
+| `--all`   | Alle (mit `--force`: alle, sonst nur `proposed`) genehmigen. |
+| `--force` | Unabhängig vom aktuellen Zustand zurück auf `approved`.       |
 
 ```powershell
 theke --db build/theke.db queue approve 3 4
 theke --db build/theke.db queue approve --all
+theke --db build/theke.db queue approve 7 --force   # z. B. storniert -> approved
 ```
 
 ### `queue cancel`
