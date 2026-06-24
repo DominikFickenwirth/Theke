@@ -415,3 +415,68 @@ def test_queue_approve_cli(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["--json", "--config", str(cfgpath), "queue", "approve", "1"]) == 0
     assert json.loads(capsys.readouterr().out) == {"approved": 1}
+
+
+# -- cmd_queue cancel --------------------------------------------------------
+
+def test_queue_cancel_by_id(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="cancel", ids=[qid(conn, "m_de")]))
+        assert result == {"cancelled": 1}
+        assert status_of(conn, "m_de") == "C"
+        assert status_of(conn, "m_fr") == "P"
+    finally:
+        conn.close()
+
+
+def test_queue_cancel_all_active(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        conn.execute("UPDATE queue SET status='A' WHERE mediathek_id='m_fr'")  # approved is active
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="cancel", all=True))
+        assert result == {"cancelled": 2}
+        assert status_of(conn, "m_de") == "C" and status_of(conn, "m_fr") == "C"
+    finally:
+        conn.close()
+
+
+def test_queue_cancel_skips_finished(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        conn.execute("UPDATE queue SET status='X' WHERE mediathek_id='m_fr'")  # done
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="cancel", all=True))
+        assert result == {"cancelled": 1}
+        assert status_of(conn, "m_fr") == "X"   # finished, untouched
+    finally:
+        conn.close()
+
+
+def test_queue_cancel_needs_ids_or_all(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="ids or --all"):
+            cmd_queue(conn, CFG, qargs(queue_cmd="cancel"))
+    finally:
+        conn.close()
+
+
+def test_queue_cancel_cli(tmp_path, monkeypatch, capsys):
+    stub_tmdb(monkeypatch)
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY",
+                                   "languages": ["de"]}), encoding="utf-8")
+    conn = db_connect(db)
+    insert_mediathek(conn, "m_de", language="de")
+    conn.close()
+    assert main(["--config", str(cfgpath), "queue", "add", "--tmdb", "100"]) == 0
+    capsys.readouterr()
+    assert main(["--json", "--config", str(cfgpath), "queue", "cancel", "1"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"cancelled": 1}
