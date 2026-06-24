@@ -301,11 +301,8 @@ def enrich(sender, topic, title, description, duration) -> dict:
 
     # -- Pass 2: episode notation -----------------------------------------
     m = SE_A.search(t)
-    if m:
-        if len(m.group(1)) == 4:               # 4-digit season = broadcast year
-            r['year'] = r['year'] or int(m.group(1))
-        else:
-            r['season'] = int(m.group(1)); r['episode'] = int(m.group(2))
+    if m:                                      # 4-digit season kept as-is, never year
+        r['season'] = int(m.group(1)); r['episode'] = int(m.group(2))
         t = SE_A.sub('', t)
     else:
         m = SE_B.search(t)                     # SRF "(Staffel N, Folge M)"/"(Folge M)"
