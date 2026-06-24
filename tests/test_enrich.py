@@ -254,6 +254,25 @@ def test_language_original_version():
     assert r["clean_title"] == "Le Havre"
 
 
+def test_language_original_version_with_subtitles():
+    # "Originalversion mit Untertitel": spoken language is the original (ov), the
+    # subtitles are burned in (U) -- both must be set. The ARTE sender language
+    # (here EN) is only the subtitle/UI language and must not stick as spoken.
+    r = enrich("ARTE.EN", "Cinema - Films",
+                 "Mysteries of Lisbon (Originalversion mit Untertitel)", "", 5400)
+    assert r["language"] == "ov"
+    assert r["flags"] == "U"
+    assert r["clean_title"] == "Mysteries of Lisbon"
+
+
+def test_burned_in_subtitles_alone_keeps_language():
+    # Plain "mit Untertitel" is subtitles only (e.g. for the hard of hearing),
+    # not an original-version marker: flag U, but language stays as is.
+    r = enrich("ARD", "Film", "Der Film (mit Untertitel)", "", 5400)
+    assert r["flags"] == "U"
+    assert r["language"] == "de"
+
+
 def test_language_english_marker():
     r = enrich("ARD", "Film", "London Calling (engl.)", "", 3600)
     assert r["language"] == "en"
