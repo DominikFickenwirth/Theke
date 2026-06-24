@@ -116,6 +116,17 @@ def test_config_queue_keys_from_file(tmp_path):
     assert cfg.name_template == "{title} [{year}]"
 
 
+def test_config_fiction_topics_default_empty(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert load_config(None).fiction_topics == []
+
+
+def test_config_fiction_topics_from_file(tmp_path):
+    path = tmp_path / "ft.json"
+    write_config(path, {"fiction_topics": ["Mein Regio-Krimi", "Dorf-Saga"]})
+    assert load_config(str(path)).fiction_topics == ["Mein Regio-Krimi", "Dorf-Saga"]
+
+
 def test_config_languages_wrong_type_is_error(tmp_path):
     path = tmp_path / "ql.json"
     write_config(path, {"languages": "de"})   # must be a list, not a string

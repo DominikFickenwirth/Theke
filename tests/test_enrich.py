@@ -7,7 +7,7 @@ import pytest
 
 from theke import *
 from theke import _build_show_where
-from theke.enrich import enrich, ENRICH_COLS
+from theke.enrich import enrich, ENRICH_COLS, FICTION_TOPICS
 
 
 # -- helpers -----------------------------------------------------------------
@@ -642,6 +642,18 @@ def test_non_fiction_feature_topic_stays_null():
     # allowlist, so it stays NULL -- the lift never guesses beyond known Reihen.
     r = enrich("ARD", "phoenix vor ort", "phoenix vor ort: Bundestag", "", 5000)
     assert r["category"] is None
+
+
+def test_fiction_topics_extendable_via_param():
+    # The allowlist is configurable (it grows over time): a topic absent from the
+    # built-in default stays NULL, but lifts to Movie when supplied via the
+    # fiction_topics argument (the CLI passes the built-in default unioned with
+    # config). The supplied set must be casefolded, like the built-in default.
+    r0 = enrich("ARD", "Mein Regio-Krimi", "Mein Regio-Krimi: Folge X", "", 5000)
+    assert r0["category"] is None
+    r1 = enrich("ARD", "Mein Regio-Krimi", "Mein Regio-Krimi: Folge X", "", 5000,
+                 fiction_topics=FICTION_TOPICS | {"mein regio-krimi"})
+    assert r1["category"] == "Movie"
 
 
 # -- cmd_enrich: DB write side ---------------------------------------------
