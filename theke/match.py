@@ -63,8 +63,8 @@ def _is_token_run(short: list, long: list) -> bool:
 
 def _pair_sim(a: str, b: str) -> float:
     """Similarity of two normalized strings: exact, whole-token containment with
-    enough coverage (so a short franchise/series name inside a long title does
-    not over-score), else a character-level difflib ratio."""
+    enough coverage (so a short franchise name inside a long title does not
+    over-score), else a character-level difflib ratio."""
     if a == b:
         return 1.0
     ta, tb = a.split(), b.split()
