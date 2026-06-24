@@ -335,3 +335,83 @@ def test_queue_list_cli_default_action(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["--json", "--config", str(cfgpath), "queue"]) == 0   # bare -> list
     assert json.loads(capsys.readouterr().out)["count"] == 1
+
+
+# -- cmd_queue approve -------------------------------------------------------
+
+def qid(conn, mediathek_id):
+    return conn.execute("SELECT id FROM queue WHERE mediathek_id=?",
+                        (mediathek_id,)).fetchone()["id"]
+
+
+def status_of(conn, mediathek_id):
+    return conn.execute("SELECT status FROM queue WHERE mediathek_id=?",
+                        (mediathek_id,)).fetchone()["status"]
+
+
+def two_proposed(conn):
+    insert_mediathek(conn, "m_de", language="de", duration=6000)
+    insert_mediathek(conn, "m_fr", language="fr", duration=6000)
+    cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+
+
+def test_queue_approve_by_id(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="approve", ids=[qid(conn, "m_de")]))
+        assert result == {"approved": 1}
+        assert status_of(conn, "m_de") == "A"
+        assert status_of(conn, "m_fr") == "P"
+    finally:
+        conn.close()
+
+
+def test_queue_approve_all(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="approve", all=True))
+        assert result == {"approved": 2}
+        assert status_of(conn, "m_de") == "A" and status_of(conn, "m_fr") == "A"
+    finally:
+        conn.close()
+
+
+def test_queue_approve_only_touches_proposed(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        conn.execute("UPDATE queue SET status='C' WHERE mediathek_id='m_fr'")
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="approve", all=True))
+        assert result == {"approved": 1}
+        assert status_of(conn, "m_fr") == "C"   # cancelled, untouched
+    finally:
+        conn.close()
+
+
+def test_queue_approve_needs_ids_or_all(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="ids or --all"):
+            cmd_queue(conn, CFG, qargs(queue_cmd="approve"))
+    finally:
+        conn.close()
+
+
+def test_queue_approve_cli(tmp_path, monkeypatch, capsys):
+    stub_tmdb(monkeypatch)
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY",
+                                   "languages": ["de"]}), encoding="utf-8")
+    conn = db_connect(db)
+    insert_mediathek(conn, "m_de", language="de")
+    conn.close()
+    assert main(["--config", str(cfgpath), "queue", "add", "--tmdb", "100"]) == 0
+    capsys.readouterr()
+    assert main(["--json", "--config", str(cfgpath), "queue", "approve", "1"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"approved": 1}
