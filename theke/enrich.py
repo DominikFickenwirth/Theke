@@ -365,10 +365,14 @@ def enrich(sender, topic, title, description, duration) -> dict:
             cat = ARTE_SUB.get(unter.strip()) or ocat
             if cat and not r['category']: r['category'] = cat
             genres.update(gset); kat_src = 'arte-topic'
-    if not r['category'] and kat_src != 'arte-topic':   # honest low-conf prior
-        s = duration or 0
-        r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
-        kat_src = 'duration-prior'
+    if not r['category'] and kat_src != 'arte-topic':   # no explicit medium signal
+        if r['season'] is not None and r['episode'] is not None:
+            r['category'] = 'Episode'                  # S/E notation is decisive
+            kat_src = 'season-episode'
+        else:                                          # honest low-conf prior
+            s = duration or 0
+            r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
+            kat_src = 'duration-prior'
 
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
     if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
