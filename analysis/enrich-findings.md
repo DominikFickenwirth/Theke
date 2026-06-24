@@ -59,3 +59,37 @@ regressions.
 
 Known remaining (minor): NPART "n/m" at end of title can misread a season
 designation ("... 24/25") as episode 24 of 25. Single-digit-ish, low volume.
+
+## Round 4 -- consistency: Sxx/Exx keeps Movie, only count -> Episode  [DONE]
+
+New user goal: where TMDB is inconsistent, enrich must be INTERNALLY consistent
+(film-reihen = Movie with series_name) and `theke match` compensates later.
+
+Verified the inconsistency on TMDB: Sarah Kohr = tv/202362 (series), Inga
+Lindstroem = tv/61385 (series), but Rosamunde Pilcher = individual /movie/
+entries. Same kind of content (ZDF Herzkino / Krimi-Reihen of ~90 min standalone
+TV films), modelled three ways. No per-row category can match all of them.
+
+So round 3's "Sxx/Exx overrides Movie -> Episode" was wrong here and is revised:
+- A Mehrteiler "(n/m)" count still -> Episode (serialized miniseries: Eldorado
+  KaDeWe, Sisi). Overrides a Fernsehfilm label. (round 1 kept.)
+- An explicit Sxx/Exx now fills only a None/Clip medium with Episode; it does
+  NOT override a Movie label. Feature-length film-reihen (Der Bozen-Krimi, Nord
+  bei Nordwest, Praxis mit Meerblick, Herzkino) stay Movie with series_name.
+
+Why not a runtime gate (">60 min -> Movie") in enrich: tested against the live
+DB, it pulls in long talk/news/sports with Sxx/Exx (Markus Lanz, maybrit illner,
+Volle Kanne, Olympia, ...) -- 5781 rows, heavily contaminated. The robust
+fiction discriminator is the explicit film label, which talk/news/sports never
+carry. Talk/news use 4-digit (year) seasons; fiction uses small seasons -- but
+sports Reihen (Olympia 1..19, Paralympics 4..12) also use small seasons, so a
+season-size gate is not clean either. Hence: keep the film-label discriminator
+in enrich, do the runtime-based Movie/Episode bridging in match.
+
+Live-DB effect vs round-2 baseline: no Movie touched; only trailer cleanup
+(Episode->Clip 37 trailers, Clip->Episode 25 multi-part concert/web series).
+
+Residual inconsistency (deferred to match, see analysis/match-notes.md):
+a film-reihe splits across Movie/Episode by whether each airing carried the
+"Krimi/Fernsehfilm" metazeile (e.g. Sarah Kohr: 2 Movie vs 26 Episode).
+series_name is consistent across all of them, so match can regroup.
