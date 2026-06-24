@@ -21,6 +21,7 @@ from datetime import datetime, time, timezone
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD
 from theke.match import (tmdb_movie, find_matches, arte_anchor_ids,
                          find_arte_links)
+from theke.queue import select_downloads, resolution_of
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -1137,6 +1138,106 @@ def _print_matches(meta, matches):
               f'sim={m["title_sim"]} dY={m["year_delta"]} dRun={m["runtime_delta"]}')
 
 
+# -- queue (phase 5: staging + review) ---------------------------------------
+# Status chars: 'P' proposed, 'A' approved, 'D' downloading, 'X' done,
+# 'F' failed, 'C' cancelled. DB-only stage; nothing here touches the filesystem.
+
+QUEUE_ACTIVE = ("P", "A", "D")
+
+
+def _now() -> str:
+    """Current UTC time as an ISO-8601 'Z' string (queue timestamps)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a queue action. `add` stages downloads (the only writer of new
+    rows); list/approve/cancel manage the review queue."""
+    match args.queue_cmd:
+        case "add": return _queue_add(conn, cfg, args)
+        case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
+
+
+def _queue_add(conn, cfg, args) -> dict:
+    """Stage downloads into the queue. `--tmdb` resolves a matched film, dedups
+    its many mediathek rows (theke.queue.select_downloads) and queues the minimal
+    set; `--mediathek-id` queues one row directly ('AV'). New entries are
+    'proposed' unless queue_auto_approve is set. A mediathek_id already queued in
+    an active state (P/A/D) is skipped; a finished/cancelled one does not block a
+    re-queue. `deduplicated` counts the source rows collapsed or filtered away."""
+    if not args.tmdb and not args.mediathek_id:
+        raise ValueError("queue add needs --tmdb or --mediathek-id")
+    status = "A" if cfg.queue_auto_approve else "P"
+    totals = {"queued": 0, "skipped": 0, "deduplicated": 0}
+    conn.execute("BEGIN")
+    try:
+        for tid in args.tmdb or []:
+            _queue_add_tmdb(conn, cfg, str(tid), status, totals)
+        for mid in args.mediathek_id or []:
+            _queue_add_mediathek(conn, cfg, mid, status, totals)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return totals
+
+
+def _queue_add_tmdb(conn, cfg, tmdb_id, status, totals):
+    """Queue the deduplicated download set of one matched film."""
+    if not cfg.tmdb_api_key:
+        raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
+    meta = tmdb_movie(cfg, tmdb_id)
+    name = _queue_name(cfg, meta["title"], meta["year"])
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM mediathek WHERE status='2' AND tmdb_id=?", (tmdb_id,))]
+    picks = select_downloads(rows, cfg.languages, meta["original_language"])
+    totals["deduplicated"] += len(rows) - len(picks)
+    for p in picks:
+        _queue_insert(conn, status, p["mediathek_id"], tmdb_id, name,
+                      p["language"], p["resolution"], p["remux"], totals)
+
+
+def _queue_add_mediathek(conn, cfg, mediathek_id, status, totals):
+    """Queue one mediathek row directly (manual pick, no dedup, full 'AV'). Uses
+    the TMDB name when the row is matched and a key is set, else its clean_title."""
+    r = conn.execute("SELECT * FROM mediathek WHERE mediathek_id=?",
+                     (mediathek_id,)).fetchone()
+    if r is None:
+        raise ValueError(f"no mediathek row {mediathek_id!r}")
+    r = dict(r)
+    tmdb_id, language = r["tmdb_id"] or "", r["language"]
+    if tmdb_id and cfg.tmdb_api_key:
+        meta = tmdb_movie(cfg, tmdb_id)
+        name = _queue_name(cfg, meta["title"], meta["year"])
+        if language == "ov":
+            language = meta["original_language"]
+    else:
+        name = _queue_name(cfg, r["clean_title"], r["year"])
+    _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
+                  resolution_of(r), "AV", totals)
+
+
+def _queue_name(cfg, title, year) -> str:
+    """The library filename stem from the configured template."""
+    return cfg.name_template.format(title=title, year=year)
+
+
+def _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
+                  resolution, remux, totals):
+    """Insert one queue row unless the mediathek_id is already queued active."""
+    if conn.execute("SELECT 1 FROM queue WHERE mediathek_id=? AND status IN "
+                    "('P','A','D')", (mediathek_id,)).fetchone():
+        totals["skipped"] += 1
+        return
+    ts = _now()
+    conn.execute("INSERT INTO queue (status, mediathek_id, tmdb_id, name, "
+                 "language, resolution, remux, created_at, updated_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)",
+                 (status, mediathek_id, tmdb_id, name, language, resolution,
+                  remux, ts, ts))
+    totals["queued"] += 1
+
+
 # -- cli ----------------------------------------------------------------------
 # Stable grammar and exit codes: the GUI drives the CLI and parses the --json
 # output (exactly one JSON object on stdout per call).
@@ -1209,6 +1310,12 @@ def build_parser() -> argparse.ArgumentParser:
     msho.add_argument("--type",     default="movie", choices=["movie"],                           help="media type (only movie for now)")
     msho.add_argument("--min-conf", type=float, metavar="X",                                      help="min confidence to list (default 0.0)")
     msho.add_argument("--limit",    type=int, default=20, metavar="N",                            help="max candidates to list (default 20)")
+
+    queuep = sub.add_parser("queue", help="stage and review the download queue", description="Stage downloads into the review queue by tmdb_id (deduplicated) or mediathek_id (direct), and manage them. DB-only: nothing here touches the filesystem.")
+    qsub = queuep.add_subparsers(dest="queue_cmd", required=True, metavar="action")
+    qadd = qsub.add_parser("add", help="stage downloads by tmdb_id or mediathek_id", description="Stage downloads. --tmdb dedups a matched film's many rows to the minimal download set (best quality per whitelisted language, shared video flagged for remux); --mediathek-id queues one row directly. New entries are 'proposed' unless queue_auto_approve is set.")
+    qadd.add_argument("--tmdb",         action="append", metavar="ID", help="TMDB id to stage, deduplicated (repeatable)")
+    qadd.add_argument("--mediathek-id", action="append", metavar="ID", help="mediathek_id to stage directly (repeatable)")
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
@@ -1293,6 +1400,10 @@ def main(argv=None) -> int:
             case "match":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_match(conn, cfg, args)
+                finally: conn.close()
+            case "queue":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_queue(conn, cfg, args)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 

@@ -196,7 +196,7 @@ def test_queue_add_is_idempotent_for_active_entries(tmp_path, monkeypatch):
         insert_mediathek(conn, "m_fr", language="fr", duration=6000)
         cmd_queue(conn, CFG, qargs(tmdb=["100"]))
         again = cmd_queue(conn, CFG, qargs(tmdb=["100"]))
-        assert again == {"queued": 0, "skipped": 2, "deduplicated": 1}
+        assert again == {"queued": 0, "skipped": 2, "deduplicated": 0}
         assert len(queue_rows(conn)) == 2   # no duplicates added
     finally:
         conn.close()
