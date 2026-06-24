@@ -1143,6 +1143,8 @@ def _print_matches(meta, matches):
 # 'F' failed, 'C' cancelled. DB-only stage; nothing here touches the filesystem.
 
 QUEUE_ACTIVE = ("P", "A", "D")
+QUEUE_STATUS = {"proposed": "P", "approved": "A", "downloading": "D",
+                "done": "X", "failed": "F", "cancelled": "C"}
 
 
 def _now() -> str:
@@ -1154,7 +1156,8 @@ def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
     """Dispatch a queue action. `add` stages downloads (the only writer of new
     rows); list/approve/cancel manage the review queue."""
     match args.queue_cmd:
-        case "add": return _queue_add(conn, cfg, args)
+        case "add":  return _queue_add(conn, cfg, args)
+        case "list": return _queue_list(conn, args)
         case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
 
 
@@ -1238,6 +1241,30 @@ def _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
     totals["queued"] += 1
 
 
+def _queue_list(conn, args) -> dict:
+    """Read-only listing, optionally filtered by lifecycle state (--status name),
+    ordered by creation. --json returns the rows; otherwise prints a table."""
+    sql = "SELECT * FROM queue"
+    params = ()
+    if args.status:
+        sql += " WHERE status=?"
+        params = (QUEUE_STATUS[args.status],)
+    sql += " ORDER BY created_at, id"
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    if args.json:
+        return {"queue": rows, "count": len(rows)}
+    _print_queue(rows)
+    return {}
+
+
+def _print_queue(rows):
+    """One header line + one line per entry to stdout (the result)."""
+    print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
+    for r in rows:
+        print(f'  [{r["id"]}] {r["status"]} {r["resolution"]} {r["remux"]} '
+              f'{r["language"]} {r["name"]!r}')
+
+
 # -- cli ----------------------------------------------------------------------
 # Stable grammar and exit codes: the GUI drives the CLI and parses the --json
 # output (exactly one JSON object on stdout per call).
@@ -1316,9 +1343,12 @@ def build_parser() -> argparse.ArgumentParser:
     qadd = qsub.add_parser("add", help="stage downloads by tmdb_id or mediathek_id", description="Stage downloads. --tmdb dedups a matched film's many rows to the minimal download set (best quality per whitelisted language, shared video flagged for remux); --mediathek-id queues one row directly. New entries are 'proposed' unless queue_auto_approve is set.")
     qadd.add_argument("--tmdb",         action="append", metavar="ID", help="TMDB id to stage, deduplicated (repeatable)")
     qadd.add_argument("--mediathek-id", action="append", metavar="ID", help="mediathek_id to stage directly (repeatable)")
+    qlst = qsub.add_parser("list", help="list queue entries (default)", description="List queue entries, newest creation last. Filter by lifecycle state with --status.")
+    qlst.add_argument("--status",       choices=list(QUEUE_STATUS), metavar="STATE", help="filter by state: " + ", ".join(QUEUE_STATUS))
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
+    _set_default_action(parser, "queue",  qsub, "list")
     return parser
 
 
