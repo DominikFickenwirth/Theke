@@ -1156,8 +1156,9 @@ def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
     """Dispatch a queue action. `add` stages downloads (the only writer of new
     rows); list/approve/cancel manage the review queue."""
     match args.queue_cmd:
-        case "add":  return _queue_add(conn, cfg, args)
-        case "list": return _queue_list(conn, args)
+        case "add":     return _queue_add(conn, cfg, args)
+        case "list":    return _queue_list(conn, args)
+        case "approve": return _queue_set_status(conn, args, ("P",), "A", "approved")
         case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
 
 
@@ -1257,6 +1258,30 @@ def _queue_list(conn, args) -> dict:
     return {}
 
 
+def _queue_set_status(conn, args, from_states, to, key) -> dict:
+    """Move queue rows to a new lifecycle state: the given ids or, with --all,
+    every row currently in `from_states`. Only rows in `from_states` are touched.
+    Returns {key: count}."""
+    if args.all and args.ids:
+        raise ValueError("give queue ids or --all, not both")
+    if not args.all and not args.ids:
+        raise ValueError("give queue ids or --all")
+    froms = "(" + ",".join("?" * len(from_states)) + ")"
+    sql = f"UPDATE queue SET status=?, updated_at=? WHERE status IN {froms}"
+    params = [to, _now(), *from_states]
+    if not args.all:
+        sql += " AND id IN (" + ",".join("?" * len(args.ids)) + ")"
+        params += args.ids
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(sql, params).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {key: n}
+
+
 def _print_queue(rows):
     """One header line + one line per entry to stdout (the result)."""
     print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
@@ -1345,6 +1370,9 @@ def build_parser() -> argparse.ArgumentParser:
     qadd.add_argument("--mediathek-id", action="append", metavar="ID", help="mediathek_id to stage directly (repeatable)")
     qlst = qsub.add_parser("list", help="list queue entries (default)", description="List queue entries, newest creation last. Filter by lifecycle state with --status.")
     qlst.add_argument("--status",       choices=list(QUEUE_STATUS), metavar="STATE", help="filter by state: " + ", ".join(QUEUE_STATUS))
+    qapp = qsub.add_parser("approve", help="approve proposed entries for download", description="Move proposed entries to approved (the gate to download). Give queue ids or --all.")
+    qapp.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to approve")
+    qapp.add_argument("--all",          action="store_true", help="approve every proposed entry")
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
