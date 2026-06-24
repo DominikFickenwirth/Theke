@@ -585,14 +585,16 @@ def test_mehrteiler_count_does_not_override_clip():
     assert r["category"] == "Clip"
 
 
-def test_explicit_se_overrides_movie_label():
-    # An explicit Sxx/Exx is broadcaster series notation: on TMDB these German
-    # Krimi-/TV-film Reihen are TV series (Sarah Kohr = tv/202362, Der Bozen-
-    # Krimi, Nord bei Nordwest), so the S/E notation wins over a "Krimi/
-    # Fernsehfilm" metazeile and the row is an Episode, not a standalone Movie.
+def test_film_reihe_with_se_stays_movie_with_series_name():
+    # A feature-length film-reihe entry carries a "Krimi/Fernsehfilm" label AND
+    # an explicit Sxx/Exx. TMDB is inconsistent for such Reihen (Sarah Kohr =
+    # tv/202362 series, but Rosamunde Pilcher = individual movies), so enrich is
+    # internally CONSISTENT: an Sxx/Exx does not override a Movie label -- the row
+    # stays Movie, keeping its series_name. match bridges the TMDB split later.
     r = enrich("3Sat", "Sarah Kohr",
                  "Das verschwundene Mädchen - Krimi, Deutschland 2014 (S1/E3)", "", 5367)
-    assert r["category"] == "Episode"
+    assert r["category"] == "Movie"
+    assert r["series_name"] == "Sarah Kohr"
     assert r["season"] == 1
     assert r["episode"] == 3
 
