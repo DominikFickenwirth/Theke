@@ -551,7 +551,23 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 4   # phase 2 schema + phase 3 enrich cols + rename
+        assert user_version(conn) == 5   # phase 2 + phase 3 cols + rename + phase 5 queue
+    finally:
+        conn.close()
+
+
+QUEUE_COLS = {
+    "id", "status", "mediathek_id", "tmdb_id", "name", "language",
+    "resolution", "remux", "error", "created_at", "updated_at",
+}
+
+
+def test_migration_creates_queue_table(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        assert "queue" in table_names(conn)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(queue)")}
+        assert cols == QUEUE_COLS
     finally:
         conn.close()
 

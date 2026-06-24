@@ -27,3 +27,6 @@ build/
 
 theke.db
 theke.json
+
+# Claude Code transient worktrees
+.claude/worktrees/
