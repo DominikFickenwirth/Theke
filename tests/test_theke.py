@@ -98,6 +98,31 @@ def test_config_none_override_keeps_file_value(tmp_path):
     assert cfg.db_path == "file.db"
 
 
+def test_config_queue_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.queue_auto_approve is False
+    assert cfg.languages == ["de"]
+    assert cfg.name_template == "{title} ({year})"
+
+
+def test_config_queue_keys_from_file(tmp_path):
+    path = tmp_path / "q.json"
+    write_config(path, {"queue_auto_approve": True, "languages": ["de", "en"],
+                        "name_template": "{title} [{year}]"})
+    cfg = load_config(str(path))
+    assert cfg.queue_auto_approve is True
+    assert cfg.languages == ["de", "en"]
+    assert cfg.name_template == "{title} [{year}]"
+
+
+def test_config_languages_wrong_type_is_error(tmp_path):
+    path = tmp_path / "ql.json"
+    write_config(path, {"languages": "de"})   # must be a list, not a string
+    with pytest.raises(ConfigError, match="languages"):
+        load_config(str(path))
+
+
 # -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [
