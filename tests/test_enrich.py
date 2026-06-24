@@ -557,6 +557,34 @@ def test_season_episode_implies_episode_over_duration_prior():
     assert r["category"] == "Episode"
 
 
+def test_mehrteiler_count_overrides_movie_label():
+    # "(5/6)" is a multi-part marker: a miniseries, not a standalone film. It
+    # overrides the Movie label that topic 'Fernsehfilm' would otherwise give --
+    # on TMDB such Mehrteiler are TV series, so they must be Episode.
+    r = enrich("3Sat", "Fernsehfilm", "Eldorado KaDeWe - Jetzt ist unsere Zeit (5/6)", "", 2740)
+    assert r["episode"] == 5
+    assert r["episode_count"] == 6
+    assert r["category"] == "Episode"
+
+
+def test_mehrteiler_count_fills_null_category():
+    # A multi-part marker turns a NULL medium (duration prior, >1800s) into an
+    # Episode (a multi-part documentary/reihe), not an unknown.
+    r = enrich("ARD", "Beiträge", "Die Geschichte des Südwestens (1/7)", "", 2684)
+    assert r["episode"] == 1
+    assert r["episode_count"] == 7
+    assert r["category"] == "Episode"
+
+
+def test_mehrteiler_count_does_not_override_clip():
+    # A trailer with a "(n/m)" marker stays Clip -- the multi-part rule never
+    # promotes a genuine clip/trailer to Episode.
+    r = enrich("BR", "Tatort", "Trailer: Unvergänglich (1/2)", "", 29)
+    assert r["episode_count"] == 2
+    assert "T" in r["flags"]
+    assert r["category"] == "Clip"
+
+
 def test_explicit_movie_with_season_episode_stays_movie():
     # An explicit Movie signal (metazeile) is NOT overridden by an S/E notation:
     # feature-length TV films aired under a Reihe keep category Movie, even with
