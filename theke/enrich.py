@@ -220,6 +220,32 @@ def route_topic(topic) -> dict:
     return out
 
 
+# Known fiction-Reihe topics: a NULL medium (no film metazeile on this airing)
+# is lifted to Movie, matching the labelled airings of the same brand so a Reihe
+# is internally consistent. Derived from the live DB: every topic here already
+# produces >=8 metazeile-labelled Movie rows (a film label never appears on talk/
+# news/sports, so this set cannot pull in non-fiction). The lift fires only on a
+# NULL category (never overriding Episode from Sxx/Exx or Clip from a trailer);
+# the residual per-airing Movie/Episode scatter is regrouped by match via
+# series_name. Generic film SLOTS in this set (Filme im Ersten, FilmMittwoch im
+# Ersten, ...) keep series_name = slot for now; moving them to FORMAT_TOPICS for a
+# cleaner NULL series_name is a separate later cleanup. Matched casefold == topic.
+FICTION_TOPICS = {t.casefold() for t in (
+    'Tatort', 'Polizeiruf 110', 'Märchen in der ARD', 'Debüt im Dritten',
+    'Dokumentarfilmzeit', 'FilmMittwoch im Ersten', 'Spielfilm-Highlights',
+    'Der Usedom-Krimi', 'Filme im Ersten', 'Donna Leon', 'Praxis mit Meerblick',
+    'Der Kroatien-Krimi', 'Krause', 'Daheim in den Bergen', 'Rebecka Martinsson',
+    'Kommissar Dupin', 'Kommissar Wallander', 'Harter Brocken Krimireihe',
+    'Zimmer mit Stall', 'Pfarrer Braun', 'Anna und ihr Untermieter', 'Wolfsland',
+    'Utta Danella', 'Steirerkrimi', 'Ein Krimi aus Passau',
+    'Der Ranger - Paradies Heimat', 'Spielfilm in 3sat', 'Liebe am Fjord',
+    'Käthe und ich', 'Kluftingerkrimis', 'Die drei von der Müllabfuhr',
+    'Der Wien-Krimi: Blind ermittelt', 'Mankells Wallander', 'Die Diplomatin',
+    'Die Bestatterin', 'Der Pate', 'Der Kommissar und die Alpen',
+    'Toni, männlich, Hebamme', 'Nord bei Nordwest', 'Mordkommission Istanbul',
+    'Mord in bester Gesellschaft', 'Krimis im Ersten', 'Die Inselärztin',
+    'Der Bozen-Krimi')}
+
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
 TITLE_META_SENDERS = {'ZDF', '3Sat'}
 # ARTE taxonomy "Ober - Unter": the super-label (Ober) carries the genre, the
@@ -385,6 +411,9 @@ def enrich(sender, topic, title, description, duration) -> dict:
         elif r['season'] is not None and r['episode'] is not None:
             if r['category'] in (None, 'Clip'):
                 r['category'] = 'Episode'; kat_src = 'episodic'
+
+    if r['category'] is None and tp.casefold() in FICTION_TOPICS:   # known fiction Reihe
+        r['category'] = 'Movie'; kat_src = 'topic-fiction'
 
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
     if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
