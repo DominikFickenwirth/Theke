@@ -119,9 +119,10 @@ theke --db build/theke.db fetch --force   # erzwingt vollen Download
 ## `theke enrich`
 
 Stufe 3 (Teil 1): extrahiert strukturierte Metadaten aus den Freitextfeldern.
-Ein Pflicht-Unterbefehl wählt die Aktion: `run` schreibt, die übrigen
+Ein Unterbefehl wählt die Aktion: `run` schreibt, die übrigen
 (`report`/`audit`/`show`/`dist`) sind reine Lese-Werkzeuge zum Iterieren an der
-Heuristik.
+Heuristik. Ohne Aktion läuft der Default `run`, d. h. `theke enrich` entspricht
+`theke enrich run` (etwaige Flags inklusive, z. B. `theke enrich --force`).
 
 ### `enrich run`
 

@@ -844,10 +844,11 @@ def test_cli_enrich_report_min_rows_zero_shows_small_sender(tmp_path, capsys):
     assert set(out["senders"]) == {"ARD"}    # the single-row sender is now visible
 
 
-def test_cli_enrich_requires_a_subcommand(tmp_path):
+def test_cli_enrich_bare_runs_default_action(tmp_path, capsys):
     db = str(tmp_path / "theke.db")
     db_connect(db).close()
-    assert main(["--db", db, "enrich"]) == 2  # nested subcommand is required
+    assert main(["--json", "--db", db, "enrich"]) == 0  # defaults to `run`
+    assert "enriched" in json.loads(capsys.readouterr().out)
 
 
 # -- enrich audit (read-only findings scan) --------------------------------

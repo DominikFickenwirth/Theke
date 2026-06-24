@@ -272,6 +272,76 @@ def test_cli_missing_command_exits_2(capsys):
     assert main([]) == 2
 
 
+# -- default sub-actions -----------------------------------------------------
+
+def _parse(argv):
+    """Parse argv through the default-action injection, as main() does."""
+    import theke
+    parser = theke.build_parser()
+    return parser.parse_args(theke._inject_default_action(parser, argv))
+
+
+def test_default_action_enrich_bare_runs_run():
+    args = _parse(["enrich"])
+    assert args.command == "enrich"
+    assert args.enrich_cmd == "run"
+    assert args.force is False  # run's own default, seeded by argparse
+
+
+def test_default_action_explicit_subaction_preserved():
+    assert _parse(["enrich", "report"]).enrich_cmd == "report"
+
+
+def test_default_action_match_bare_with_flag():
+    args = _parse(["match", "--tmdb", "603"])
+    assert args.command == "match"
+    assert args.match_cmd == "run"
+    assert args.tmdb == "603"
+
+
+def test_default_action_after_global_options():
+    args = _parse(["--json", "--db", "x.db", "enrich"])
+    assert args.enrich_cmd == "run"
+    assert args.json is True
+    assert args.db == "x.db"
+
+
+def test_default_action_global_option_equals_form():
+    assert _parse(["--db=x.db", "enrich"]).enrich_cmd == "run"
+
+
+def test_default_action_injection_is_explicit():
+    import theke
+    parser = theke.build_parser()
+    assert theke._inject_default_action(parser, ["enrich"]) == ["enrich", "run"]
+    assert theke._inject_default_action(parser, ["match", "--tmdb", "603"]) == ["match", "run", "--tmdb", "603"]
+
+
+def test_default_action_leaves_explicit_subaction_and_help():
+    import theke
+    parser = theke.build_parser()
+    assert theke._inject_default_action(parser, ["enrich", "report"]) == ["enrich", "report"]
+    assert theke._inject_default_action(parser, ["match", "-h"]) == ["match", "-h"]
+
+
+def test_default_action_untouched_for_commands_without_default():
+    import theke
+    parser = theke.build_parser()
+    assert theke._inject_default_action(parser, ["fetch", "--force"]) == ["fetch", "--force"]
+
+
+def test_cli_bare_enrich_dispatches_run(tmp_path, monkeypatch):
+    import theke
+    seen = {}
+    def fake_run(conn, args):
+        seen["cmd"] = args.enrich_cmd
+        return {"enriched": 0}
+    monkeypatch.setattr(theke, "_enrich_run", fake_run)
+    db = str(tmp_path / "t.db")
+    assert main(["--db", db, "enrich"]) == 0
+    assert seen["cmd"] == "run"
+
+
 # -- fetch: conversions -----------------------------------------------------
 
 def test_film_id_matches_utf16le_sha256_spec():
