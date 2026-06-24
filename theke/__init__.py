@@ -1092,6 +1092,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", metavar="PATH",      help=f"config file (default: {CONFIG_DEFAULT_PATH})")
     parser.add_argument("--db",     metavar="PATH",      help="database file (overrides db_path from config)")
     parser.add_argument("--json",   action="store_true", help="machine-readable output: one JSON object on stdout")
+    parser.default_actions = {}  # command -> (default action, its subparsers action)
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
 
     sub.add_parser("config", help="show the effective configuration")
@@ -1140,7 +1141,49 @@ def build_parser() -> argparse.ArgumentParser:
     msho.add_argument("--min-conf", type=float, metavar="X",                                     help="min confidence to list (default 0.0)")
     msho.add_argument("--limit",    type=int, default=20, metavar="N",                           help="max candidates to list (default 20)")
 
+    _set_default_action(parser, "enrich", csub, "run")  # `theke enrich` == `theke enrich run`
+    _set_default_action(parser, "match",  msub, "run")  # `theke match ...` == `theke match run ...`
     return parser
+
+
+def _set_default_action(parser, command, subparsers, default):
+    """Register `default` as the sub-action used when `command` is invoked with
+    no action. Any parent can carry its own default (not just `run`)."""
+    parser.default_actions[command] = (default, subparsers)
+
+
+def _inject_default_action(parser, argv):
+    """Insert a parent command's default sub-action when it is invoked bare, so
+    `theke enrich` behaves like `theke enrich run` and `theke match --tmdb X`
+    like `theke match run --tmdb X`. Injecting before parsing lets argparse do
+    the rest -- sub-action flags, required checks and defaults all stay intact.
+    An explicit action or a parent-level `-h`/`--help` is left untouched."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    idx = _command_index(parser, argv)
+    if idx is None:
+        return argv
+    spec = parser.default_actions.get(argv[idx])
+    if spec is None:
+        return argv
+    default, subparsers = spec
+    nxt = argv[idx + 1] if idx + 1 < len(argv) else None
+    if nxt in subparsers.choices or nxt in ("-h", "--help"):
+        return argv
+    return argv[:idx + 1] + [default] + argv[idx + 1:]
+
+
+def _command_index(parser, argv):
+    """Index of the command token in argv: the first positional, skipping the
+    top-level options and the values they consume. None if argv names none."""
+    value_opts = {opt for a in parser._actions if a.option_strings and a.nargs != 0
+                      for opt in a.option_strings}
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if not tok.startswith("-") or tok == "-":
+            return i
+        i += 2 if tok in value_opts and "=" not in tok else 1
+    return None
 
 
 def _setup_logging():
@@ -1160,7 +1203,8 @@ def main(argv=None) -> int:
     _setup_logging()
 
     try:
-        args = build_parser().parse_args(argv)
+        parser = build_parser()
+        args = parser.parse_args(_inject_default_action(parser, argv))
     except SystemExit as exc:  # argparse handles usage errors and --help
         return EXIT_USAGE if exc.code else EXIT_OK
 
