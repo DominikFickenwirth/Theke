@@ -36,3 +36,26 @@ Verified on TMDB (no API key -> checked the website):
 Conclusion: 4-digit seasons are TMDB-aligned for these shows; the season AND the
 running episode number can match. Dropping them would REDUCE matchability.
 -> No change. The SE_A "4-digit season kept as-is" behaviour stays.
+
+## Round 3 -- explicit Sxx/Exx overrides Movie -> Episode  [DONE]
+
+Revises an earlier (pre-TMDB-goal) decision that "Reihe of TV films stays
+Movie". Verified on TMDB: the German Krimi-/TV-film Reihen carrying an explicit
+"(S01/E03)" are TV series, not movie collections -- Sarah Kohr (tv/202362),
+Der Bozen-Krimi, Nord bei Nordwest, Praxis mit Meerblick, Der Zuerich-Krimi,
+Maria Wern, Kommissar Van der Valk, ... So the explicit S/E (broadcaster series
+notation) must win over a "Krimi/Fernsehfilm" metazeile.
+
+Fix (unifies the episodic overrides): after the duration prior, an explicit
+(season AND episode) or a Mehrteiler count -> Episode, overriding None/Movie/
+Clip, but never a trailer (T, stays a clip) or a live Event. A standalone film
+carries no marker and stays Movie.
+
+Live-DB effect vs round-2 baseline: Movie->Episode 722 (all genuine TV series),
+Episode->Clip 37 (all trailers that the old S/E-decisive rule had mislabelled
+Episode -- now matching-safe Clip), Clip->Episode 25 (24 genuine multi-part
+concert/web series, 1 borderline "24/25" season-designation misparse). No real
+regressions.
+
+Known remaining (minor): NPART "n/m" at end of title can misread a season
+designation ("... 24/25") as episode 24 of 25. Single-digit-ish, low volume.

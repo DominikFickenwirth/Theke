@@ -365,18 +365,21 @@ def enrich(sender, topic, title, description, duration) -> dict:
             cat = ARTE_SUB.get(unter.strip()) or ocat
             if cat and not r['category']: r['category'] = cat
             genres.update(gset); kat_src = 'arte-topic'
-    if not r['category'] and kat_src != 'arte-topic':   # no explicit medium signal
-        if r['season'] is not None and r['episode'] is not None:
-            r['category'] = 'Episode'                  # S/E notation is decisive
-            kat_src = 'season-episode'
-        else:                                          # honest low-conf prior
-            s = duration or 0
-            r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
-            kat_src = 'duration-prior'
+    if not r['category'] and kat_src != 'arte-topic':   # honest low-conf prior
+        s = duration or 0
+        r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
+        kat_src = 'duration-prior'
 
-    if r['episode_count'] is not None and r['category'] in (None, 'Movie'):
-        r['category'] = 'Episode'                  # Mehrteiler "(n/m)" -> TV series,
-        kat_src = 'mehrteiler'                     # overrides a Movie/None guess
+    # An explicit Sxx/Exx (or Staffel/Folge) and a Mehrteiler "(n/m)" count are
+    # broadcaster series notation: on TMDB the work is a TV series (German Krimi-
+    # /TV-film Reihen too), so it is an Episode -- overriding a Movie/None/Clip
+    # medium guess. A trailer (T) stays a clip; a live Event and a standalone
+    # film (no marker) are untouched.
+    has_se = r['season'] is not None and r['episode'] is not None
+    if (has_se or r['episode_count'] is not None) and 'T' not in flags \
+            and r['category'] != 'Event':
+        r['category'] = 'Episode'
+        kat_src = 'episodic'
 
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
     if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
