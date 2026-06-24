@@ -252,6 +252,12 @@ und markiert die passenden `mediathek`-Zeilen mit `tmdb_id` + `match_confidence`
 die Kandidaten-Scores schreibfrei. Ohne Aktion läuft der Default `run`, d. h.
 `theke match --tmdb 1474601` entspricht `theke match run --tmdb 1474601`.
 
+Mit `--type series` werden statt Filmen Serien-**Episoden** gematcht: TMDB führt
+pro Serie nur eine ID, daher identifiziert erst das Tripel aus Serien-ID, Staffel
+und Folge (`--tmdb` + `--season` + `--episode`) eine Episode eindeutig. Gematcht
+wird über Serienname-Ähnlichkeit **und** exakte Staffel/Folge; Episodentitel und
+Laufzeit bestätigen weich. (Bulk-Modus für ganze Staffeln/Serien ist geplant.)
+
 ### `match run`
 
 Schreibt `tmdb_id` + `match_confidence` auf die Treffer. Eine bereits gesetzte,
@@ -267,15 +273,22 @@ exakte ID werden die übrigen Sprachvarianten verknüpft und mit derselben
 Ergebnis meldet `arte_linked` (Zahl der so verknüpften Zeilen) -- wie
 `candidates` auch bei `--dry-run` gefüllt; `written` bleibt dann 0.
 
-| Option        | Wirkung                                                       |
-| ------------- | ------------------------------------------------------------- |
-| `--tmdb ID`   | Zu matchende TMDB-Film-ID (Pflicht).                          |
-| `--dry-run`   | Treffer berechnen, nichts schreiben.                          |
-| `--min-conf X`| Mindest-Confidence zum Markieren (Standard: Config).          |
+Bei `--type series` trägt das Ergebnis den **Episodentitel** in `title` und den
+Serientitel zusätzlich in `series`.
+
+| Option           | Wirkung                                                       |
+| ---------------- | ------------------------------------------------------------- |
+| `--tmdb ID`      | Zu matchende TMDB-ID (Film-ID, bzw. Serien-ID bei `series`).  |
+| `--type T`       | `movie` (Standard) oder `series`.                             |
+| `--season N`     | Staffelnummer (Pflicht bei `--type series`).                  |
+| `--episode N`    | Folgennummer (Pflicht bei `--type series`).                   |
+| `--dry-run`      | Treffer berechnen, nichts schreiben.                          |
+| `--min-conf X`   | Mindest-Confidence zum Markieren (Standard: Config).          |
 
 ```powershell
 theke --db build/theke.db match run --tmdb 1474601   # candidates/written/arte_linked
 theke --db build/theke.db match --tmdb 1474601 --dry-run
+theke --db build/theke.db match run --type series --tmdb 290 --season 2 --episode 6
 ```
 
 ### `match show`
@@ -284,14 +297,18 @@ Reines Lese-Werkzeug: listet die Kandidaten-Zeilen mit Score-Aufschlüsselung
 (Titelähnlichkeit, Jahr-/Laufzeit-Differenz), ohne zu schreiben. Standardmäßig
 alles, was nicht verworfen wurde -- zum Justieren der Match-Heuristik.
 
-| Option        | Wirkung                                              |
-| ------------- | --------------------------------------------------- |
-| `--tmdb ID`   | Zu inspizierende TMDB-Film-ID (Pflicht).            |
-| `--min-conf X`| Mindest-Confidence zum Listen (Standard 0.0).       |
-| `--limit N`   | Maximale Kandidatenzahl (Standard 20).              |
+| Option         | Wirkung                                                     |
+| -------------- | ----------------------------------------------------------- |
+| `--tmdb ID`    | Zu inspizierende TMDB-ID (Film-ID, bzw. Serien-ID).         |
+| `--type T`     | `movie` (Standard) oder `series`.                           |
+| `--season N`   | Staffelnummer (Pflicht bei `--type series`).                |
+| `--episode N`  | Folgennummer (Pflicht bei `--type series`).                 |
+| `--min-conf X` | Mindest-Confidence zum Listen (Standard 0.0).               |
+| `--limit N`    | Maximale Kandidatenzahl (Standard 20).                      |
 
 ```powershell
 theke --db build/theke.db match show --tmdb 1474601
+theke --db build/theke.db match show --type series --tmdb 290 --season 2 --episode 6
 ```
 
 ### `match reset`

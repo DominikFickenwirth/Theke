@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD
-from theke.match import (tmdb_movie, find_matches, arte_anchor_ids,
-                         find_arte_links)
+from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
+                         arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
 
 CONFIG_DEFAULT_PATH = "theke.json"
@@ -1066,8 +1066,8 @@ def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
         return _match_reset(conn, args)
     if not cfg.tmdb_api_key:
         raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
-    if args.type != "movie":
-        raise ValueError(f"unsupported --type {args.type!r} (only 'movie' for now)")
+    if args.type == "series" and (args.season is None or args.episode is None):
+        raise ValueError("--type series requires --season and --episode")
     match args.match_cmd:
         case "run":  return _match_run(conn, cfg, args)
         case "show": return _match_show(conn, cfg, args)
@@ -1081,6 +1081,23 @@ def _match_reset(conn, args) -> dict:
     return _reset(conn, sets, "status='2'")
 
 
+def _match_resolve(conn, cfg, args, min_conf) -> tuple:
+    """Resolve the TMDB id and find candidate rows, for a movie (title/year/
+    runtime) or a series episode (series-name + exact season/episode). Returns
+    (meta, result_head, matches); the head carries the episode title + series
+    name for a series, the film title for a movie."""
+    if args.type == "series":
+        meta = tmdb_tv(cfg, args.tmdb, args.season, args.episode)
+        matches = find_episode_matches(conn, meta, min_conf)
+        head = {"tmdb_id": meta["tmdb_id"], "title": meta["episode_name"],
+                "series": meta["series_title"]}
+    else:
+        meta = tmdb_movie(cfg, args.tmdb)
+        matches = find_matches(conn, meta, min_conf)
+        head = {"tmdb_id": meta["tmdb_id"], "title": meta["title"]}
+    return meta, head, matches
+
+
 def _match_run(conn, cfg, args) -> dict:
     """Resolve the TMDB id and write tmdb_id + match_confidence onto matching
     rows. A pass-1 hit on an Arte sender triggers a second pass that links the
@@ -1089,9 +1106,8 @@ def _match_run(conn, cfg, args) -> dict:
     not clobbered); --dry-run computes but writes nothing. `candidates` and
     `arte_linked` report what the two passes found (shown even with --dry-run);
     `written` is what was actually tagged."""
-    meta = tmdb_movie(cfg, args.tmdb)
     min_conf = cfg.match_min_confidence if args.min_conf is None else args.min_conf
-    matches = find_matches(conn, meta, min_conf)
+    meta, head, matches = _match_resolve(conn, cfg, args, min_conf)
     anchors = arte_anchor_ids(conn, matches)
     links = find_arte_links(conn, anchors, {m["mediathek_id"] for m in matches})
     written = 0
@@ -1112,25 +1128,32 @@ def _match_run(conn, cfg, args) -> dict:
         except BaseException:
             conn.execute("ROLLBACK")
             raise
-    return {"tmdb_id": meta["tmdb_id"], "title": meta["title"],
-            "candidates": len(matches), "written": written,
+    return {**head, "candidates": len(matches), "written": written,
             "arte_linked": len(links)}
 
 
 def _match_show(conn, cfg, args) -> dict:
     """Read-only: list candidate rows with their score breakdown (default lists
     everything not rejected, for tuning)."""
-    meta = tmdb_movie(cfg, args.tmdb)
     min_conf = 0.0 if args.min_conf is None else args.min_conf
-    matches = find_matches(conn, meta, min_conf)[:args.limit]
+    meta, head, matches = _match_resolve(conn, cfg, args, min_conf)
+    matches = matches[:args.limit]
     if args.json:
-        return {"tmdb_id": meta["tmdb_id"], "title": meta["title"], "matches": matches}
-    _print_matches(meta, matches)
+        return {**head, "matches": matches}
+    _print_matches(meta, matches, args.type)
     return {}
 
 
-def _print_matches(meta, matches):
+def _print_matches(meta, matches, type_):
     """One header line + one line per candidate to stdout (the result)."""
+    if type_ == "series":
+        print(f'{meta["episode_name"]!r} of {meta["series_title"]!r} '
+              f'(tmdb {meta["tmdb_id"]}, {len(matches)} candidate(s))')
+        for m in matches:
+            print(f'  {m["confidence"]:.3f}  {m["clean_title"]!r}  '
+                  f'series={m["series_sim"]} ep={m["episode_title_sim"]} '
+                  f'dRun={m["runtime_delta"]}')
+        return
     print(f'{meta["title"]!r} (tmdb {meta["tmdb_id"]}, year {meta["year"]}, '
           f'{len(matches)} candidate(s))')
     for m in matches:
@@ -1383,18 +1406,22 @@ def build_parser() -> argparse.ArgumentParser:
     cdis.add_argument("--field",         required=True, metavar="NAME",                          help="the column to tally")
     cdis.add_argument("--limit",         type=int, default=30, metavar="N",                      help="top-N values (default 30)")
 
-    matchp = sub.add_parser("match", help="resolve a TMDB id to mediathek rows (movies)", description="Wish-first matching: pull a TMDB movie's title variants/year/runtime and tag the matching mediathek rows with tmdb_id + match_confidence (run), or explain the candidate scores read-only (show).")
+    matchp = sub.add_parser("match", help="resolve a TMDB id to mediathek rows (movies/series)", description="Wish-first matching: pull a TMDB movie's title variants/year/runtime (or a series episode's series title + season/episode) and tag the matching mediathek rows with tmdb_id + match_confidence (run), or explain the candidate scores read-only (show).")
     msub = matchp.add_subparsers(dest="match_cmd", required=True, metavar="action")
-    mrun = msub.add_parser("run",  help="tag matching rows with tmdb_id + confidence (default)",  description="Resolve the TMDB id and write tmdb_id + match_confidence onto matching movie rows. An existing different tmdb_id is preserved, not overwritten.")
-    msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate movie rows with their score breakdown (title similarity, year/runtime deltas) without writing. Defaults to listing everything not rejected.")
+    mrun = msub.add_parser("run",  help="tag matching rows with tmdb_id + confidence (default)",  description="Resolve the TMDB id and write tmdb_id + match_confidence onto matching rows. For --type series, pass the (--tmdb, --season, --episode) triple. An existing different tmdb_id is preserved, not overwritten.")
+    msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate rows with their score breakdown without writing. Defaults to listing everything not rejected.")
     mrst = msub.add_parser("reset", help="undo match: status 2 -> 1",                              description="Take matched rows (status '2') back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
     mrst.add_argument("--status-only", action="store_true",                                        help="only flip status, keep tmdb_id + match_confidence")
-    mrun.add_argument("--tmdb",     required=True, metavar="ID",                                  help="TMDB movie id to match")
-    mrun.add_argument("--type",     default="movie", choices=["movie"],                           help="media type (only movie for now)")
+    mrun.add_argument("--tmdb",     required=True, metavar="ID",                                  help="TMDB id to match (movie id, or series id for --type series)")
+    mrun.add_argument("--type",     default="movie", choices=["movie", "series"],                 help="media type (default movie)")
+    mrun.add_argument("--season",   type=int, metavar="N",                                        help="season number (required for --type series)")
+    mrun.add_argument("--episode",  type=int, metavar="N",                                        help="episode number (required for --type series)")
     mrun.add_argument("--dry-run",  action="store_true",                                          help="compute matches but write nothing")
     mrun.add_argument("--min-conf", type=float, metavar="X",                                      help="min confidence to tag (default: config match_min_confidence)")
-    msho.add_argument("--tmdb",     required=True, metavar="ID",                                  help="TMDB movie id to inspect")
-    msho.add_argument("--type",     default="movie", choices=["movie"],                           help="media type (only movie for now)")
+    msho.add_argument("--tmdb",     required=True, metavar="ID",                                  help="TMDB id to inspect (movie id, or series id for --type series)")
+    msho.add_argument("--type",     default="movie", choices=["movie", "series"],                 help="media type (default movie)")
+    msho.add_argument("--season",   type=int, metavar="N",                                        help="season number (required for --type series)")
+    msho.add_argument("--episode",  type=int, metavar="N",                                        help="episode number (required for --type series)")
     msho.add_argument("--min-conf", type=float, metavar="X",                                      help="min confidence to list (default 0.0)")
     msho.add_argument("--limit",    type=int, default=20, metavar="N",                            help="max candidates to list (default 20)")
 

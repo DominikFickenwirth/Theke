@@ -547,6 +547,27 @@ def test_duration_prior_clip_episode_null():
     assert enrich("ARD", "Beiträge", "A", "", 3600)["category"] is None
 
 
+def test_season_episode_implies_episode_over_duration_prior():
+    # No category signal, but season+episode are both set: the S/E notation is
+    # decisive -- a long episode (>1800s) must not fall through to a NULL
+    # category (the duration prior would yield None here).
+    r = enrich("ZDFneo", "The Rookie", "Feuergefecht (S4/E7)", "", 2394)
+    assert r["season"] == 4
+    assert r["episode"] == 7
+    assert r["category"] == "Episode"
+
+
+def test_explicit_movie_with_season_episode_stays_movie():
+    # An explicit Movie signal (metazeile) is NOT overridden by an S/E notation:
+    # feature-length TV films aired under a Reihe keep category Movie, even with
+    # a season/episode number.
+    r = enrich("3Sat", "Sarah Kohr",
+                 "Das verschwundene Mädchen - Krimi, Deutschland 2014 (S1/E3)", "", 5367)
+    assert r["category"] == "Movie"
+    assert r["season"] == 1
+    assert r["episode"] == 3
+
+
 # -- cmd_enrich: DB write side ---------------------------------------------
 
 def open_db(tmp_path):
