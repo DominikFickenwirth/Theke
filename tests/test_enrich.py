@@ -585,15 +585,26 @@ def test_mehrteiler_count_does_not_override_clip():
     assert r["category"] == "Clip"
 
 
-def test_explicit_movie_with_season_episode_stays_movie():
-    # An explicit Movie signal (metazeile) is NOT overridden by an S/E notation:
-    # feature-length TV films aired under a Reihe keep category Movie, even with
-    # a season/episode number.
+def test_explicit_se_overrides_movie_label():
+    # An explicit Sxx/Exx is broadcaster series notation: on TMDB these German
+    # Krimi-/TV-film Reihen are TV series (Sarah Kohr = tv/202362, Der Bozen-
+    # Krimi, Nord bei Nordwest), so the S/E notation wins over a "Krimi/
+    # Fernsehfilm" metazeile and the row is an Episode, not a standalone Movie.
     r = enrich("3Sat", "Sarah Kohr",
                  "Das verschwundene Mädchen - Krimi, Deutschland 2014 (S1/E3)", "", 5367)
-    assert r["category"] == "Movie"
+    assert r["category"] == "Episode"
     assert r["season"] == 1
     assert r["episode"] == 3
+
+
+def test_standalone_film_without_se_stays_movie():
+    # The override is gated on an explicit episodic marker: a feature film with a
+    # "Spielfilm"/"Krimi" metazeile but NO Sxx/Exx and NO "(n/m)" stays Movie.
+    r = enrich("3Sat", "Spielfilm",
+                 "Der Vorname - Komödie, Deutschland 2018", "", 5400)
+    assert r["category"] == "Movie"
+    assert r["season"] is None
+    assert r["episode"] is None
 
 
 # -- cmd_enrich: DB write side ---------------------------------------------
