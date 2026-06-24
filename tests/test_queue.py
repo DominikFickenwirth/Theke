@@ -110,3 +110,180 @@ def test_select_ov_resolves_to_original_language_in_whitelist():
 
 def test_select_ov_dropped_when_original_language_not_whitelisted():
     assert select_downloads([row("a", language="ov")], ["de"], "en") == []
+
+
+# -- cmd_queue add (CLI write side) ------------------------------------------
+
+from types import SimpleNamespace
+from theke import cmd_queue, db_connect, main
+
+# original_language 'en', title "Mein Film", year 2020.
+TMDB = {"title": "Mein Film", "original_title": "My Film",
+        "release_date": "2020-05-01", "runtime": 100, "original_language": "en",
+        "alternative_titles": {"titles": []}}
+
+CFG = Config(tmdb_api_key="KEY", languages=["de", "fr"])
+
+
+def open_db(tmp_path):
+    return db_connect(str(tmp_path / "theke.db"))
+
+
+def insert_mediathek(conn, mediathek_id, status="2", tmdb_id="100", language="de",
+                     duration=6000, size_mb=700, url_video="http://v",
+                     url_video_hd="", url_video_small="", url_subtitle="",
+                     url_website="", date="2026-01-01 20:00:00",
+                     clean_title="Film", year=2020):
+    cols = dict(status=status, mediathek_id=mediathek_id, tmdb_id=tmdb_id,
+                language=language, duration=duration, size_mb=size_mb,
+                url_video=url_video, url_video_hd=url_video_hd,
+                url_video_small=url_video_small, url_subtitle=url_subtitle,
+                url_website=url_website, date=date, clean_title=clean_title, year=year)
+    conn.execute(f"INSERT INTO mediathek ({','.join(cols)}) VALUES "
+                 f"({','.join(':' + k for k in cols)})", cols)
+
+
+def qargs(queue_cmd="add", tmdb=None, mediathek_id=None, status=None,
+          ids=None, all=False, json=False):
+    return SimpleNamespace(queue_cmd=queue_cmd, tmdb=tmdb, mediathek_id=mediathek_id,
+                           status=status, ids=ids or [], all=all, json=json)
+
+
+def stub_tmdb(monkeypatch):
+    monkeypatch.setattr(theke, "http_get",
+                        lambda url: json.dumps(TMDB).encode("utf-8"))
+
+
+def queue_rows(conn):
+    return [dict(r) for r in conn.execute("SELECT * FROM queue ORDER BY id")]
+
+
+def test_queue_add_by_tmdb_dedups_and_inserts(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", duration=6000)
+        insert_mediathek(conn, "m_fr", language="fr", duration=6000)  # shares video
+        insert_mediathek(conn, "m_es", language="es", duration=6000)  # not whitelisted
+        result = cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+        assert result == {"queued": 2, "skipped": 0, "deduplicated": 1}
+        rows = queue_rows(conn)
+        assert [(r["mediathek_id"], r["status"], r["language"], r["resolution"],
+                 r["remux"], r["name"], r["tmdb_id"]) for r in rows] == [
+            ("m_de", "P", "de", "SD", "AV", "Mein Film (2020)", "100"),
+            ("m_fr", "P", "fr", "SD", "A",  "Mein Film (2020)", "100")]
+    finally:
+        conn.close()
+
+
+def test_queue_add_auto_approve_writes_approved(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de")
+        cmd_queue(conn, Config(tmdb_api_key="KEY", languages=["de"],
+                               queue_auto_approve=True), qargs(tmdb=["100"]))
+        assert queue_rows(conn)[0]["status"] == "A"
+    finally:
+        conn.close()
+
+
+def test_queue_add_is_idempotent_for_active_entries(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", duration=6000)
+        insert_mediathek(conn, "m_fr", language="fr", duration=6000)
+        cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+        again = cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+        assert again == {"queued": 0, "skipped": 2, "deduplicated": 1}
+        assert len(queue_rows(conn)) == 2   # no duplicates added
+    finally:
+        conn.close()
+
+
+def test_queue_add_requeues_after_cancelled(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de")
+        cmd_queue(conn, Config(tmdb_api_key="KEY", languages=["de"]), qargs(tmdb=["100"]))
+        conn.execute("UPDATE queue SET status='C'")   # cancelled, no longer active
+        again = cmd_queue(conn, Config(tmdb_api_key="KEY", languages=["de"]),
+                          qargs(tmdb=["100"]))
+        assert again["queued"] == 1
+        assert len(queue_rows(conn)) == 2   # a fresh row alongside the cancelled one
+    finally:
+        conn.close()
+
+
+def test_queue_add_by_mediathek_id_single_av(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", url_video_hd="http://hd")
+        result = cmd_queue(conn, CFG, qargs(mediathek_id=["m_de"]))
+        assert result == {"queued": 1, "skipped": 0, "deduplicated": 0}
+        r = queue_rows(conn)[0]
+        assert (r["mediathek_id"], r["resolution"], r["remux"], r["name"]) == \
+               ("m_de", "HD", "AV", "Mein Film (2020)")
+    finally:
+        conn.close()
+
+
+def test_queue_add_by_mediathek_id_unmatched_uses_clean_title(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)   # must NOT be needed (no tmdb_id on the row)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_solo", status="1", tmdb_id="", language="de",
+                         clean_title="Solo", year=2019)
+        cmd_queue(conn, CFG, qargs(mediathek_id=["m_solo"]))
+        r = queue_rows(conn)[0]
+        assert r["name"] == "Solo (2019)" and r["remux"] == "AV"
+    finally:
+        conn.close()
+
+
+def test_queue_add_resolves_ov_via_tmdb_original_language(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)   # original_language 'en'
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_ov", language="ov")
+        cmd_queue(conn, Config(tmdb_api_key="KEY", languages=["de", "en"]),
+                  qargs(tmdb=["100"]))
+        assert queue_rows(conn)[0]["language"] == "en"
+    finally:
+        conn.close()
+
+
+def test_queue_add_without_selector_is_error(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="--tmdb or --mediathek-id"):
+            cmd_queue(conn, CFG, qargs())
+    finally:
+        conn.close()
+
+
+def test_queue_add_by_tmdb_requires_api_key(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ConfigError, match="TMDB API key"):
+            cmd_queue(conn, Config(languages=["de"]), qargs(tmdb=["100"]))
+    finally:
+        conn.close()
+
+
+def test_queue_add_cli_json(tmp_path, monkeypatch, capsys):
+    stub_tmdb(monkeypatch)
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY",
+                                   "languages": ["de"]}), encoding="utf-8")
+    conn = db_connect(db)
+    insert_mediathek(conn, "m_de", language="de")
+    conn.close()
+    rc = main(["--json", "--config", str(cfgpath), "queue", "add", "--tmdb", "100"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"queued": 1, "skipped": 0,
+                                                   "deduplicated": 0}
