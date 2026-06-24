@@ -34,7 +34,7 @@ NEW_COLS = {
 def test_enrich_migration_adds_columns_on_fresh_db(tmp_path):
     conn = db_connect(str(tmp_path / "theke.db"))  # real MIGRATIONS
     try:
-        assert user_version(conn) == 4               # phase 2 + phase 3 cols + rename
+        assert user_version(conn) == 5               # phase 2 + phase 3 cols + rename + phase 5 queue
         assert NEW_COLS <= column_names(conn)
     finally:
         conn.close()
@@ -45,7 +45,7 @@ def test_enrich_migration_upgrades_v1_db(tmp_path):
     db_connect(db, migrations=MIGRATIONS[:1]).close()   # stop at phase-2 schema
     conn = db_connect(db)                               # apply phase-3 migrations
     try:
-        assert user_version(conn) == 4
+        assert user_version(conn) == 5
         cols = column_names(conn)
         assert NEW_COLS <= cols
         # a row written under v1 has the new columns, all NULL
@@ -62,7 +62,7 @@ def test_enrich_migration_upgrades_v2_db_adds_genre_slot(tmp_path):
     db_connect(db, migrations=MIGRATIONS[:2]).close()   # stop at phase-3 part-1
     conn = db_connect(db)                               # apply the genre/slot step
     try:
-        assert user_version(conn) == 4
+        assert user_version(conn) == 5
         assert {"genre", "slot"} <= column_names(conn)
         conn.execute("INSERT INTO mediathek (status, mediathek_id) VALUES ('0','x')")
         row = conn.execute("SELECT * FROM mediathek").fetchone()
@@ -80,7 +80,7 @@ def test_enrich_migration_renames_confidence_column(tmp_path):
     conn.close()
     conn = db_connect(db)                                # apply entry 4 (the rename)
     try:
-        assert user_version(conn) == 4
+        assert user_version(conn) == 5
         cols = column_names(conn)
         assert "enrich_confidence" in cols
         assert "classify_confidence" not in cols

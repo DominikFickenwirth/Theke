@@ -144,6 +144,23 @@ MIGRATIONS: list[tuple[str, ...]] = [
     (
         "ALTER TABLE mediathek RENAME COLUMN classify_confidence TO enrich_confidence",
     ),
+    (  # phase 5: the download queue (review queue + download record in one).
+       # No FK / no UNIQUE on mediathek_id: re-queue is allowed and a mediathek
+       # row may be deleted under a queue entry; idempotency lives in _queue_add.
+        """CREATE TABLE queue (
+            id            INTEGER PRIMARY KEY,
+            status        TEXT NOT NULL,
+            mediathek_id  TEXT NOT NULL,
+            tmdb_id       TEXT,
+            name          TEXT NOT NULL,
+            language      TEXT NOT NULL,
+            resolution    TEXT NOT NULL,
+            remux         TEXT NOT NULL DEFAULT 'AV',
+            error         TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )""",
+    ),
 ]
 
 
