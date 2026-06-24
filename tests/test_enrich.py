@@ -114,12 +114,13 @@ def test_ard_metazeile_in_description():
     assert r["enrich_confidence"] == 0.9
 
 
-def test_four_digit_season_is_broadcast_year_not_a_season():
-    # "(S2025/E221)" on a daily show: 2025 is the year, E the running number.
+def test_four_digit_season_stays_a_season_not_the_year():
+    # "(S2025/E221)" on a daily show: the 4-digit season is kept as the season,
+    # never written to year (which is the production/release year, not broadcast).
     r = enrich("ZDF", "heute", "heute 19:00 Uhr (S2025/E221)", "", 900)
-    assert r["year"] == 2025
-    assert r["season"] is None
-    assert r["episode"] is None
+    assert r["season"] == 2025
+    assert r["episode"] == 221
+    assert r["year"] is None
     assert r["clean_title"] == "heute 19:00 Uhr"
 
 
