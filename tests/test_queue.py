@@ -287,3 +287,51 @@ def test_queue_add_cli_json(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == {"queued": 1, "skipped": 0,
                                                    "deduplicated": 0}
+
+
+# -- cmd_queue list ----------------------------------------------------------
+
+def test_queue_list_returns_entries_ordered(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", duration=6000)
+        insert_mediathek(conn, "m_fr", language="fr", duration=6000)
+        cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="list", json=True))
+        assert result["count"] == 2
+        assert [(r["mediathek_id"], r["status"], r["remux"]) for r in result["queue"]] == \
+               [("m_de", "P", "AV"), ("m_fr", "P", "A")]
+    finally:
+        conn.close()
+
+
+def test_queue_list_filters_by_status(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", duration=6000)
+        insert_mediathek(conn, "m_fr", language="fr", duration=6000)
+        cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+        conn.execute("UPDATE queue SET status='A' WHERE mediathek_id='m_de'")
+        approved = cmd_queue(conn, CFG, qargs(queue_cmd="list", status="approved", json=True))
+        proposed = cmd_queue(conn, CFG, qargs(queue_cmd="list", status="proposed", json=True))
+        assert [r["mediathek_id"] for r in approved["queue"]] == ["m_de"]
+        assert [r["mediathek_id"] for r in proposed["queue"]] == ["m_fr"]
+    finally:
+        conn.close()
+
+
+def test_queue_list_cli_default_action(tmp_path, monkeypatch, capsys):
+    stub_tmdb(monkeypatch)
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY",
+                                   "languages": ["de"]}), encoding="utf-8")
+    conn = db_connect(db)
+    insert_mediathek(conn, "m_de", language="de")
+    conn.close()
+    assert main(["--config", str(cfgpath), "queue", "add", "--tmdb", "100"]) == 0
+    capsys.readouterr()
+    assert main(["--json", "--config", str(cfgpath), "queue"]) == 0   # bare -> list
+    assert json.loads(capsys.readouterr().out)["count"] == 1
