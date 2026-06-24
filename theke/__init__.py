@@ -21,6 +21,7 @@ from datetime import datetime, time, timezone
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD
 from theke.match import (tmdb_movie, find_matches, arte_anchor_ids,
                          find_arte_links)
+from theke.queue import select_downloads, resolution_of
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -47,6 +48,9 @@ class Config:
     tmdb_api_url:         str   = "https://api.themoviedb.org/3"
     tmdb_language:        str   = "de-DE"
     match_min_confidence: float = 0.6
+    queue_auto_approve:   bool  = False
+    languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
+    name_template:        str   = "{title} ({year})"
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
@@ -143,6 +147,23 @@ MIGRATIONS: list[tuple[str, ...]] = [
     ),
     (
         "ALTER TABLE mediathek RENAME COLUMN classify_confidence TO enrich_confidence",
+    ),
+    (  # phase 5: the download queue (review queue + download record in one).
+       # No FK / no UNIQUE on mediathek_id: re-queue is allowed and a mediathek
+       # row may be deleted under a queue entry; idempotency lives in _queue_add.
+        """CREATE TABLE queue (
+            id            INTEGER PRIMARY KEY,
+            status        TEXT NOT NULL,
+            mediathek_id  TEXT NOT NULL,
+            tmdb_id       TEXT,
+            name          TEXT NOT NULL,
+            language      TEXT NOT NULL,
+            resolution    TEXT NOT NULL,
+            remux         TEXT NOT NULL DEFAULT 'AV',
+            error         TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        )""",
     ),
 ]
 
@@ -1117,6 +1138,193 @@ def _print_matches(meta, matches):
               f'sim={m["title_sim"]} dY={m["year_delta"]} dRun={m["runtime_delta"]}')
 
 
+# -- queue (phase 5: staging + review) ---------------------------------------
+# Status chars, chosen ASCII-ascending in lifecycle order so a plain sort tracks
+# progress: '0' proposed, 'A' approved, 'B' busy (downloading), 'C' cancelled,
+# 'D' done, 'F' failed. DB-only stage; nothing here touches the filesystem.
+
+QUEUE_STATUS = {"proposed": "0", "approved": "A", "busy": "B",
+                "cancelled": "C", "done": "D", "failed": "F"}
+QUEUE_ACTIVE = ("0", "A", "B")   # proposed/approved/busy -- not yet terminal
+
+
+def _now() -> str:
+    """Current UTC time as an ISO-8601 'Z' string (queue timestamps)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a queue action. `add` stages downloads (the only writer of new
+    rows); list/approve/cancel manage the review queue."""
+    match args.queue_cmd:
+        case "add":     return _queue_add(conn, cfg, args)
+        case "list":    return _queue_list(conn, args)
+        case "approve": return _queue_set_status(conn, args,
+                            tuple(QUEUE_STATUS.values()) if args.force else ("0",),
+                            "A", "approved")
+        case "cancel":  return _queue_set_status(conn, args, QUEUE_ACTIVE, "C", "cancelled")
+        case "delete":  return _queue_delete(conn, args)
+        case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
+
+
+def _queue_add(conn, cfg, args) -> dict:
+    """Stage downloads into the queue. `--tmdb` resolves a matched film, dedups
+    its many mediathek rows (theke.queue.select_downloads) and queues the minimal
+    set; `--mediathek-id` queues one row directly ('AV'). New entries are
+    'proposed' unless queue_auto_approve is set. A mediathek_id already queued in
+    an active state (proposed/approved/busy) is skipped; a terminal one does not
+    block a re-queue. `deduplicated` counts the source rows collapsed or filtered."""
+    if not args.tmdb and not args.mediathek_id:
+        raise ValueError("queue add needs --tmdb or --mediathek-id")
+    status = QUEUE_STATUS["approved"] if cfg.queue_auto_approve else QUEUE_STATUS["proposed"]
+    totals = {"queued": 0, "skipped": 0, "deduplicated": 0}
+    conn.execute("BEGIN")
+    try:
+        for tid in args.tmdb or []:
+            _queue_add_tmdb(conn, cfg, str(tid), status, totals)
+        for mid in args.mediathek_id or []:
+            _queue_add_mediathek(conn, cfg, mid, status, totals)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return totals
+
+
+def _queue_add_tmdb(conn, cfg, tmdb_id, status, totals):
+    """Queue the deduplicated download set of one matched film."""
+    if not cfg.tmdb_api_key:
+        raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
+    meta = tmdb_movie(cfg, tmdb_id)
+    name = _queue_name(cfg, meta["title"], meta["year"])
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM mediathek WHERE status='2' AND tmdb_id=?", (tmdb_id,))]
+    picks = select_downloads(rows, cfg.languages, meta["original_language"])
+    totals["deduplicated"] += len(rows) - len(picks)
+    for p in picks:
+        _queue_insert(conn, status, p["mediathek_id"], tmdb_id, name,
+                      p["language"], p["resolution"], p["remux"], totals)
+
+
+def _queue_add_mediathek(conn, cfg, mediathek_id, status, totals):
+    """Queue one mediathek row directly (manual pick, no dedup, full 'AV'). Uses
+    the TMDB name when the row is matched and a key is set, else its clean_title."""
+    r = conn.execute("SELECT * FROM mediathek WHERE mediathek_id=?",
+                     (mediathek_id,)).fetchone()
+    if r is None:
+        raise ValueError(f"no mediathek row {mediathek_id!r}")
+    r = dict(r)
+    tmdb_id, language = r["tmdb_id"] or "", r["language"]
+    if tmdb_id and cfg.tmdb_api_key:
+        meta = tmdb_movie(cfg, tmdb_id)
+        name = _queue_name(cfg, meta["title"], meta["year"])
+        if language == "ov":
+            language = meta["original_language"]
+    else:
+        name = _queue_name(cfg, r["clean_title"], r["year"])
+    _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
+                  resolution_of(r), "AV", totals)
+
+
+def _queue_name(cfg, title, year) -> str:
+    """The library filename stem from the configured template. None fields render
+    empty (never the literal 'None'), e.g. a row without a year."""
+    return cfg.name_template.format(title=title or "", year=year if year is not None else "")
+
+
+def _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
+                  resolution, remux, totals):
+    """Insert one queue row unless the mediathek_id is already queued active."""
+    actives = "(" + ",".join("?" * len(QUEUE_ACTIVE)) + ")"
+    if conn.execute(f"SELECT 1 FROM queue WHERE mediathek_id=? AND status IN "
+                    f"{actives}", (mediathek_id, *QUEUE_ACTIVE)).fetchone():
+        totals["skipped"] += 1
+        return
+    ts = _now()
+    conn.execute("INSERT INTO queue (status, mediathek_id, tmdb_id, name, "
+                 "language, resolution, remux, created_at, updated_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)",
+                 (status, mediathek_id, tmdb_id, name, language, resolution,
+                  remux, ts, ts))
+    totals["queued"] += 1
+
+
+def _queue_list(conn, args) -> dict:
+    """Read-only listing, optionally filtered by lifecycle state (--status name),
+    ordered by creation. --json returns the rows; otherwise prints a table."""
+    sql = "SELECT * FROM queue"
+    params = ()
+    if args.status:
+        sql += " WHERE status=?"
+        params = (QUEUE_STATUS[args.status],)
+    sql += " ORDER BY created_at, id"
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    if args.json:
+        return {"queue": rows, "count": len(rows)}
+    _print_queue(rows)
+    return {}
+
+
+def _queue_set_status(conn, args, from_states, to, key) -> dict:
+    """Move queue rows to a new lifecycle state: the given ids or, with --all,
+    every row currently in `from_states`. Only rows in `from_states` are touched.
+    Returns {key: count}."""
+    if args.all and args.ids:
+        raise ValueError("give queue ids or --all, not both")
+    if not args.all and not args.ids:
+        raise ValueError("give queue ids or --all")
+    froms = "(" + ",".join("?" * len(from_states)) + ")"
+    sql = f"UPDATE queue SET status=?, updated_at=? WHERE status IN {froms}"
+    params = [to, _now(), *from_states]
+    if not args.all:
+        sql += " AND id IN (" + ",".join("?" * len(args.ids)) + ")"
+        params += args.ids
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(sql, params).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {key: n}
+
+
+def _queue_delete(conn, args) -> dict:
+    """Hard-delete queue entries by exactly one selector: given ids, every entry
+    (--all), or terminal states (--cancelled/--done/--failed, combinable).
+    Returns {deleted: count}."""
+    states = [QUEUE_STATUS[name] for name, on in
+              (("cancelled", args.cancelled), ("done", args.done),
+               ("failed", args.failed)) if on]
+    if sum((bool(args.ids), args.all, bool(states))) != 1:
+        raise ValueError("give queue ids, status flags "
+                         "(--cancelled/--done/--failed), or --all")
+    if args.all:
+        sql, params = "DELETE FROM queue", ()
+    elif states:
+        sql = "DELETE FROM queue WHERE status IN (" + ",".join("?" * len(states)) + ")"
+        params = states
+    else:
+        sql = "DELETE FROM queue WHERE id IN (" + ",".join("?" * len(args.ids)) + ")"
+        params = args.ids
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(sql, params).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"deleted": n}
+
+
+def _print_queue(rows):
+    """One header line + one line per entry to stdout (the result)."""
+    print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
+    for r in rows:
+        print(f'  [{r["id"]}] {r["status"]} {r["resolution"]} {r["remux"]} '
+              f'{r["language"]} {r["name"]!r}')
+
+
 # -- cli ----------------------------------------------------------------------
 # Stable grammar and exit codes: the GUI drives the CLI and parses the --json
 # output (exactly one JSON object on stdout per call).
@@ -1190,8 +1398,30 @@ def build_parser() -> argparse.ArgumentParser:
     msho.add_argument("--min-conf", type=float, metavar="X",                                      help="min confidence to list (default 0.0)")
     msho.add_argument("--limit",    type=int, default=20, metavar="N",                            help="max candidates to list (default 20)")
 
+    queuep = sub.add_parser("queue", help="stage and review the download queue", description="Stage downloads into the review queue by tmdb_id (deduplicated) or mediathek_id (direct), and manage them. DB-only: nothing here touches the filesystem.")
+    qsub = queuep.add_subparsers(dest="queue_cmd", required=True, metavar="action")
+    qadd = qsub.add_parser("add", help="stage downloads by tmdb_id or mediathek_id", description="Stage downloads. --tmdb dedups a matched film's many rows to the minimal download set (best quality per whitelisted language, shared video flagged for remux); --mediathek-id queues one row directly. New entries are 'proposed' unless queue_auto_approve is set.")
+    qadd.add_argument("--tmdb",         action="append", metavar="ID", help="TMDB id to stage, deduplicated (repeatable)")
+    qadd.add_argument("--mediathek-id", action="append", metavar="ID", help="mediathek_id to stage directly (repeatable)")
+    qlst = qsub.add_parser("list", help="list queue entries (default)", description="List queue entries, newest creation last. Filter by lifecycle state with --status.")
+    qlst.add_argument("--status",       choices=list(QUEUE_STATUS), metavar="STATE", help="filter by state: " + ", ".join(QUEUE_STATUS))
+    qapp = qsub.add_parser("approve", help="approve proposed entries for download", description="Move proposed entries to approved (the gate to download). Give queue ids or --all. With --force, re-approve entries in any state (e.g. cancelled or done).")
+    qapp.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to approve")
+    qapp.add_argument("--all",          action="store_true", help="approve every proposed entry")
+    qapp.add_argument("--force",        action="store_true", help="re-approve regardless of current state")
+    qcan = qsub.add_parser("cancel", help="cancel active entries", description="Cancel active entries (proposed/approved/busy) -- a soft state change that keeps the record. Give queue ids or --all.")
+    qcan.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to cancel")
+    qcan.add_argument("--all",          action="store_true", help="cancel every active entry")
+    qdel = qsub.add_parser("delete", help="permanently remove queue entries", description="Hard-delete queue entries by exactly one selector: given ids, --all, or terminal state (--cancelled/--done/--failed, combinable).")
+    qdel.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to delete")
+    qdel.add_argument("--all",          action="store_true", help="delete every entry")
+    qdel.add_argument("--cancelled",    action="store_true", help="delete all cancelled entries")
+    qdel.add_argument("--done",         action="store_true", help="delete all done entries")
+    qdel.add_argument("--failed",       action="store_true", help="delete all failed entries")
+
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
+    _set_default_action(parser, "queue",  qsub, "list")
     return parser
 
 
@@ -1273,6 +1503,10 @@ def main(argv=None) -> int:
             case "match":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_match(conn, cfg, args)
+                finally: conn.close()
+            case "queue":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_queue(conn, cfg, args)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 

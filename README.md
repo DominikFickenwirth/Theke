@@ -7,8 +7,8 @@ eine dünne Delphi-Desktop-GUI steuert dieselbe CLI.
 
 Architektur und Phasenplan siehe `CLAUDE.md`.
 
-Status: Phasen 1-3 fertig -- verfügbar sind die Befehle `config`, `fetch`,
-`enrich` und `match`.
+Status: Phasen 1-5 fertig -- verfügbar sind die Befehle `config`, `fetch`,
+`enrich`, `match` und `queue`.
 
 ## Voraussetzungen
 
@@ -307,4 +307,123 @@ DB-Operation -- kein TMDB-Key nötig. Gibt `reset = N` aus.
 ```powershell
 theke --db build/theke.db match reset                # reset = N (IDs geleert)
 theke --db build/theke.db match reset --status-only  # nur status 2 -> 1
+```
+
+## `theke queue`
+
+Stufe 5: stellt Downloads in die Tabelle `queue` (Review-Queue + Download-Akte in
+einem). Reine DB-Stufe -- nichts hier berührt das Dateisystem; der eigentliche
+Download ist Stufe 6. Ein Unterbefehl wählt die Aktion: `add` stellt ein,
+`list`/`approve`/`cancel` verwalten. Ohne Aktion läuft der Default `list`, d. h.
+`theke queue` entspricht `theke queue list`.
+
+Der Lebenszyklus einer Zeile (Spalte `status`, ein Zeichen; ASCII-aufsteigend in
+Ablaufreihenfolge, damit eine einfache Sortierung dem Fortschritt folgt):
+`proposed` (`0`) -> `approved` (`A`) -> `busy`/downloading (`B`) -> `done` (`D`),
+daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile trägt zudem `name`
+(Bibliotheks-Dateiname), `language`,
+`resolution` (`HD`/`SD`/`LQ`) und `remux` (`A` = nur Audio, `V` = nur Video,
+`AV` = beides) für die Remux-Stufe.
+
+**Konfiguration** (in `theke.json`):
+
+| Schlüssel             | Wirkung                                                            |
+| --------------------- | ----------------------------------------------------------------- |
+| `queue_auto_approve`  | `true` stellt direkt auf `approved` statt `proposed` (Std. `false`). |
+| `languages`           | Sprach-Whitelist **und** Präferenzreihenfolge (Std. `["de"]`).    |
+| `name_template`       | Vorlage für `name`, gefüllt mit TMDB-Titel + -Jahr (Std. `"{title} ({year})"`). |
+
+### `queue add`
+
+Stellt Downloads ein. `--tmdb` löst einen gematchten Film auf (ein TMDB-Aufruf
+für Titel/Jahr/Originalsprache) und dedupliziert seine vielen `mediathek`-Zeilen
+zur minimalen Download-Menge: beste Qualität je Whitelist-Sprache; teilen sich
+Sprachvarianten denselben Videostream (gleiche Arte-Programm-ID oder identische
+Dauer), wird das Video nur einmal geladen (`AV`), die übrigen nur als Audio
+(`A`). Die Sprache `ov` (Originalversion) wird dabei über die TMDB-Originalsprache
+aufgelöst. `--mediathek-id` stellt genau eine Zeile direkt ein (`AV`, keine
+Deduplizierung). Neue Einträge sind `proposed`, sofern `queue_auto_approve` nicht
+gesetzt ist. Eine bereits aktiv (P/A/D) eingereihte `mediathek_id` wird
+übersprungen; eine abgeschlossene/stornierte blockiert ein erneutes Einstellen
+nicht. Beide Optionen sind wiederholbar. `deduplicated` meldet die dabei
+zusammengefassten/herausgefilterten Quellzeilen.
+
+| Option            | Wirkung                                                  |
+| ----------------- | -------------------------------------------------------- |
+| `--tmdb ID`       | TMDB-ID einstellen, dedupliziert (wiederholbar).         |
+| `--mediathek-id ID` | `mediathek_id` direkt einstellen (wiederholbar).       |
+
+```powershell
+theke --db build/theke.db queue add --tmdb 1474601     # queued/skipped/deduplicated
+theke --db build/theke.db queue add --mediathek-id <id>
+```
+
+### `queue list`
+
+Listet Einträge (älteste Erstellung zuerst), optional nach Lebenszyklus-Zustand
+gefiltert. `--json` gibt die Zeilen zurück, sonst eine Tabelle auf stdout.
+
+| Option           | Wirkung                                                                        |
+| ---------------- | ------------------------------------------------------------------------------ |
+| `--status STATE` | Nur diesen Zustand: `proposed`, `approved`, `busy`, `cancelled`, `done`, `failed`. |
+
+```powershell
+theke --db build/theke.db queue list
+theke --db build/theke.db --json queue list --status proposed
+```
+
+### `queue approve`
+
+Hebt `proposed`-Einträge auf `approved` (das Tor zum Download). Nur Zeilen im
+Zustand `proposed` werden berührt -- mit `--force` dagegen aus jedem Zustand
+(z. B. ein `cancelled`- oder `done`-Eintrag zurück auf `approved`). Gibt
+`approved = N` aus.
+
+| Option    | Wirkung                                                      |
+| --------- | ------------------------------------------------------------ |
+| `ID ...`  | Zu genehmigende Eintrags-IDs.                                |
+| `--all`   | Alle (mit `--force`: alle, sonst nur `proposed`) genehmigen. |
+| `--force` | Unabhängig vom aktuellen Zustand zurück auf `approved`.       |
+
+```powershell
+theke --db build/theke.db queue approve 3 4
+theke --db build/theke.db queue approve --all
+theke --db build/theke.db queue approve 7 --force   # z. B. storniert -> approved
+```
+
+### `queue cancel`
+
+Storniert aktive Einträge (`proposed`/`approved`/`busy`) -- eine weiche
+Zustandsänderung, die den Datensatz behält. Abgeschlossene Einträge bleiben
+unberührt. Gibt `cancelled = N` aus.
+
+| Option   | Wirkung                              |
+| -------- | ------------------------------------ |
+| `ID ...` | Zu stornierende Eintrags-IDs.        |
+| `--all`  | Alle aktiven Einträge stornieren.    |
+
+```powershell
+theke --db build/theke.db queue cancel 3
+theke --db build/theke.db queue cancel --all
+```
+
+### `queue delete`
+
+Löscht Einträge **endgültig** aus der Tabelle (anders als `cancel`, das den
+Datensatz behält). Genau ein Selektor: IDs, `--all`, oder ein bzw. mehrere
+Endzustands-Schalter (`--cancelled`/`--done`/`--failed`, kombinierbar). Gibt
+`deleted = N` aus.
+
+| Option        | Wirkung                                  |
+| ------------- | ---------------------------------------- |
+| `ID ...`      | Zu löschende Eintrags-IDs.               |
+| `--all`       | Alle Einträge löschen.                   |
+| `--cancelled` | Alle stornierten Einträge löschen.       |
+| `--done`      | Alle fertigen Einträge löschen.          |
+| `--failed`    | Alle fehlgeschlagenen Einträge löschen.  |
+
+```powershell
+theke --db build/theke.db queue delete 3 4
+theke --db build/theke.db queue delete --cancelled --done   # Aufräumen
+theke --db build/theke.db queue delete --all
 ```
