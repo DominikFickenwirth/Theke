@@ -374,6 +374,10 @@ def enrich(sender, topic, title, description, duration) -> dict:
             r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
             kat_src = 'duration-prior'
 
+    if r['episode_count'] is not None and r['category'] in (None, 'Movie'):
+        r['category'] = 'Episode'                  # Mehrteiler "(n/m)" -> TV series,
+        kat_src = 'mehrteiler'                     # overrides a Movie/None guess
+
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
     if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
         t = t[:cm.start()]
