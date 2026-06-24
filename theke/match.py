@@ -160,7 +160,7 @@ def find_matches(conn, tmdb_meta, min_conf) -> list:
     """Scan the movie subset, score each row, return the matches (confidence >=
     min_conf, not rejected) sorted by confidence desc, then mediathek_id."""
     rows = conn.execute("SELECT mediathek_id, clean_title, year, duration, flags "
-                        "FROM mediathek WHERE category='Movie'")
+                        "FROM mediathek WHERE category='Movie' AND status='1'")
     out = []
     for r in rows:
         if r["flags"] and "T" in r["flags"]:   # trailers are never the wanted film
@@ -224,7 +224,7 @@ def find_arte_links(conn, anchors, exclude_ids) -> list:
         return []
     groups = {}
     for r in conn.execute("SELECT mediathek_id, clean_title, url_website FROM "
-                          "mediathek WHERE sender LIKE 'ARTE.%'"):
+                          "mediathek WHERE sender LIKE 'ARTE.%' AND status='1'"):
         vid = arte_video_id(r["url_website"])
         if vid in anchors:
             groups.setdefault(vid, []).append(r)

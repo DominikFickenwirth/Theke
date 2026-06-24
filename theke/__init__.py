@@ -548,12 +548,20 @@ _UPDATE_SQL = (
     "UPDATE mediathek SET {sets}, status='1' WHERE mediathek_id=:mediathek_id"
 ).format(sets=", ".join(f"{c}=:{c}" for c in ENRICH_COLS))
 
+# reset clears what a stage wrote, back to the freshly-fetched baseline: match
+# owns tmdb_id/match_confidence (tmdb_id has a '' default), enrich additionally
+# owns the enrich columns (language too carries a '' default).
+_MATCH_CLEAR  = "tmdb_id='', match_confidence=NULL"
+_ENRICH_CLEAR = ", ".join(f"{c}=''" if c == "language" else f"{c}=NULL"
+                          for c in ENRICH_COLS) + ", " + _MATCH_CLEAR
+
 
 def cmd_enrich(conn, cfg, args: argparse.Namespace) -> dict:
     """Dispatch a enrich action: `run` writes the enrich columns; the others
     (`report`/`audit`/`show`/`dist`) are read-only inspection tools."""
     match args.enrich_cmd:
         case "run":    return _enrich_run(conn, args)
+        case "reset":  return _enrich_reset(conn, args)
         case "report": return _enrich_report_cmd(conn, args)
         case "audit":  return _enrich_audit_cmd(conn, args)
         case "show":   return _enrich_show_cmd(conn, args)
@@ -575,6 +583,25 @@ def _enrich_run(conn, args) -> dict:
         conn.execute("ROLLBACK")
         raise
     return {"enriched": count}
+
+
+def _enrich_reset(conn, args) -> dict:
+    """Undo enrich: take enriched/matched rows (status '1'/'2') back to '0', as
+    if freshly fetched. Clears the enrich + match columns unless --status-only."""
+    sets = "status='0'" if args.status_only else f"status='0', {_ENRICH_CLEAR}"
+    return _reset(conn, sets, "status IN ('1','2')")
+
+
+def _reset(conn, sets, where) -> dict:
+    """Run one status-reset UPDATE in a transaction; report the rows changed."""
+    conn.execute("BEGIN")
+    try:
+        count = conn.execute(f"UPDATE mediathek SET {sets} WHERE {where}").rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"reset": count}
 
 
 def _enrich_rows(conn, rows, batch=5000) -> int:
@@ -1012,7 +1039,10 @@ def _enrich_dist_cmd(conn, args) -> dict:
 # read-only score explainer for tuning. Heavy lifting lives in theke.match.
 
 def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
-    """Dispatch a match action: `run` tags rows, `show` explains scores."""
+    """Dispatch a match action: `run` tags rows, `show` explains scores,
+    `reset` undoes a match. reset is a pure DB op (no TMDB key/type needed)."""
+    if args.match_cmd == "reset":
+        return _match_reset(conn, args)
     if not cfg.tmdb_api_key:
         raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
     if args.type != "movie":
@@ -1021,6 +1051,13 @@ def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
         case "run":  return _match_run(conn, cfg, args)
         case "show": return _match_show(conn, cfg, args)
         case _: raise DbError(f"unhandled match action: {args.match_cmd}")
+
+
+def _match_reset(conn, args) -> dict:
+    """Undo match: take matched rows (status '2') back to enriched ('1').
+    Clears tmdb_id + match_confidence unless --status-only."""
+    sets = "status='1'" if args.status_only else f"status='1', {_MATCH_CLEAR}"
+    return _reset(conn, sets, "status='2'")
 
 
 def _match_run(conn, cfg, args) -> dict:
@@ -1111,11 +1148,13 @@ def build_parser() -> argparse.ArgumentParser:
     enrich = sub.add_parser("enrich", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
     csub = enrich.add_subparsers(dest="enrich_cmd", required=True, metavar="action")
     crun = csub.add_parser("run",    help="enrich mirrored rows (default)",                      description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the enrich columns and flip status 0 -> 1.")
+    crst = csub.add_parser("reset",  help="undo enrich: status 1/2 -> 0",                         description="Take enriched/matched rows (status '1'/'2') back to '0', as if freshly fetched. Clears the enrich + match columns unless --status-only.")
     crep = csub.add_parser("report", help="read-only per-sender coverage report",                description="Per-sender coverage of the enrich fields. Reads the stored columns by default; --live re-runs enrich() without writing.")
     caud = csub.add_parser("audit",  help="read-only findings scan for wrong/suspicious values", description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-enriched rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
     csho = csub.add_parser("show",   help="read-only sample of rows with their enrich columns",  description="Dump the enrich columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
     cdis = csub.add_parser("dist",   help="read-only value distribution of one field",           description="Top-N value frequencies of a single enrich field (or any mediathek column).")
     crun.add_argument("--force",         action="store_true",                                    help="re-enrich all rows, not just unenriched")
+    crst.add_argument("--status-only",   action="store_true",                                    help="only flip status, keep the enrich + match columns")
     crep.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
     crep.add_argument("--min-rows",      metavar="N", type=int, default=REPORT_MIN_ROWS,         help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
     crep.add_argument("--live",          action="store_true",                                    help="run enrich() live instead of reading the stored columns")
@@ -1140,6 +1179,8 @@ def build_parser() -> argparse.ArgumentParser:
     msub = matchp.add_subparsers(dest="match_cmd", required=True, metavar="action")
     mrun = msub.add_parser("run",  help="tag matching rows with tmdb_id + confidence (default)",  description="Resolve the TMDB id and write tmdb_id + match_confidence onto matching movie rows. An existing different tmdb_id is preserved, not overwritten.")
     msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate movie rows with their score breakdown (title similarity, year/runtime deltas) without writing. Defaults to listing everything not rejected.")
+    mrst = msub.add_parser("reset", help="undo match: status 2 -> 1",                              description="Take matched rows (status '2') back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
+    mrst.add_argument("--status-only", action="store_true",                                        help="only flip status, keep tmdb_id + match_confidence")
     mrun.add_argument("--tmdb",     required=True, metavar="ID",                                  help="TMDB movie id to match")
     mrun.add_argument("--type",     default="movie", choices=["movie"],                           help="media type (only movie for now)")
     mrun.add_argument("--dry-run",  action="store_true",                                          help="compute matches but write nothing")

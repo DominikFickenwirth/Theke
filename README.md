@@ -150,6 +150,22 @@ Trailer/Vorschau.
 (Topic ist selbst ein Kategoriewort oder ein Event), `0.5` (Dauer-Prior), `0.2`
 (`category` = `unklar`).
 
+### `enrich reset`
+
+Macht das Anreichern rückgängig: setzt angereicherte/gematchte Zeilen
+(`status='1'`/`'2'`) zurück auf `'0'`, als wären sie frisch geholt. Leert dabei
+die enrich-Spalten **und** die match-Spalten (`tmdb_id`, `match_confidence`).
+Gibt `reset = N` (Anzahl betroffener Zeilen) aus.
+
+| Option          | Wirkung                                                      |
+| --------------- | ----------------------------------------------------------- |
+| `--status-only` | Nur `status` zurücksetzen, alle Spalten unverändert lassen. |
+
+```powershell
+theke --db build/theke.db enrich reset                # reset = N (Spalten geleert)
+theke --db build/theke.db enrich reset --status-only  # nur status 1/2 -> 0
+```
+
 ### `enrich report`
 
 Per-Sender-Abdeckung der enrich-Felder (% gefüllter Zeilen). Liest standardmäßig
@@ -276,4 +292,19 @@ alles, was nicht verworfen wurde -- zum Justieren der Match-Heuristik.
 
 ```powershell
 theke --db build/theke.db match show --tmdb 1474601
+```
+
+### `match reset`
+
+Macht das Matching rückgängig: setzt gematchte Zeilen (`status='2'`) zurück auf
+`'1'` (angereichert). Leert dabei `tmdb_id` und `match_confidence`. Reine
+DB-Operation -- kein TMDB-Key nötig. Gibt `reset = N` aus.
+
+| Option          | Wirkung                                                       |
+| --------------- | ------------------------------------------------------------- |
+| `--status-only` | Nur `status` zurücksetzen, `tmdb_id`/`match_confidence` lassen. |
+
+```powershell
+theke --db build/theke.db match reset                # reset = N (IDs geleert)
+theke --db build/theke.db match reset --status-only  # nur status 2 -> 1
 ```

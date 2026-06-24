@@ -225,6 +225,23 @@ def test_find_matches_excludes_trailers(tmp_path):
         conn.close()
 
 
+def test_find_matches_only_status_1(tmp_path):
+    # match only touches enriched-and-unmatched rows: a status '0' (not yet
+    # enriched) and a status '2' (already matched) row are both skipped, even
+    # though they'd otherwise score 1.0.
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)   # status '1' -> match
+        insert_movie(conn, "m0", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='0' WHERE mediathek_id='m0'")
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m2'")
+        matches = find_matches(conn, BOOT, min_conf=0.6)
+        assert [m["mediathek_id"] for m in matches] == ["m1"]
+    finally:
+        conn.close()
+
+
 # -- cmd_match (CLI write/read side) -----------------------------------------
 
 CFG = Config(tmdb_api_key="KEY")
@@ -320,6 +337,67 @@ def test_cmd_match_show_is_read_only(tmp_path, monkeypatch):
         conn.close()
 
 
+# -- match reset (status 2 -> 1) ---------------------------------------------
+
+def reset_margs(status_only=False):
+    return SimpleNamespace(match_cmd="reset", status_only=status_only)
+
+
+def test_cmd_match_reset_flips_status_and_clears_id(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2', tmdb_id='1234', "
+                     "match_confidence=1.0 WHERE mediathek_id='m1'")
+        result = cmd_match(conn, CFG, reset_margs())
+        assert result == {"reset": 1}
+        row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='m1'").fetchone()
+        assert row["status"] == "1"
+        assert row["tmdb_id"] == ""
+        assert row["match_confidence"] is None
+        assert row["clean_title"] == "Das Boot"   # enrich data kept
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_status_only_keeps_id(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2', tmdb_id='1234', "
+                     "match_confidence=1.0 WHERE mediathek_id='m1'")
+        result = cmd_match(conn, CFG, reset_margs(status_only=True))
+        assert result == {"reset": 1}
+        row = conn.execute("SELECT * FROM mediathek WHERE mediathek_id='m1'").fetchone()
+        assert row["status"] == "1"
+        assert row["tmdb_id"] == "1234"          # untouched
+        assert row["match_confidence"] == 1.0
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_leaves_non_matched_rows(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)   # status '1'
+        result = cmd_match(conn, CFG, reset_margs())
+        assert result == {"reset": 0}                       # nothing at status '2'
+        assert status_of(conn, "m1") == "1"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_needs_no_api_key(tmp_path):
+    # reset is a pure DB op -> no TMDB key required (unlike run/show)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m1'")
+        assert cmd_match(conn, Config(), reset_margs()) == {"reset": 1}
+    finally:
+        conn.close()
+
+
 def test_cmd_match_requires_api_key(tmp_path, monkeypatch):
     conn = boot_db(tmp_path, monkeypatch)
     try:
@@ -409,6 +487,24 @@ def test_find_arte_links_fans_out_to_variants(tmp_path):
         assert [l["mediathek_id"] for l in links] == ["a2", "a3"]
         assert all(l["confidence"] == 1.0 for l in links)
         assert all(l["arte_video_id"] == "100000-000-A" for l in links)
+    finally:
+        conn.close()
+
+
+def test_find_arte_links_only_status_1(tmp_path):
+    # the second pass also touches only status '1' rows: a variant already
+    # matched (status '2') is left alone, even when it shares the anchor's id.
+    conn = open_db(tmp_path)
+    try:
+        insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
+                    "https://www.arte.tv/de/videos/100000-000-A/das-boot/")
+        insert_arte(conn, "a2", "Le Bateau", "ARTE.FR",
+                    "https://www.arte.tv/fr/videos/100000-000-A/le-bateau/")
+        insert_arte(conn, "a3", "El Submarino", "ARTE.ES",
+                    "https://www.arte.tv/es/videos/100000-000-A/el-submarino/")
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='a2'")
+        links = find_arte_links(conn, {"100000-000-A": 1.0}, exclude_ids={"a1"})
+        assert [l["mediathek_id"] for l in links] == ["a3"]
     finally:
         conn.close()
 
