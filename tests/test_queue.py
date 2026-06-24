@@ -144,9 +144,11 @@ def insert_mediathek(conn, mediathek_id, status="2", tmdb_id="100", language="de
 
 
 def qargs(queue_cmd="add", tmdb=None, mediathek_id=None, status=None,
-          ids=None, all=False, json=False):
+          ids=None, all=False, force=False, cancelled=False, done=False,
+          failed=False, json=False):
     return SimpleNamespace(queue_cmd=queue_cmd, tmdb=tmdb, mediathek_id=mediathek_id,
-                           status=status, ids=ids or [], all=all, json=json)
+                           status=status, ids=ids or [], all=all, force=force,
+                           cancelled=cancelled, done=done, failed=failed, json=json)
 
 
 def stub_tmdb(monkeypatch):
@@ -401,6 +403,47 @@ def test_queue_approve_only_touches_proposed(tmp_path, monkeypatch):
         result = cmd_queue(conn, CFG, qargs(queue_cmd="approve", all=True))
         assert result == {"approved": 1}
         assert status_of(conn, "m_fr") == "C"   # cancelled, untouched
+    finally:
+        conn.close()
+
+
+def test_queue_approve_force_reapproves_any_status(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        conn.execute("UPDATE queue SET status='C' WHERE mediathek_id='m_de'")  # cancelled
+        conn.execute("UPDATE queue SET status='D' WHERE mediathek_id='m_fr'")  # done
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="approve", all=True, force=True))
+        assert result == {"approved": 2}
+        assert status_of(conn, "m_de") == "A" and status_of(conn, "m_fr") == "A"
+    finally:
+        conn.close()
+
+
+def test_queue_approve_force_by_id(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        conn.execute("UPDATE queue SET status='C' WHERE mediathek_id='m_fr'")
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="approve",
+                                            ids=[qid(conn, "m_fr")], force=True))
+        assert result == {"approved": 1}
+        assert status_of(conn, "m_fr") == "A"
+    finally:
+        conn.close()
+
+
+def test_queue_approve_without_force_ignores_cancelled(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        two_proposed(conn)
+        conn.execute("UPDATE queue SET status='C' WHERE mediathek_id='m_fr'")
+        result = cmd_queue(conn, CFG, qargs(queue_cmd="approve", all=True))
+        assert result == {"approved": 1}            # only the proposed m_de
+        assert status_of(conn, "m_fr") == "C"
     finally:
         conn.close()
 
