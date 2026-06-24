@@ -90,6 +90,21 @@ def title_similarity(tmdb_titles, clean_title) -> float:
 
 # -- scoring -----------------------------------------------------------------
 
+def _runtime_factor(runtime, duration):
+    """Soft runtime confirmer shared by movies and episodes: 1.0 within
+    tolerance, a soft penalty beyond it, a hard reject below the clip floor.
+    Returns (factor, delta_minutes, rejected); no runtime/duration -> neutral."""
+    if not (runtime and duration):
+        return 1.0, None, False
+    dur_min = duration / 60
+    delta = int(round(dur_min - runtime))
+    if dur_min < runtime * RUNTIME_FLOOR_RATIO:   # clip/trailer/excerpt, not the film
+        return 0.0, delta, True
+    rel = abs(dur_min - runtime) / runtime
+    factor = 1.0 if rel <= RUNTIME_TOLERANCE else RUNTIME_PENALTY_FACTOR
+    return factor, delta, False
+
+
 def score_match(tmdb_meta, row) -> dict:
     """Score one mediathek row against TMDB metadata. Deterministic and
     explainable: title is the gate, year a near-hard gate, runtime a soft
@@ -109,24 +124,34 @@ def score_match(tmdb_meta, row) -> dict:
         year_delta = None
         year_factor = NO_YEAR_FACTOR
 
-    rt, dur = tmdb_meta.get("runtime"), row["duration"]
-    if rt and dur:
-        dur_min = dur / 60
-        runtime_delta = int(round(dur_min - rt))
-        if dur_min < rt * RUNTIME_FLOOR_RATIO:   # clip/trailer/excerpt, not the film
-            rejected = True
-            runtime_factor = 0.0
-        else:
-            rel = abs(dur_min - rt) / rt
-            runtime_factor = 1.0 if rel <= RUNTIME_TOLERANCE else RUNTIME_PENALTY_FACTOR
-    else:
-        runtime_delta = None
-        runtime_factor = 1.0
+    runtime_factor, runtime_delta, rt_reject = _runtime_factor(
+        tmdb_meta.get("runtime"), row["duration"])
+    rejected = rejected or rt_reject
 
     confidence = 0.0 if rejected else round(title_sim * year_factor * runtime_factor, 3)
     return {"confidence": confidence, "title_sim": round(title_sim, 3),
             "year_delta": year_delta, "runtime_delta": runtime_delta,
             "rejected": rejected}
+
+
+def score_episode(tv_meta, row) -> dict:
+    """Score one Episode row against a TMDB series+episode. The series-name
+    similarity and the exact (season, episode) are gates; the episode-title
+    similarity and runtime are soft confirmers. Deterministic and explainable."""
+    series_sim = title_similarity(tv_meta["series_titles"], row["series_name"])
+    episode_title_sim = title_similarity(tv_meta["episode_titles"], row["clean_title"])
+    rejected = series_sim < TITLE_FLOOR
+    if row["season"] != tv_meta["season"] or row["episode"] != tv_meta["episode"]:
+        rejected = True
+
+    runtime_factor, runtime_delta, rt_reject = _runtime_factor(
+        tv_meta.get("runtime"), row["duration"])
+    rejected = rejected or rt_reject
+
+    confidence = 0.0 if rejected else round(series_sim * runtime_factor, 3)
+    return {"confidence": confidence, "series_sim": round(series_sim, 3),
+            "episode_title_sim": round(episode_title_sim, 3),
+            "runtime_delta": runtime_delta, "rejected": rejected}
 
 
 # -- TMDB lookup (the only IO) -----------------------------------------------
@@ -154,6 +179,41 @@ def tmdb_movie(cfg, tmdb_id) -> dict:
             "original_language": data.get("original_language")}
 
 
+def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
+    """Fetch a TMDB series' metadata for episode matching, in two calls: the
+    series (name + original + DE alternative titles, the gate) and the episode
+    (name + runtime + air year, plus its translated names as soft confirmers).
+    TV alternative_titles live under 'results' (movies use 'titles')."""
+    sp = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
+                    "append_to_response": "alternative_titles"})
+    s = json.loads(theke.http_get(f"{cfg.tmdb_api_url}/tv/{tmdb_id}?{sp}").decode("utf-8"))
+    series_titles = []
+    for t in (s.get("name"), s.get("original_name")):
+        if t and t not in series_titles:
+            series_titles.append(t)
+    for alt in s.get("alternative_titles", {}).get("results", []):
+        if alt.get("iso_3166_1") == "DE" and alt.get("title") not in series_titles:
+            series_titles.append(alt["title"])
+
+    ep = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
+                    "append_to_response": "translations"})
+    url = f"{cfg.tmdb_api_url}/tv/{tmdb_id}/season/{season}/episode/{episode}?{ep}"
+    e = json.loads(theke.http_get(url).decode("utf-8"))
+    episode_name = e.get("name") or None
+    episode_titles = []
+    for t in [episode_name] + [tr.get("data", {}).get("name") for tr in
+                               e.get("translations", {}).get("translations", [])]:
+        if t and t not in episode_titles:
+            episode_titles.append(t)
+    air = e.get("air_date") or ""
+    year = int(air[:4]) if air[:4].isdigit() else None
+    return {"tmdb_id": str(tmdb_id),
+            "series_title": series_titles[0] if series_titles else None,
+            "series_titles": series_titles, "episode_name": episode_name,
+            "episode_titles": episode_titles, "runtime": e.get("runtime") or None,
+            "year": year, "season": season, "episode": episode}
+
+
 # -- candidate search --------------------------------------------------------
 
 def find_matches(conn, tmdb_meta, min_conf) -> list:
@@ -171,6 +231,29 @@ def find_matches(conn, tmdb_meta, min_conf) -> list:
         out.append({"mediathek_id": r["mediathek_id"], "clean_title": r["clean_title"],
                     "confidence": s["confidence"], "title_sim": s["title_sim"],
                     "year_delta": s["year_delta"], "runtime_delta": s["runtime_delta"]})
+    out.sort(key=lambda m: (-m["confidence"], m["mediathek_id"]))
+    return out
+
+
+def find_episode_matches(conn, tv_meta, min_conf) -> list:
+    """Scan the Episode subset for the wanted (season, episode), score each row,
+    return the matches (confidence >= min_conf, not rejected) sorted by
+    confidence desc, then mediathek_id."""
+    rows = conn.execute(
+        "SELECT mediathek_id, clean_title, series_name, season, episode, duration, "
+        "flags FROM mediathek WHERE category='Episode' AND status='1' "
+        "AND season=? AND episode=?", (tv_meta["season"], tv_meta["episode"]))
+    out = []
+    for r in rows:
+        if r["flags"] and "T" in r["flags"]:   # trailers are never the wanted episode
+            continue
+        s = score_episode(tv_meta, r)
+        if s["rejected"] or s["confidence"] < min_conf:
+            continue
+        out.append({"mediathek_id": r["mediathek_id"], "clean_title": r["clean_title"],
+                    "confidence": s["confidence"], "series_sim": s["series_sim"],
+                    "episode_title_sim": s["episode_title_sim"],
+                    "runtime_delta": s["runtime_delta"]})
     out.sort(key=lambda m: (-m["confidence"], m["mediathek_id"]))
     return out
 
