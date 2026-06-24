@@ -1102,11 +1102,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     enrich = sub.add_parser("enrich", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
     csub = enrich.add_subparsers(dest="enrich_cmd", required=True, metavar="action")
-    crun = csub.add_parser("run",    help="enrich mirrored rows (writes the enrich columns)", description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the enrich columns and flip status 0 -> 1.")
-    crep = csub.add_parser("report", help="read-only per-sender coverage report",                 description="Per-sender coverage of the enrich fields. Reads the stored columns by default; --live re-runs enrich() without writing.")
-    caud = csub.add_parser("audit",  help="read-only findings scan (wrong/suspicious values)",    description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-enriched rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
-    csho = csub.add_parser("show",   help="read-only sample of rows with their enrich columns", description="Dump the enrich columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
-    cdis = csub.add_parser("dist",   help="read-only value distribution of one field",            description="Top-N value frequencies of a single enrich field (or any mediathek column).")
+    crun = csub.add_parser("run",    help="enrich mirrored rows (default)",                      description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the enrich columns and flip status 0 -> 1.")
+    crep = csub.add_parser("report", help="read-only per-sender coverage report",                description="Per-sender coverage of the enrich fields. Reads the stored columns by default; --live re-runs enrich() without writing.")
+    caud = csub.add_parser("audit",  help="read-only findings scan for wrong/suspicious values", description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-enriched rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
+    csho = csub.add_parser("show",   help="read-only sample of rows with their enrich columns",  description="Dump the enrich columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
+    cdis = csub.add_parser("dist",   help="read-only value distribution of one field",           description="Top-N value frequencies of a single enrich field (or any mediathek column).")
     crun.add_argument("--force",         action="store_true",                                    help="re-enrich all rows, not just unenriched")
     crep.add_argument("--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
     crep.add_argument("--min-rows",      metavar="N", type=int, default=REPORT_MIN_ROWS,         help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
@@ -1130,19 +1130,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     matchp = sub.add_parser("match", help="resolve a TMDB id to mediathek rows (movies)", description="Wish-first matching: pull a TMDB movie's title variants/year/runtime and tag the matching mediathek rows with tmdb_id + match_confidence (run), or explain the candidate scores read-only (show).")
     msub = matchp.add_subparsers(dest="match_cmd", required=True, metavar="action")
-    mrun = msub.add_parser("run",  help="tag matching rows with tmdb_id + confidence (writes)", description="Resolve the TMDB id and write tmdb_id + match_confidence onto matching movie rows. An existing different tmdb_id is preserved, not overwritten.")
-    msho = msub.add_parser("show", help="read-only: explain candidate scores",                  description="List candidate movie rows with their score breakdown (title similarity, year/runtime deltas) without writing. Defaults to listing everything not rejected.")
+    mrun = msub.add_parser("run",  help="tag matching rows with tmdb_id + confidence (default)",  description="Resolve the TMDB id and write tmdb_id + match_confidence onto matching movie rows. An existing different tmdb_id is preserved, not overwritten.")
+    msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate movie rows with their score breakdown (title similarity, year/runtime deltas) without writing. Defaults to listing everything not rejected.")
     mrun.add_argument("--tmdb",     required=True, metavar="ID",                                  help="TMDB movie id to match")
-    mrun.add_argument("--type",     default="movie", choices=["movie"],                          help="media type (only movie for now)")
-    mrun.add_argument("--dry-run",  action="store_true",                                         help="compute matches but write nothing")
-    mrun.add_argument("--min-conf", type=float, metavar="X",                                     help="min confidence to tag (default: config match_min_confidence)")
+    mrun.add_argument("--type",     default="movie", choices=["movie"],                           help="media type (only movie for now)")
+    mrun.add_argument("--dry-run",  action="store_true",                                          help="compute matches but write nothing")
+    mrun.add_argument("--min-conf", type=float, metavar="X",                                      help="min confidence to tag (default: config match_min_confidence)")
     msho.add_argument("--tmdb",     required=True, metavar="ID",                                  help="TMDB movie id to inspect")
-    msho.add_argument("--type",     default="movie", choices=["movie"],                          help="media type (only movie for now)")
-    msho.add_argument("--min-conf", type=float, metavar="X",                                     help="min confidence to list (default 0.0)")
-    msho.add_argument("--limit",    type=int, default=20, metavar="N",                           help="max candidates to list (default 20)")
+    msho.add_argument("--type",     default="movie", choices=["movie"],                           help="media type (only movie for now)")
+    msho.add_argument("--min-conf", type=float, metavar="X",                                      help="min confidence to list (default 0.0)")
+    msho.add_argument("--limit",    type=int, default=20, metavar="N",                            help="max candidates to list (default 20)")
 
-    _set_default_action(parser, "enrich", csub, "run")  # `theke enrich` == `theke enrich run`
-    _set_default_action(parser, "match",  msub, "run")  # `theke match ...` == `theke match run ...`
+    _set_default_action(parser, "enrich", csub, "run")
+    _set_default_action(parser, "match",  msub, "run")
     return parser
 
 
