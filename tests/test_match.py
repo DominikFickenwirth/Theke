@@ -465,13 +465,15 @@ def test_cmd_match_run_arte_dry_run_writes_nothing(tmp_path, monkeypatch):
 # Real Arte case: "Mysteries of Lisbon" (Raoul Ruiz, 2010) airs under six
 # language senders sharing id 131183-000-A, with untranslatable titles AND
 # slightly different durations (DE 14956 s vs 15340 s elsewhere) -- neither
-# title nor runtime bridges them; only the shared video-id does.
+# title nor runtime bridges them; only the shared video-id does. The payload is
+# German-only (no Portuguese original_title) so every foreign variant is reached
+# strictly by the id-link, not by an incidental title hit.
 TMDB_LISBON = {
     "title":             "Die Geheimnisse von Lissabon",
-    "original_title":    "Misterios de Lisboa",
+    "original_title":    "Die Geheimnisse von Lissabon",
     "release_date":      "2010-08-26",
     "runtime":           256,                  # 15360 s, matches the DE duration
-    "original_language": "pt",
+    "original_language": "de",
     "alternative_titles": {"titles": []},
 }
 

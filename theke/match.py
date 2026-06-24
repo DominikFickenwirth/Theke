@@ -173,3 +173,69 @@ def find_matches(conn, tmdb_meta, min_conf) -> list:
                     "year_delta": s["year_delta"], "runtime_delta": s["runtime_delta"]})
     out.sort(key=lambda m: (-m["confidence"], m["mediathek_id"]))
     return out
+
+
+# -- arte language variants (second match pass) ------------------------------
+# Arte airs one film under several language senders (ARTE.DE/FR/ES/EN/IT/PL),
+# each with a localized title -- and even slightly different durations -- that
+# the title/runtime pass cannot cross-match. All variants share one programme id
+# in url_website, so a pass-1 Arte hit fans out to its variants by that exact id;
+# each linked row inherits the anchoring hit's confidence.
+
+ARTE_SENDER_RX = re.compile(r"arte\.[a-z]{2,}\Z", re.IGNORECASE)
+ARTE_ID_RX     = re.compile(r"/(\d{4,}-\d{3}-[A-Z])(?:[/?#]|\Z)")
+
+
+def is_arte_sender(sender) -> bool:
+    """True for an Arte language-variant sender ('ARTE.DE', 'ARTE.FR', ...),
+    case-insensitive; False for 'ARTE' alone or any non-Arte sender."""
+    return bool(ARTE_SENDER_RX.match((sender or "").strip()))
+
+
+def arte_video_id(url_website):
+    """The Arte programme id shared across language variants (e.g.
+    '116786-000-A'), taken from a url_website ('/videos/ID/...' or the older
+    '/guide/xx/ID/...'); None when absent."""
+    m = ARTE_ID_RX.search(url_website or "")
+    return m.group(1) if m else None
+
+
+def arte_anchor_ids(conn, matches) -> dict:
+    """Of the pass-1 matches, those landing on an Arte sender, as video-id ->
+    best confidence. The seed for the second pass; empty when no match is an
+    Arte row."""
+    anchors = {}
+    for m in matches:
+        r = conn.execute("SELECT sender, url_website FROM mediathek "
+                         "WHERE mediathek_id=?", (m["mediathek_id"],)).fetchone()
+        if not is_arte_sender(r["sender"]):
+            continue
+        vid = arte_video_id(r["url_website"])
+        if vid is not None:
+            anchors[vid] = max(anchors.get(vid, 0.0), m["confidence"])
+    return anchors
+
+
+def find_arte_links(conn, anchors, exclude_ids) -> list:
+    """Fan each anchored video-id out to the Arte rows sharing it (the language
+    variants the title pass missed), skipping already-matched ids. Each linked
+    row inherits its anchor's confidence. Sorted by video-id, then mediathek_id."""
+    if not anchors:
+        return []
+    groups = {}
+    for r in conn.execute("SELECT mediathek_id, clean_title, url_website FROM "
+                          "mediathek WHERE sender LIKE 'ARTE.%'"):
+        vid = arte_video_id(r["url_website"])
+        if vid in anchors:
+            groups.setdefault(vid, []).append(r)
+    seen = set(exclude_ids)
+    out = []
+    for vid in sorted(anchors):
+        for r in sorted(groups.get(vid, []), key=lambda x: x["mediathek_id"]):
+            if r["mediathek_id"] in seen:
+                continue
+            seen.add(r["mediathek_id"])
+            out.append({"mediathek_id": r["mediathek_id"],
+                        "clean_title": r["clean_title"],
+                        "confidence": anchors[vid], "arte_video_id": vid})
+    return out

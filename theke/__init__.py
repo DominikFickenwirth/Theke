@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD
-from theke.match import tmdb_movie, find_matches
+from theke.match import (tmdb_movie, find_matches, arte_anchor_ids,
+                         find_arte_links)
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -1024,16 +1025,20 @@ def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
 
 def _match_run(conn, cfg, args) -> dict:
     """Resolve the TMDB id and write tmdb_id + match_confidence onto matching
-    rows. An existing different tmdb_id is preserved (logged, not clobbered);
-    --dry-run computes but writes nothing."""
+    rows. A pass-1 hit on an Arte sender triggers a second pass that links the
+    film's other-language Arte variants by their shared video-id (they inherit
+    the hit's confidence). An existing different tmdb_id is preserved (logged,
+    not clobbered); --dry-run computes but writes nothing."""
     meta = tmdb_movie(cfg, args.tmdb)
     min_conf = cfg.match_min_confidence if args.min_conf is None else args.min_conf
     matches = find_matches(conn, meta, min_conf)
-    written = 0
+    anchors = arte_anchor_ids(conn, matches)
+    links = find_arte_links(conn, anchors, {m["mediathek_id"] for m in matches})
+    written = linked = 0
     if not args.dry_run:
         conn.execute("BEGIN")
         try:
-            for m in matches:
+            for m in matches + links:
                 cur = conn.execute("SELECT tmdb_id FROM mediathek WHERE mediathek_id=?",
                                    (m["mediathek_id"],)).fetchone()["tmdb_id"]
                 if cur and cur != meta["tmdb_id"]:
@@ -1043,12 +1048,13 @@ def _match_run(conn, cfg, args) -> dict:
                              "status='2' WHERE mediathek_id=?",
                              (meta["tmdb_id"], m["confidence"], m["mediathek_id"]))
                 written += 1
+                linked += "arte_video_id" in m
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
     return {"tmdb_id": meta["tmdb_id"], "title": meta["title"],
-            "candidates": len(matches), "written": written}
+            "candidates": len(matches), "written": written, "arte_linked": linked}
 
 
 def _match_show(conn, cfg, args) -> dict:
