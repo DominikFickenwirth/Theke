@@ -1159,6 +1159,7 @@ def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
         case "add":     return _queue_add(conn, cfg, args)
         case "list":    return _queue_list(conn, args)
         case "approve": return _queue_set_status(conn, args, ("P",), "A", "approved")
+        case "cancel":  return _queue_set_status(conn, args, QUEUE_ACTIVE, "C", "cancelled")
         case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
 
 
@@ -1373,6 +1374,9 @@ def build_parser() -> argparse.ArgumentParser:
     qapp = qsub.add_parser("approve", help="approve proposed entries for download", description="Move proposed entries to approved (the gate to download). Give queue ids or --all.")
     qapp.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to approve")
     qapp.add_argument("--all",          action="store_true", help="approve every proposed entry")
+    qcan = qsub.add_parser("cancel", help="cancel active entries", description="Cancel active entries (proposed/approved/downloading) -- a soft state change that keeps the record. Give queue ids or --all.")
+    qcan.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to cancel")
+    qcan.add_argument("--all",          action="store_true", help="cancel every active entry")
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
