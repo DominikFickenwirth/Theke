@@ -170,8 +170,8 @@ def test_queue_add_by_tmdb_dedups_and_inserts(tmp_path, monkeypatch):
         rows = queue_rows(conn)
         assert [(r["mediathek_id"], r["status"], r["language"], r["resolution"],
                  r["remux"], r["name"], r["tmdb_id"]) for r in rows] == [
-            ("m_de", "P", "de", "SD", "AV", "Mein Film (2020)", "100"),
-            ("m_fr", "P", "fr", "SD", "A",  "Mein Film (2020)", "100")]
+            ("m_de", "0", "de", "SD", "AV", "Mein Film (2020)", "100"),
+            ("m_fr", "0", "fr", "SD", "A",  "Mein Film (2020)", "100")]
     finally:
         conn.close()
 
@@ -313,7 +313,7 @@ def test_queue_list_returns_entries_ordered(tmp_path, monkeypatch):
         result = cmd_queue(conn, CFG, qargs(queue_cmd="list", json=True))
         assert result["count"] == 2
         assert [(r["mediathek_id"], r["status"], r["remux"]) for r in result["queue"]] == \
-               [("m_de", "P", "AV"), ("m_fr", "P", "A")]
+               [("m_de", "0", "AV"), ("m_fr", "0", "A")]
     finally:
         conn.close()
 
@@ -375,7 +375,7 @@ def test_queue_approve_by_id(tmp_path, monkeypatch):
         result = cmd_queue(conn, CFG, qargs(queue_cmd="approve", ids=[qid(conn, "m_de")]))
         assert result == {"approved": 1}
         assert status_of(conn, "m_de") == "A"
-        assert status_of(conn, "m_fr") == "P"
+        assert status_of(conn, "m_fr") == "0"
     finally:
         conn.close()
 
@@ -439,7 +439,7 @@ def test_queue_cancel_by_id(tmp_path, monkeypatch):
         result = cmd_queue(conn, CFG, qargs(queue_cmd="cancel", ids=[qid(conn, "m_de")]))
         assert result == {"cancelled": 1}
         assert status_of(conn, "m_de") == "C"
-        assert status_of(conn, "m_fr") == "P"
+        assert status_of(conn, "m_fr") == "0"
     finally:
         conn.close()
 
@@ -462,10 +462,10 @@ def test_queue_cancel_skips_finished(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         two_proposed(conn)
-        conn.execute("UPDATE queue SET status='X' WHERE mediathek_id='m_fr'")  # done
+        conn.execute("UPDATE queue SET status='D' WHERE mediathek_id='m_fr'")  # done
         result = cmd_queue(conn, CFG, qargs(queue_cmd="cancel", all=True))
         assert result == {"cancelled": 1}
-        assert status_of(conn, "m_fr") == "X"   # finished, untouched
+        assert status_of(conn, "m_fr") == "D"   # finished, untouched
     finally:
         conn.close()
 
