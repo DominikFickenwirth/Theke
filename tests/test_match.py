@@ -408,11 +408,74 @@ def test_cmd_match_requires_api_key(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_cmd_match_unsupported_type(tmp_path, monkeypatch):
-    conn = boot_db(tmp_path, monkeypatch)
+# -- cmd_match (series episodes) ---------------------------------------------
+
+def tv_margs(match_cmd="run", tmdb="55", season=2, episode=6, dry_run=False,
+             min_conf=None, limit=20, json=False):
+    return SimpleNamespace(match_cmd=match_cmd, tmdb=tmdb, type="series",
+                           season=season, episode=episode, dry_run=dry_run,
+                           min_conf=min_conf, limit=limit, json=json)
+
+
+def tv_db(tmp_path, monkeypatch):
+    """A DB with two matching Tatort episodes (e1 exact, e5 runtime-penalized) +
+    one same-S/E miss (wrong series), and http_get stubbed to the canned payloads."""
+    monkeypatch.setattr(theke, "http_get", fake_tv_get([]))
+    conn = open_db(tmp_path)
+    insert_episode(conn, "e1", "Der rote Schatten", "Tatort", 2, 6)         # 1.0
+    insert_episode(conn, "e5", "Der rote Schatten", "Tatort", 2, 6, 4200)   # 0.9 (runtime)
+    insert_episode(conn, "e2", "Der rote Schatten", "Lindenstrasse", 2, 6)  # series floor -> out
+    return conn
+
+
+def test_cmd_match_run_series_writes_id_and_confidence(tmp_path, monkeypatch):
+    conn = tv_db(tmp_path, monkeypatch)
     try:
-        with pytest.raises(ValueError, match="movie"):
-            cmd_match(conn, CFG, margs(type="tv"))
+        result = cmd_match(conn, CFG, tv_margs())
+        assert result == {"tmdb_id": "55", "title": "Der rote Schatten",
+                          "series": "Tatort", "candidates": 2, "written": 2,
+                          "arte_linked": 0}
+        assert tuple(tmdb_of(conn, "e1")) == ("55", 1.0)
+        assert tuple(tmdb_of(conn, "e5")) == ("55", 0.9)
+        assert tmdb_of(conn, "e2")["tmdb_id"] == ""   # wrong series, untouched
+        assert status_of(conn, "e1") == "2"
+        assert status_of(conn, "e5") == "2"
+        assert status_of(conn, "e2") == "1"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_run_series_dry_run_writes_nothing(tmp_path, monkeypatch):
+    conn = tv_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, tv_margs(dry_run=True))
+        assert result["candidates"] == 2 and result["written"] == 0
+        assert tmdb_of(conn, "e1")["tmdb_id"] == ""
+        assert status_of(conn, "e1") == "1"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_series_requires_season_and_episode(tmp_path, monkeypatch):
+    conn = tv_db(tmp_path, monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="season"):
+            cmd_match(conn, CFG, tv_margs(season=None))
+        with pytest.raises(ValueError, match="episode"):
+            cmd_match(conn, CFG, tv_margs(episode=None))
+    finally:
+        conn.close()
+
+
+def test_cmd_match_show_series_is_read_only(tmp_path, monkeypatch):
+    conn = tv_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, tv_margs(match_cmd="show", json=True))
+        assert result["tmdb_id"] == "55"
+        assert result["title"] == "Der rote Schatten"
+        assert result["series"] == "Tatort"
+        assert [m["mediathek_id"] for m in result["matches"]] == ["e1", "e5"]
+        assert tmdb_of(conn, "e1")["tmdb_id"] == ""   # nothing written
     finally:
         conn.close()
 
