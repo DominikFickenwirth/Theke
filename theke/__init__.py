@@ -47,6 +47,9 @@ class Config:
     tmdb_api_url:         str   = "https://api.themoviedb.org/3"
     tmdb_language:        str   = "de-DE"
     match_min_confidence: float = 0.6
+    queue_auto_approve:   bool  = False
+    languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
+    name_template:        str   = "{title} ({year})"
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
