@@ -1163,6 +1163,7 @@ def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
                             tuple(QUEUE_STATUS.values()) if args.force else ("0",),
                             "A", "approved")
         case "cancel":  return _queue_set_status(conn, args, QUEUE_ACTIVE, "C", "cancelled")
+        case "delete":  return _queue_delete(conn, args)
         case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
 
 
@@ -1288,6 +1289,34 @@ def _queue_set_status(conn, args, from_states, to, key) -> dict:
     return {key: n}
 
 
+def _queue_delete(conn, args) -> dict:
+    """Hard-delete queue entries by exactly one selector: given ids, every entry
+    (--all), or terminal states (--cancelled/--done/--failed, combinable).
+    Returns {deleted: count}."""
+    states = [QUEUE_STATUS[name] for name, on in
+              (("cancelled", args.cancelled), ("done", args.done),
+               ("failed", args.failed)) if on]
+    if sum((bool(args.ids), args.all, bool(states))) != 1:
+        raise ValueError("give queue ids, status flags "
+                         "(--cancelled/--done/--failed), or --all")
+    if args.all:
+        sql, params = "DELETE FROM queue", ()
+    elif states:
+        sql = "DELETE FROM queue WHERE status IN (" + ",".join("?" * len(states)) + ")"
+        params = states
+    else:
+        sql = "DELETE FROM queue WHERE id IN (" + ",".join("?" * len(args.ids)) + ")"
+        params = args.ids
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(sql, params).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"deleted": n}
+
+
 def _print_queue(rows):
     """One header line + one line per entry to stdout (the result)."""
     print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
@@ -1383,6 +1412,12 @@ def build_parser() -> argparse.ArgumentParser:
     qcan = qsub.add_parser("cancel", help="cancel active entries", description="Cancel active entries (proposed/approved/busy) -- a soft state change that keeps the record. Give queue ids or --all.")
     qcan.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to cancel")
     qcan.add_argument("--all",          action="store_true", help="cancel every active entry")
+    qdel = qsub.add_parser("delete", help="permanently remove queue entries", description="Hard-delete queue entries by exactly one selector: given ids, --all, or terminal state (--cancelled/--done/--failed, combinable).")
+    qdel.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to delete")
+    qdel.add_argument("--all",          action="store_true", help="delete every entry")
+    qdel.add_argument("--cancelled",    action="store_true", help="delete all cancelled entries")
+    qdel.add_argument("--done",         action="store_true", help="delete all done entries")
+    qdel.add_argument("--failed",       action="store_true", help="delete all failed entries")
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")

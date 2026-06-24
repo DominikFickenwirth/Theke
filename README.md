@@ -406,3 +406,24 @@ unberührt. Gibt `cancelled = N` aus.
 theke --db build/theke.db queue cancel 3
 theke --db build/theke.db queue cancel --all
 ```
+
+### `queue delete`
+
+Löscht Einträge **endgültig** aus der Tabelle (anders als `cancel`, das den
+Datensatz behält). Genau ein Selektor: IDs, `--all`, oder ein bzw. mehrere
+Endzustands-Schalter (`--cancelled`/`--done`/`--failed`, kombinierbar). Gibt
+`deleted = N` aus.
+
+| Option        | Wirkung                                  |
+| ------------- | ---------------------------------------- |
+| `ID ...`      | Zu löschende Eintrags-IDs.               |
+| `--all`       | Alle Einträge löschen.                   |
+| `--cancelled` | Alle stornierten Einträge löschen.       |
+| `--done`      | Alle fertigen Einträge löschen.          |
+| `--failed`    | Alle fehlgeschlagenen Einträge löschen.  |
+
+```powershell
+theke --db build/theke.db queue delete 3 4
+theke --db build/theke.db queue delete --cancelled --done   # Aufräumen
+theke --db build/theke.db queue delete --all
+```
