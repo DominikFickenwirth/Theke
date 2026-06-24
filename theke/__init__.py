@@ -1028,13 +1028,15 @@ def _match_run(conn, cfg, args) -> dict:
     rows. A pass-1 hit on an Arte sender triggers a second pass that links the
     film's other-language Arte variants by their shared video-id (they inherit
     the hit's confidence). An existing different tmdb_id is preserved (logged,
-    not clobbered); --dry-run computes but writes nothing."""
+    not clobbered); --dry-run computes but writes nothing. `candidates` and
+    `arte_linked` report what the two passes found (shown even with --dry-run);
+    `written` is what was actually tagged."""
     meta = tmdb_movie(cfg, args.tmdb)
     min_conf = cfg.match_min_confidence if args.min_conf is None else args.min_conf
     matches = find_matches(conn, meta, min_conf)
     anchors = arte_anchor_ids(conn, matches)
     links = find_arte_links(conn, anchors, {m["mediathek_id"] for m in matches})
-    written = linked = 0
+    written = 0
     if not args.dry_run:
         conn.execute("BEGIN")
         try:
@@ -1048,13 +1050,13 @@ def _match_run(conn, cfg, args) -> dict:
                              "status='2' WHERE mediathek_id=?",
                              (meta["tmdb_id"], m["confidence"], m["mediathek_id"]))
                 written += 1
-                linked += "arte_video_id" in m
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
     return {"tmdb_id": meta["tmdb_id"], "title": meta["title"],
-            "candidates": len(matches), "written": written, "arte_linked": linked}
+            "candidates": len(matches), "written": written,
+            "arte_linked": len(links)}
 
 
 def _match_show(conn, cfg, args) -> dict:

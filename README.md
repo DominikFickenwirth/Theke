@@ -248,7 +248,8 @@ EN/IT/PL`) mit lokalisierten -- und damit nicht über den Titel auffindbaren --
 Titeln aus; alle teilen sich dieselbe Programm-ID in `url_website`. Über diese
 exakte ID werden die übrigen Sprachvarianten verknüpft und mit derselben
 `tmdb_id` markiert; ihre Confidence erben sie vom auslösenden Treffer. Das
-Ergebnis meldet `arte_linked` (Zahl der so verknüpften Zeilen).
+Ergebnis meldet `arte_linked` (Zahl der so verknüpften Zeilen) -- wie
+`candidates` auch bei `--dry-run` gefüllt; `written` bleibt dann 0.
 
 | Option        | Wirkung                                                       |
 | ------------- | ------------------------------------------------------------- |

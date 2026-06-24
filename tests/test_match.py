@@ -452,11 +452,15 @@ def test_cmd_match_run_links_arte_language_variants(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_cmd_match_run_arte_dry_run_writes_nothing(tmp_path, monkeypatch):
+def test_cmd_match_run_arte_dry_run_reports_links_writes_nothing(tmp_path, monkeypatch):
+    # arte_linked previews the second pass even in --dry-run (like candidates);
+    # written stays 0 and the DB is untouched.
     conn = arte_boot_db(tmp_path, monkeypatch)
     try:
         result = cmd_match(conn, CFG, margs(dry_run=True))
-        assert result["written"] == 0 and result["arte_linked"] == 0
+        assert result["candidates"] == 1
+        assert result["arte_linked"] == 2   # a2 + a3 would be linked
+        assert result["written"] == 0
         assert tmdb_of(conn, "a2")["tmdb_id"] == ""
     finally:
         conn.close()
