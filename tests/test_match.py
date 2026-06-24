@@ -8,7 +8,9 @@ import pytest
 import theke
 from theke import Config, ConfigError, cmd_match, db_connect
 from theke.match import (normalize, strip_articles, title_similarity,
-                         score_match, tmdb_movie, find_matches)
+                         score_match, tmdb_movie, find_matches,
+                         is_arte_sender, arte_video_id, arte_anchor_ids,
+                         find_arte_links)
 
 
 # -- normalize / strip_articles ----------------------------------------------
@@ -261,7 +263,7 @@ def test_cmd_match_run_writes_id_and_confidence(tmp_path, monkeypatch):
     try:
         result = cmd_match(conn, CFG, margs())
         assert result == {"tmdb_id": "1234", "title": "Das Boot",
-                          "candidates": 2, "written": 2}
+                          "candidates": 2, "written": 2, "arte_linked": 0}
         assert tuple(tmdb_of(conn, "m1")) == ("1234", 1.0)
         assert tuple(tmdb_of(conn, "m2")) == ("1234", 0.95)
         assert tmdb_of(conn, "m3")["tmdb_id"] == ""   # rejected, untouched
@@ -302,7 +304,7 @@ def test_cmd_match_run_min_conf_override(tmp_path, monkeypatch):
     try:
         result = cmd_match(conn, CFG, margs(min_conf=0.99))
         assert result == {"tmdb_id": "1234", "title": "Das Boot",
-                          "candidates": 1, "written": 1}
+                          "candidates": 1, "written": 1, "arte_linked": 0}
     finally:
         conn.close()
 
@@ -332,5 +334,185 @@ def test_cmd_match_unsupported_type(tmp_path, monkeypatch):
     try:
         with pytest.raises(ValueError, match="movie"):
             cmd_match(conn, CFG, margs(type="tv"))
+    finally:
+        conn.close()
+
+
+# -- arte second pass (language-variant linking by video-id) -----------------
+
+def test_is_arte_sender_matches_language_variants():
+    assert is_arte_sender("ARTE.DE")
+    assert is_arte_sender("ARTE.FR")
+    assert is_arte_sender("arte.es")        # case-insensitive
+    assert not is_arte_sender("ARTE")       # no language code
+    assert not is_arte_sender("ARTE.DE.X")  # not a plain language variant
+    assert not is_arte_sender("ZDF")
+    assert not is_arte_sender(None)
+
+
+def test_arte_video_id_extracts_shared_id():
+    # the new /videos/ form and the older /guide/xx/ form carry the same token
+    assert arte_video_id(
+        "https://www.arte.tv/de/videos/116786-000-A/ein-balkon/") == "116786-000-A"
+    assert arte_video_id(
+        "http://www.arte.tv/guide/fr/067846-009-A/offene-karten") == "067846-009-A"
+
+
+def test_arte_video_id_absent_is_none():
+    assert arte_video_id("https://www.arte.tv/de/") is None
+    assert arte_video_id("") is None
+    assert arte_video_id(None) is None
+
+
+def insert_arte(conn, mediathek_id, clean_title, sender, url_website,
+                year=1981, duration=8940, category="Movie"):
+    conn.execute(
+        "INSERT INTO mediathek (status, mediathek_id, sender, category, "
+        "clean_title, year, duration, url_website) VALUES ('1',?,?,?,?,?,?,?)",
+        (mediathek_id, sender, category, clean_title, year, duration, url_website))
+
+
+def test_arte_anchor_ids_seeds_from_arte_matches_only(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
+                    "https://www.arte.tv/de/videos/100000-000-A/das-boot/")
+        insert_movie(conn, "z1", "Das Boot", 1981, 8940)   # non-arte (sender NULL)
+        matches = [{"mediathek_id": "a1", "confidence": 1.0},
+                   {"mediathek_id": "z1", "confidence": 0.97}]
+        assert arte_anchor_ids(conn, matches) == {"100000-000-A": 1.0}
+    finally:
+        conn.close()
+
+
+def test_arte_anchor_ids_empty_without_arte(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "z1", "Das Boot", 1981, 8940)
+        assert arte_anchor_ids(conn, [{"mediathek_id": "z1", "confidence": 1.0}]) == {}
+    finally:
+        conn.close()
+
+
+def test_find_arte_links_fans_out_to_variants(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
+                    "https://www.arte.tv/de/videos/100000-000-A/das-boot/")
+        insert_arte(conn, "a2", "Le Bateau", "ARTE.FR",
+                    "https://www.arte.tv/fr/videos/100000-000-A/le-bateau/")
+        insert_arte(conn, "a3", "El Submarino", "ARTE.ES",
+                    "https://www.arte.tv/es/videos/100000-000-A/el-submarino/")
+        insert_arte(conn, "x1", "Andere", "ARTE.FR",          # different id -> skip
+                    "https://www.arte.tv/fr/videos/999999-000-A/andere/")
+        links = find_arte_links(conn, {"100000-000-A": 1.0}, exclude_ids={"a1"})
+        assert [l["mediathek_id"] for l in links] == ["a2", "a3"]
+        assert all(l["confidence"] == 1.0 for l in links)
+        assert all(l["arte_video_id"] == "100000-000-A" for l in links)
+    finally:
+        conn.close()
+
+
+def test_find_arte_links_empty_without_anchors(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
+                    "https://www.arte.tv/de/videos/100000-000-A/das-boot/")
+        assert find_arte_links(conn, {}, exclude_ids=set()) == []
+    finally:
+        conn.close()
+
+
+def arte_boot_db(tmp_path, monkeypatch):
+    """A German Arte hit (a1, matches by title) plus two foreign-language variants
+    (a2/a3) the title pass cannot reach, all sharing one video-id."""
+    monkeypatch.setattr(theke, "http_get",
+                        lambda url: json.dumps(TMDB_BOOT).encode("utf-8"))
+    conn = open_db(tmp_path)
+    insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
+                "https://www.arte.tv/de/videos/100000-000-A/das-boot/")
+    insert_arte(conn, "a2", "Le Bateau", "ARTE.FR",
+                "https://www.arte.tv/fr/videos/100000-000-A/le-bateau/")
+    insert_arte(conn, "a3", "El Submarino", "ARTE.ES",
+                "https://www.arte.tv/es/videos/100000-000-A/el-submarino/")
+    return conn
+
+
+def test_cmd_match_run_links_arte_language_variants(tmp_path, monkeypatch):
+    conn = arte_boot_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, margs())
+        assert result == {"tmdb_id": "1234", "title": "Das Boot",
+                          "candidates": 1, "written": 3, "arte_linked": 2}
+        assert tuple(tmdb_of(conn, "a1")) == ("1234", 1.0)   # pass-1 German hit
+        assert tuple(tmdb_of(conn, "a2")) == ("1234", 1.0)   # variants inherit conf
+        assert tuple(tmdb_of(conn, "a3")) == ("1234", 1.0)
+        assert status_of(conn, "a2") == "2" and status_of(conn, "a3") == "2"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_run_arte_dry_run_reports_links_writes_nothing(tmp_path, monkeypatch):
+    # arte_linked previews the second pass even in --dry-run (like candidates);
+    # written stays 0 and the DB is untouched.
+    conn = arte_boot_db(tmp_path, monkeypatch)
+    try:
+        result = cmd_match(conn, CFG, margs(dry_run=True))
+        assert result["candidates"] == 1
+        assert result["arte_linked"] == 2   # a2 + a3 would be linked
+        assert result["written"] == 0
+        assert tmdb_of(conn, "a2")["tmdb_id"] == ""
+    finally:
+        conn.close()
+
+
+# Real Arte case: "Mysteries of Lisbon" (Raoul Ruiz, 2010) airs under six
+# language senders sharing id 131183-000-A, with untranslatable titles AND
+# slightly different durations (DE 14956 s vs 15340 s elsewhere) -- neither
+# title nor runtime bridges them; only the shared video-id does. The payload is
+# German-only (no Portuguese original_title) so every foreign variant is reached
+# strictly by the id-link, not by an incidental title hit.
+TMDB_LISBON = {
+    "title":             "Die Geheimnisse von Lissabon",
+    "original_title":    "Die Geheimnisse von Lissabon",
+    "release_date":      "2010-08-26",
+    "runtime":           256,                  # 15360 s, matches the DE duration
+    "original_language": "de",
+    "alternative_titles": {"titles": []},
+}
+
+LISBON_VARIANTS = [   # (mediathek_id, clean_title, sender, lang_slug)
+    ("le", "Mysteries of Lisbon",                 "ARTE.EN", "en"),
+    ("es", "Misterios de Lisboa",                 "ARTE.ES", "es"),
+    ("fr", "Mysteres de Lisbonne",                "ARTE.FR", "fr"),
+    ("it", "I misteri di Lisbona",                "ARTE.IT", "it"),
+    ("pl", "Tajemnice Lizbony - (Misterios de Lisboa)", "ARTE.PL", "pl"),
+]
+
+
+def test_cmd_match_run_links_mysteries_of_lisbon(tmp_path, monkeypatch):
+    monkeypatch.setattr(theke, "http_get",
+                        lambda url: json.dumps(TMDB_LISBON).encode("utf-8"))
+    conn = open_db(tmp_path)
+    try:
+        vid = "131183-000-A"
+        insert_arte(conn, "de", "Die Geheimnisse von Lissabon", "ARTE.DE",
+                    f"https://www.arte.tv/de/videos/{vid}/lissabon/",
+                    year=2010, duration=15360)            # exact title+runtime -> 1.0
+        for mid, title, sender, slug in LISBON_VARIANTS:
+            insert_arte(conn, mid, title, sender,
+                        f"https://www.arte.tv/{slug}/videos/{vid}/lisbon/",
+                        year=None, duration=15340)        # foreign title, off runtime
+
+        result = cmd_match(conn, CFG, margs(tmdb="49348"))
+        assert result == {"tmdb_id": "49348",
+                          "title": "Die Geheimnisse von Lissabon",
+                          "candidates": 1, "written": 6, "arte_linked": 5}
+        # the German row is the only title/runtime match
+        assert tuple(tmdb_of(conn, "de")) == ("49348", 1.0)
+        # all five language variants linked by id, inheriting the anchor's 1.0
+        for mid, *_ in LISBON_VARIANTS:
+            assert tuple(tmdb_of(conn, mid)) == ("49348", 1.0)
+            assert status_of(conn, mid) == "2"
     finally:
         conn.close()

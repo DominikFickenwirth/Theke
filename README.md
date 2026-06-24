@@ -227,3 +227,53 @@ Kategorie- oder Länder-Verteilung.
 theke --db build/theke.db enrich dist --field category
 theke --db build/theke.db enrich dist --field country --sender ARTE.DE --limit 15
 ```
+
+## `theke match`
+
+Stufe 4: löst eine TMDB-ID auf (Titelvarianten/Jahr/Laufzeit über die TMDB-API)
+und markiert die passenden `mediathek`-Zeilen mit `tmdb_id` + `match_confidence`,
+`status` 1 -> 2. Ein Unterbefehl wählt die Aktion: `run` schreibt, `show` erklärt
+die Kandidaten-Scores schreibfrei. Ohne Aktion läuft der Default `run`, d. h.
+`theke match --tmdb 1474601` entspricht `theke match run --tmdb 1474601`.
+
+### `match run`
+
+Schreibt `tmdb_id` + `match_confidence` auf die Treffer. Eine bereits gesetzte,
+abweichende `tmdb_id` bleibt erhalten (wird nicht überschrieben).
+
+**Arte-Zweiter-Durchgang:** Landet ein Treffer auf einem Arte-Sprachsender
+(`ARTE.XX`), folgt automatisch ein zweiter Durchgang für alle Sprachvarianten
+desselben Films. Arte strahlt einen Film unter mehreren Sendern (`ARTE.DE/FR/ES/
+EN/IT/PL`) mit lokalisierten -- und damit nicht über den Titel auffindbaren --
+Titeln aus; alle teilen sich dieselbe Programm-ID in `url_website`. Über diese
+exakte ID werden die übrigen Sprachvarianten verknüpft und mit derselben
+`tmdb_id` markiert; ihre Confidence erben sie vom auslösenden Treffer. Das
+Ergebnis meldet `arte_linked` (Zahl der so verknüpften Zeilen) -- wie
+`candidates` auch bei `--dry-run` gefüllt; `written` bleibt dann 0.
+
+| Option        | Wirkung                                                       |
+| ------------- | ------------------------------------------------------------- |
+| `--tmdb ID`   | Zu matchende TMDB-Film-ID (Pflicht).                          |
+| `--dry-run`   | Treffer berechnen, nichts schreiben.                          |
+| `--min-conf X`| Mindest-Confidence zum Markieren (Standard: Config).          |
+
+```powershell
+theke --db build/theke.db match run --tmdb 1474601   # candidates/written/arte_linked
+theke --db build/theke.db match --tmdb 1474601 --dry-run
+```
+
+### `match show`
+
+Reines Lese-Werkzeug: listet die Kandidaten-Zeilen mit Score-Aufschlüsselung
+(Titelähnlichkeit, Jahr-/Laufzeit-Differenz), ohne zu schreiben. Standardmäßig
+alles, was nicht verworfen wurde -- zum Justieren der Match-Heuristik.
+
+| Option        | Wirkung                                              |
+| ------------- | --------------------------------------------------- |
+| `--tmdb ID`   | Zu inspizierende TMDB-Film-ID (Pflicht).            |
+| `--min-conf X`| Mindest-Confidence zum Listen (Standard 0.0).       |
+| `--limit N`   | Maximale Kandidatenzahl (Standard 20).              |
+
+```powershell
+theke --db build/theke.db match show --tmdb 1474601
+```
