@@ -9,6 +9,7 @@ import theke
 from theke import Config, ConfigError, cmd_match, db_connect
 from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
+                         tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
                          find_arte_links)
 
@@ -412,6 +413,176 @@ def test_cmd_match_unsupported_type(tmp_path, monkeypatch):
     try:
         with pytest.raises(ValueError, match="movie"):
             cmd_match(conn, CFG, margs(type="tv"))
+    finally:
+        conn.close()
+
+
+# -- series episodes: tmdb_tv (two-call IO via monkeypatched http_get) --------
+
+TMDB_TATORT = {
+    "name":          "Tatort",
+    "original_name": "Tatort",
+    "alternative_titles": {"results": [
+        {"iso_3166_1": "US", "title": "Scene of the Crime"},
+        {"iso_3166_1": "DE", "title": "Tatort (Krimireihe)"},
+    ]},
+}
+
+TMDB_TATORT_EP = {
+    "name":      "Der rote Schatten",
+    "runtime":   89,
+    "air_date":  "2017-03-19",
+    "translations": {"translations": [
+        {"iso_3166_1": "US", "iso_639_1": "en", "data": {"name": "The Red Shadow"}},
+        {"iso_3166_1": "DE", "iso_639_1": "de", "data": {"name": "Der rote Schatten"}},
+    ]},
+}
+
+
+def fake_tv_get(seen):
+    """http_get stub: the episode payload for /season/.../episode/ URLs, the
+    series payload otherwise. Appends every URL seen to `seen`."""
+    def get(url):
+        seen.append(url)
+        body = TMDB_TATORT_EP if "/season/" in url else TMDB_TATORT
+        return json.dumps(body).encode("utf-8")
+    return get
+
+
+def test_tmdb_tv_parses_series_episode(monkeypatch):
+    seen = []
+    monkeypatch.setattr(theke, "http_get", fake_tv_get(seen))
+    meta = tmdb_tv(Config(tmdb_api_key="KEY"), 55, 2, 6)
+
+    # series + episode endpoints both hit, with id/key/season/episode in the URLs.
+    assert any("/tv/55?" in u and "KEY" in u for u in seen)
+    assert any("/tv/55/season/2/episode/6?" in u for u in seen)
+    # series: original_name deduped, US dropped, DE alternative kept.
+    assert meta["series_titles"] == ["Tatort", "Tatort (Krimireihe)"]
+    assert meta["series_title"] == "Tatort"
+    # episode: name + the translated (US) name, the DE dup folded out.
+    assert meta["episode_name"] == "Der rote Schatten"
+    assert meta["episode_titles"] == ["Der rote Schatten", "The Red Shadow"]
+    assert meta["runtime"] == 89
+    assert meta["year"] == 2017          # from air_date
+    assert meta["season"] == 2 and meta["episode"] == 6
+    assert meta["tmdb_id"] == "55"
+
+
+# -- series episodes: score_episode ------------------------------------------
+
+# series-name + (season, episode) are gates; episode-title + runtime confirm.
+TATORT = {"series_titles": ["Tatort"], "episode_titles": ["Der rote Schatten"],
+          "episode_name": "Der rote Schatten", "series_title": "Tatort",
+          "runtime": 89, "year": 2017, "season": 2, "episode": 6, "tmdb_id": "55"}
+
+
+def erow(series_name="Tatort", clean_title="Der rote Schatten", season=2,
+         episode=6, duration=5340):       # 5340 s = 89 min
+    return {"series_name": series_name, "clean_title": clean_title,
+            "season": season, "episode": episode, "duration": duration}
+
+
+def test_score_episode_exact_match_is_one():
+    s = score_episode(TATORT, erow())
+    assert s["rejected"] is False
+    assert s["confidence"] == 1.0
+    assert s["series_sim"] == 1.0
+    assert s["episode_title_sim"] == 1.0
+
+
+def test_score_episode_wrong_season_is_rejected():
+    s = score_episode(TATORT, erow(season=3))
+    assert s["rejected"] is True
+    assert s["confidence"] == 0.0
+
+
+def test_score_episode_wrong_episode_is_rejected():
+    s = score_episode(TATORT, erow(episode=7))
+    assert s["rejected"] is True
+    assert s["confidence"] == 0.0
+
+
+def test_score_episode_series_below_floor_is_rejected():
+    # right S/E, but the series name does not match the wanted series.
+    s = score_episode(TATORT, erow(series_name="Lindenstrasse"))
+    assert s["rejected"] is True
+    assert s["confidence"] == 0.0
+
+
+def test_score_episode_runtime_off_soft_penalty():
+    # 70 min vs 89 min: within the floor but beyond tolerance -> factor 0.90.
+    # series 1.0 * runtime 0.90 = 0.9; delta = 70 - 89 = -19.
+    s = score_episode(TATORT, erow(duration=4200))   # 4200 s = 70 min
+    assert s["confidence"] == 0.9
+    assert s["runtime_delta"] == -19
+
+
+def test_score_episode_grossly_short_is_rejected():
+    # 20 min is below 50% of 89 min -> clip, rejected outright.
+    s = score_episode(TATORT, erow(duration=1200))   # 1200 s = 20 min
+    assert s["rejected"] is True
+    assert s["confidence"] == 0.0
+
+
+# -- series episodes: find_episode_matches -----------------------------------
+
+def insert_episode(conn, mediathek_id, clean_title, series_name, season, episode,
+                   duration=5340, category="Episode"):
+    conn.execute(
+        "INSERT INTO mediathek (status, mediathek_id, category, clean_title, "
+        "series_name, season, episode, duration) VALUES ('1',?,?,?,?,?,?,?)",
+        (mediathek_id, category, clean_title, series_name, season, episode, duration))
+
+
+def test_find_episode_matches_selects_triple_scores_and_sorts(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_episode(conn, "e1", "Der rote Schatten", "Tatort", 2, 6)            # 1.0
+        insert_episode(conn, "e5", "Der rote Schatten", "Tatort", 2, 6, 4200)      # 0.9 (rt)
+        insert_episode(conn, "e2", "Der rote Schatten", "Lindenstrasse", 2, 6)     # series out
+        insert_episode(conn, "e3", "Der rote Schatten", "Tatort", 2, 7)            # wrong episode
+        insert_episode(conn, "e4", "Der rote Schatten", "Tatort", 3, 6)            # wrong season
+        insert_movie(conn, "m1", "Der rote Schatten", 2017, 5340)                  # not an episode
+        matches = find_episode_matches(conn, TATORT, min_conf=0.6)
+        assert [m["mediathek_id"] for m in matches] == ["e1", "e5"]
+        assert matches[0]["confidence"] == 1.0
+        assert matches[1]["confidence"] == 0.9
+    finally:
+        conn.close()
+
+
+def test_find_episode_matches_respects_min_conf(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_episode(conn, "e1", "Der rote Schatten", "Tatort", 2, 6)
+        insert_episode(conn, "e5", "Der rote Schatten", "Tatort", 2, 6, 4200)
+        matches = find_episode_matches(conn, TATORT, min_conf=0.95)
+        assert [m["mediathek_id"] for m in matches] == ["e1"]
+    finally:
+        conn.close()
+
+
+def test_find_episode_matches_excludes_trailers(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_episode(conn, "e1", "Der rote Schatten", "Tatort", 2, 6)
+        conn.execute("UPDATE mediathek SET flags='T' WHERE mediathek_id='e1'")
+        assert find_episode_matches(conn, TATORT, min_conf=0.6) == []
+    finally:
+        conn.close()
+
+
+def test_find_episode_matches_only_status_1(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_episode(conn, "e1", "Der rote Schatten", "Tatort", 2, 6)   # match
+        insert_episode(conn, "e0", "Der rote Schatten", "Tatort", 2, 6)
+        conn.execute("UPDATE mediathek SET status='0' WHERE mediathek_id='e0'")
+        insert_episode(conn, "e2", "Der rote Schatten", "Tatort", 2, 6)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='e2'")
+        matches = find_episode_matches(conn, TATORT, min_conf=0.6)
+        assert [m["mediathek_id"] for m in matches] == ["e1"]
     finally:
         conn.close()
 
