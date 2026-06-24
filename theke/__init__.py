@@ -1139,12 +1139,13 @@ def _print_matches(meta, matches):
 
 
 # -- queue (phase 5: staging + review) ---------------------------------------
-# Status chars: 'P' proposed, 'A' approved, 'D' downloading, 'X' done,
-# 'F' failed, 'C' cancelled. DB-only stage; nothing here touches the filesystem.
+# Status chars, chosen ASCII-ascending in lifecycle order so a plain sort tracks
+# progress: '0' proposed, 'A' approved, 'B' busy (downloading), 'C' cancelled,
+# 'D' done, 'F' failed. DB-only stage; nothing here touches the filesystem.
 
-QUEUE_ACTIVE = ("P", "A", "D")
-QUEUE_STATUS = {"proposed": "P", "approved": "A", "downloading": "D",
-                "done": "X", "failed": "F", "cancelled": "C"}
+QUEUE_STATUS = {"proposed": "0", "approved": "A", "busy": "B",
+                "cancelled": "C", "done": "D", "failed": "F"}
+QUEUE_ACTIVE = ("0", "A", "B")   # proposed/approved/busy -- not yet terminal
 
 
 def _now() -> str:
@@ -1158,7 +1159,7 @@ def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
     match args.queue_cmd:
         case "add":     return _queue_add(conn, cfg, args)
         case "list":    return _queue_list(conn, args)
-        case "approve": return _queue_set_status(conn, args, ("P",), "A", "approved")
+        case "approve": return _queue_set_status(conn, args, ("0",), "A", "approved")
         case "cancel":  return _queue_set_status(conn, args, QUEUE_ACTIVE, "C", "cancelled")
         case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
 
@@ -1168,11 +1169,11 @@ def _queue_add(conn, cfg, args) -> dict:
     its many mediathek rows (theke.queue.select_downloads) and queues the minimal
     set; `--mediathek-id` queues one row directly ('AV'). New entries are
     'proposed' unless queue_auto_approve is set. A mediathek_id already queued in
-    an active state (P/A/D) is skipped; a finished/cancelled one does not block a
-    re-queue. `deduplicated` counts the source rows collapsed or filtered away."""
+    an active state (proposed/approved/busy) is skipped; a terminal one does not
+    block a re-queue. `deduplicated` counts the source rows collapsed or filtered."""
     if not args.tmdb and not args.mediathek_id:
         raise ValueError("queue add needs --tmdb or --mediathek-id")
-    status = "A" if cfg.queue_auto_approve else "P"
+    status = QUEUE_STATUS["approved"] if cfg.queue_auto_approve else QUEUE_STATUS["proposed"]
     totals = {"queued": 0, "skipped": 0, "deduplicated": 0}
     conn.execute("BEGIN")
     try:
@@ -1231,8 +1232,9 @@ def _queue_name(cfg, title, year) -> str:
 def _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
                   resolution, remux, totals):
     """Insert one queue row unless the mediathek_id is already queued active."""
-    if conn.execute("SELECT 1 FROM queue WHERE mediathek_id=? AND status IN "
-                    "('P','A','D')", (mediathek_id,)).fetchone():
+    actives = "(" + ",".join("?" * len(QUEUE_ACTIVE)) + ")"
+    if conn.execute(f"SELECT 1 FROM queue WHERE mediathek_id=? AND status IN "
+                    f"{actives}", (mediathek_id, *QUEUE_ACTIVE)).fetchone():
         totals["skipped"] += 1
         return
     ts = _now()
@@ -1375,7 +1377,7 @@ def build_parser() -> argparse.ArgumentParser:
     qapp = qsub.add_parser("approve", help="approve proposed entries for download", description="Move proposed entries to approved (the gate to download). Give queue ids or --all.")
     qapp.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to approve")
     qapp.add_argument("--all",          action="store_true", help="approve every proposed entry")
-    qcan = qsub.add_parser("cancel", help="cancel active entries", description="Cancel active entries (proposed/approved/downloading) -- a soft state change that keeps the record. Give queue ids or --all.")
+    qcan = qsub.add_parser("cancel", help="cancel active entries", description="Cancel active entries (proposed/approved/busy) -- a soft state change that keeps the record. Give queue ids or --all.")
     qcan.add_argument("ids",            nargs="*", type=int, metavar="ID", help="queue entry ids to cancel")
     qcan.add_argument("--all",          action="store_true", help="cancel every active entry")
 

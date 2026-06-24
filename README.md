@@ -317,9 +317,11 @@ Download ist Stufe 6. Ein Unterbefehl wählt die Aktion: `add` stellt ein,
 `list`/`approve`/`cancel` verwalten. Ohne Aktion läuft der Default `list`, d. h.
 `theke queue` entspricht `theke queue list`.
 
-Der Lebenszyklus einer Zeile (Spalte `status`, ein Zeichen): `proposed` (P) ->
-`approved` (A) -> `downloading` (D) -> `done` (X) / `failed` (F) / `cancelled`
-(C). Jede Zeile trägt zudem `name` (Bibliotheks-Dateiname), `language`,
+Der Lebenszyklus einer Zeile (Spalte `status`, ein Zeichen; ASCII-aufsteigend in
+Ablaufreihenfolge, damit eine einfache Sortierung dem Fortschritt folgt):
+`proposed` (`0`) -> `approved` (`A`) -> `busy`/downloading (`B`) -> `done` (`D`),
+daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile trägt zudem `name`
+(Bibliotheks-Dateiname), `language`,
 `resolution` (`HD`/`SD`/`LQ`) und `remux` (`A` = nur Audio, `V` = nur Video,
 `AV` = beides) für die Remux-Stufe.
 
@@ -363,7 +365,7 @@ gefiltert. `--json` gibt die Zeilen zurück, sonst eine Tabelle auf stdout.
 
 | Option           | Wirkung                                                                        |
 | ---------------- | ------------------------------------------------------------------------------ |
-| `--status STATE` | Nur diesen Zustand: `proposed`, `approved`, `downloading`, `done`, `failed`, `cancelled`. |
+| `--status STATE` | Nur diesen Zustand: `proposed`, `approved`, `busy`, `cancelled`, `done`, `failed`. |
 
 ```powershell
 theke --db build/theke.db queue list
@@ -387,7 +389,7 @@ theke --db build/theke.db queue approve --all
 
 ### `queue cancel`
 
-Storniert aktive Einträge (`proposed`/`approved`/`downloading`) -- eine weiche
+Storniert aktive Einträge (`proposed`/`approved`/`busy`) -- eine weiche
 Zustandsänderung, die den Datensatz behält. Abgeschlossene Einträge bleiben
 unberührt. Gibt `cancelled = N` aus.
 
