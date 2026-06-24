@@ -1223,8 +1223,9 @@ def _queue_add_mediathek(conn, cfg, mediathek_id, status, totals):
 
 
 def _queue_name(cfg, title, year) -> str:
-    """The library filename stem from the configured template."""
-    return cfg.name_template.format(title=title, year=year)
+    """The library filename stem from the configured template. None fields render
+    empty (never the literal 'None'), e.g. a row without a year."""
+    return cfg.name_template.format(title=title or "", year=year if year is not None else "")
 
 
 def _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
