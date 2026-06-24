@@ -609,6 +609,41 @@ def test_standalone_film_without_se_stays_movie():
     assert r["episode"] is None
 
 
+def test_fiction_topic_lifts_null_to_movie():
+    # A known fiction-Reihe topic (Tatort) with NO film metazeile on this airing
+    # leaves category NULL via the duration prior (a 89-min crime film, >1800s).
+    # The fiction-topic allowlist lifts it to Movie with series_name, matching the
+    # labelled airings of the same Reihe (internal consistency).
+    r = enrich("ARD", "Tatort", "Tatort: Seenot", "", 5339)
+    assert r["category"] == "Movie"
+    assert r["series_name"] == "Tatort"
+
+
+def test_fiction_topic_does_not_touch_episode():
+    # The lift fires ONLY on a NULL medium. A Tatort airing with explicit Sxx/Exx
+    # is Episode (episodic pass) and stays Episode -- the per-airing Movie/Episode
+    # scatter inside a Reihe is left for match to regroup via series_name.
+    r = enrich("ARD", "Tatort", "Tatort: Seenot (S1/E5)", "", 3000)
+    assert r["season"] == 1
+    assert r["episode"] == 5
+    assert r["category"] == "Episode"
+
+
+def test_fiction_topic_trailer_stays_clip():
+    # A short trailer of a fiction Reihe is Clip via the duration prior and is NOT
+    # lifted (the lift only touches NULL, and a trailer carries the T flag).
+    r = enrich("ARD", "Tatort", "Tatort: Seenot (Trailer)", "", 40)
+    assert "T" in r["flags"]
+    assert r["category"] == "Clip"
+
+
+def test_non_fiction_feature_topic_stays_null():
+    # A feature-length NON-fiction topic (phoenix news block) is not in the
+    # allowlist, so it stays NULL -- the lift never guesses beyond known Reihen.
+    r = enrich("ARD", "phoenix vor ort", "phoenix vor ort: Bundestag", "", 5000)
+    assert r["category"] is None
+
+
 # -- cmd_enrich: DB write side ---------------------------------------------
 
 def open_db(tmp_path):
