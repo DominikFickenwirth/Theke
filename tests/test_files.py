@@ -304,6 +304,23 @@ def test_hls_encrypted_falls_back_to_ffmpeg(tmp_path, monkeypatch):
     assert MEDIA_URL in seen["args"] and "ffmpeg" in seen["args"]
 
 
+def test_hls_ffmpeg_removes_faulty_output_on_failure(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n'
+             b'#EXTINF:6,\nseg0.ts\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media})
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:        # ffmpeg writes a partial file...
+            fh.write(b"partial garbage")
+        raise RuntimeError("ffmpeg failed (exit 1): boom")   # ...then dies
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = tmp_path / "v.ts"
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        download_hls(url=MEDIA_URL, out=str(out), retries=0, ffmpeg_path="ffmpeg")
+    assert not out.exists()                     # faulty target cleaned up
+
+
 def test_hls_native_failure_falls_back_to_ffmpeg(tmp_path, monkeypatch):
     install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
                                "https://h/v/seg1.ts": RuntimeError("seg gone")})
