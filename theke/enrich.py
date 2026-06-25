@@ -36,14 +36,39 @@ PART    = re.compile(r'\((\d{1,2})/(\d{1,2})\)')             # Mehrteiler "(n/m)
 # "- Teil n" (arabic or roman); a bare "n/m" only at the very end (so dates
 # like "10/06/2026" and "3 1/2 Stunden" never match).
 STAFFOLGE = re.compile(r'\bStaffel\s+(\d{1,2}),?\s+Folge\s+(\d{1,3})\b', re.I)
-TEIL      = re.compile(r'\s*[-–(]?\s*\bTeil\s+(\d{1,2}|[IVXLC]+)(?:\s*/\s*(\d{1,2}))?\b\)?', re.I)
+TEIL      = re.compile(r'\s*[-–(,]?\s*\bTeil\s+(\d{1,2}|[IVXLC]+)(?:\s*/\s*(\d{1,2}))?\b\)?', re.I)
 NPART     = re.compile(r'\s*(?<![\d./])(\d{1,2})\s*/\s*(\d{1,2})\s*$')
+# Leading "Folge N[/M]: <Subtitle>" (also "Episode N", separators : · | - ): the
+# running number is the episode (M the count), and the subtitle is the real
+# title. \s+\d after the word rejects "Sonderfolge"/"Folge der Spur"/"Folger".
+FOLGE_PRE  = re.compile(r'^(?:Folge|Episode)\s+(\d{1,4})(?:\s*/\s*(\d{1,4}))?'
+                        r'(?:\s*:\s*|\s+[·|–-]\s+)(.+)$', re.I)
+FOLGE_ONLY = re.compile(r'^(?:Folge|Episode)\s+(\d{1,4})(?:\s*/\s*(\d{1,4}))?\s*$', re.I)
+# Season markers. STAFFEL_TITLE: a dash-introduced "- Staffel N" segment in the
+# title (the dash distinguishes the real season marker from review-clip content
+# like "BLACK MIRROR Staffel 6: ..."). STAFFEL_SERIES: a trailing "Staffel N" on
+# the topic/series_name (the ORF "<Series> Staffel N" convention).
+STAFFEL_TITLE  = re.compile(r'\s*[-–]\s*Staffel\s+(\d{1,2})\b', re.I)
+STAFFEL_SERIES = re.compile(r'\s+Staffel\s+(\d{1,2})$', re.I)
+# Parenthetical season "(Staffel N)" or "(Staffel N, <part>)" (part = Teil k,
+# Folge k, or n/m). Season N, optional episode/count from the inner part.
+PARENSEASON = re.compile(r'\s*\(\s*Staffel\s+(\d{1,2})'
+                         r'(?:\s*,\s*(?:Teil\s+(\d{1,2})|Folge\s+(\d{1,3})|(\d{1,2})\s*/\s*(\d{1,2})))?'
+                         r'\s*\)', re.I)
+# "Titel n/m - Untertitel"; the (?<!\d\s) rejects a mixed fraction "8 1/2 - ..."
+# (a whole number + space before the n/m), which is a film runtime, not a part.
+MIDPART   = re.compile(r'(?<![\d./])(?<!\d\s)(\d{1,2})/(\d{1,2})\s+(?=[-–]\s)')
 ROMAN   = {'I':1,'V':5,'X':10,'L':50,'C':100}
 PIPESUF = re.compile(r'\s*\|\|?\s*[^|]+(?:\|\|?\s*[^|]+)*$')  # trailing " | Reihe"
 # Trailing "- <Format> von <Name>" director credit (B4); no year -> not a
 # metazeile, just strip it off the title (no country/year extraction).
 CREDIT  = re.compile(r'\s+[-–]\s+(?:Film|' + CATWORD + r')\s+von\s+\S.*$', re.I)
 TRAILER = re.compile(r'\b(Trailer|Teaser|Vorschau|Vorab|Preview|Präview)\b', re.I)
+# Companion pieces ABOUT a work (not the work): a making-of (M flag) or an
+# interview/Rencontre/Entretien with its makers (I flag). Short pieces only, so a
+# feature film merely titled "Interview mit ..." is never caught (see enrich()).
+MAKINGOF  = re.compile(r'\bMaking[ -]of\b', re.I)
+INTERVIEW = re.compile(r'^\s*(?:Interview mit|Rencontre avec|Entretien avec|Gespräch mit)\b', re.I)
 
 # Parenthetical marker vocabulary -> (target, value). 'flag' adds a letter to
 # the flags string (A audio-description, S sign-language, U burned-in subs;
@@ -150,6 +175,20 @@ FORMAT_TOPICS = {'film':'Film', 'filme':'Film', 'filme in der ard':'Film',
                  'dokus & reportagen':'Doku/Reportage',
                  'dokumentationen und reportagen':'Doku/Reportage'}
 
+# Programming-slot topics (Sendeplätze): a film-type head + an end-anchored
+# placement phrase ("Filme im Ersten", "Spielfilm in 3sat", "Der Fernsehfilm der
+# Woche"). These are a slot, not a show -> slot=topic, series_name=None (category
+# is left untouched: a fiction strand keeps its Movie lift via the raw topic). The
+# film-type head guards real shows ("Nuhr im Ersten"); the `$` anchor guards
+# "... im Dritten Reich" (a placement phrase that is not the tail).
+SLOT_HEAD = (r'(?:Der\s+|Die\s+|Das\s+)?'
+             r'(?:Spielfilme?|Fernsehfilme?|Filme?|Dokus?|Dokumentarfilme?|Dokumentation'
+             r'|Kurzfilme?|Familienfilme?|Kinderfilme?|Kulturdoku|Krimis?|Debüt'
+             r'|Sommerkino|FilmMittwoch|Filmdebüt)')
+SLOT_TAIL = (r'(?:im\s+(?:Ersten|Zweiten|Dritten|MDR|WDR|NDR|BR|SWR|HR|RBB|SR|RBTV)'
+             r'|in\s+3sat|der\s+Woche)')
+SLOT_RX   = re.compile(rf'^{SLOT_HEAD}\b.*\b{SLOT_TAIL}$', re.I)
+
 # Clip/container sammeltopics: series=None, category left to the duration prior.
 CONTAINER_TOPICS = {'tagesschau24', 'beiträge', 'br', 'sr', '3sat', 'sportflash',
                     'zib flash', 'srf news videos', 'sr 3 videos', 'vintage videos'}
@@ -161,7 +200,7 @@ EVENT_RX = re.compile(r'\b(Berlinale|Grimme[- ]Preis|Filmpreis|Filmfest'
 SENDER_TOKENS = {'ard', 'zdf', '3sat', 'hr', 'br', 'wdr', 'ndr', 'swr', 'sr',
                  'mdr', 'rbb', 'orf', 'srf', 'rbtv', 'alpha', 'arte', 'phoenix',
                  'dw', 'kika'}
-BRANDS = ['ard wissen', 'radio bremen', 'alpha lernen']
+BRANDS = ['ard wissen', 'radio bremen', 'alpha lernen', 'das erste']
 SECTION_WORDS = {'regionalmagazin', 'sportblitz', 'wetter', 'doku', 'extra',
                  'retro', 'geschichten', 'spezial'}
 
@@ -196,8 +235,9 @@ def route_topic(topic) -> dict:
     tp = (topic or '').strip()
     if not tp:
         return out
-    if '|' in tp:                              # Dachmarke|series pipe
-        parts = [p.strip() for p in tp.split('|')]
+    sep = '|' if '|' in tp else '//' if '//' in tp else None
+    if sep:                                    # Dachmarke|series / Sender//series
+        parts = [p.strip() for p in tp.split(sep)]
         if len(parts) == 2 and parts[0] and parts[1]:
             a, b = parts
             sa, sb = _side_is_slot(a), _side_is_slot(b)
@@ -216,16 +256,47 @@ def route_topic(topic) -> dict:
     if EVENT_RX.search(tp):
         out['series_name'] = tp; out['category'] = 'Event'; out['kat_src'] = 'event'
         return out
+    if SLOT_RX.match(tp):                       # programming strand -> slot, no series
+        out['slot'] = tp; return out
     out['series_name'] = tp                    # long tail: today's behavior
     return out
 
 
+# Known fiction-Reihe topics: a film-length (>=1800s) airing with no decisive
+# medium (no metazeile, no episodic marker) is lifted to Movie, matching the
+# labelled airings of the same brand so a Reihe is internally consistent. Derived
+# from the live DB: every topic here already produces >=8 metazeile-labelled Movie
+# rows (a film label never appears on talk/news/sports, so this set cannot pull in
+# non-fiction). The lift runs BEFORE the duration prior and only on a still-unset
+# category, so it never overrides Episode (Sxx/Exx, a count) or a Clip/trailer; a
+# sub-30-min fiction-topic clip falls past it to the prior. The residual per-airing
+# Movie/Episode scatter is regrouped by match via
+# series_name. Generic film SLOTS in this set (Filme im Ersten, FilmMittwoch im
+# Ersten, ...) keep series_name = slot for now; moving them to FORMAT_TOPICS for a
+# cleaner NULL series_name is a separate later cleanup. Matched casefold == topic.
+FICTION_TOPICS = {t.casefold() for t in (
+    'Tatort', 'Polizeiruf 110', 'Märchen in der ARD', 'Debüt im Dritten',
+    'Dokumentarfilmzeit', 'FilmMittwoch im Ersten', 'Spielfilm-Highlights',
+    'Der Usedom-Krimi', 'Filme im Ersten', 'Donna Leon', 'Praxis mit Meerblick',
+    'Der Kroatien-Krimi', 'Krause', 'Daheim in den Bergen', 'Rebecka Martinsson',
+    'Kommissar Dupin', 'Kommissar Wallander', 'Harter Brocken Krimireihe',
+    'Zimmer mit Stall', 'Pfarrer Braun', 'Anna und ihr Untermieter', 'Wolfsland',
+    'Utta Danella', 'Steirerkrimi', 'Ein Krimi aus Passau',
+    'Der Ranger - Paradies Heimat', 'Spielfilm in 3sat', 'Liebe am Fjord',
+    'Käthe und ich', 'Kluftingerkrimis', 'Die drei von der Müllabfuhr',
+    'Der Wien-Krimi: Blind ermittelt', 'Mankells Wallander', 'Die Diplomatin',
+    'Die Bestatterin', 'Der Pate', 'Der Kommissar und die Alpen',
+    'Toni, männlich, Hebamme', 'Nord bei Nordwest', 'Mordkommission Istanbul',
+    'Mord in bester Gesellschaft', 'Krimis im Ersten', 'Die Inselärztin',
+    'Der Bozen-Krimi')}
+
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
 TITLE_META_SENDERS = {'ZDF', '3Sat'}
 # ARTE taxonomy "Ober - Unter": the super-label (Ober) carries the genre, the
-# sub-label (Unter) the medium. A recognized super-label suppresses the duration
-# prior, so an unknown sub-label leaves category NULL (honest), never a guess.
-# Keys are the source labels in every ARTE UI language (DE/FR/EN/ES/IT/PL).
+# sub-label (Unter) the medium. The Ober sets the genre; an unrecognized sub-label
+# leaves the medium to the duration prior (short -> Clip/Episode, feature-length
+# -> NULL, so a film is never mislabelled). Keys are the source labels in every
+# ARTE UI language (DE/FR/EN/ES/IT/PL).
 # Super-label -> (category, genre-tuple); category usually None (medium unknown).
 ARTE_OBER = {'Kino':(None,()),'Cinéma':(None,()),'Cinema':(None,()),'Cine':(None,()),
              'Fernsehfilme und Serien':(None,()),'Séries et fictions':(None,()),
@@ -269,8 +340,12 @@ def _confidence(kat_src, category):
     return 0.2 if category is None else 0.5
 
 
-def enrich(sender, topic, title, description, duration) -> dict:
-    """A mediathek row -> extracted metadata dict (keys == ENRICH_COLS)."""
+def enrich(sender, topic, title, description, duration,
+            fiction_topics=FICTION_TOPICS) -> dict:
+    """A mediathek row -> extracted metadata dict (keys == ENRICH_COLS).
+
+    fiction_topics is the casefolded fiction-Reihe allowlist (built-in default;
+    the CLI passes the default unioned with config['fiction_topics'])."""
     t = title or ''; d = (description or '').strip(); tp = topic or ''
     flags = set()
     genres = set()
@@ -315,22 +390,45 @@ def enrich(sender, topic, title, description, duration) -> dict:
         elif sender == 'KiKA':
             m = LEADC.search(t)                # KiKA leading "NN."
             if m: r['episode'] = int(m.group(1)); t = LEADC.sub('', t)
+    ps = PARENSEASON.search(t)                 # "(Staffel N[, part])": season + opt. part
+    if ps:
+        if r['season'] is None: r['season'] = int(ps.group(1))
+        if r['episode'] is None:
+            ep = ps.group(2) or ps.group(3) or ps.group(4)
+            if ep: r['episode'] = int(ep)
+            if ps.group(5): r['episode_count'] = int(ps.group(5))
+        t = PARENSEASON.sub('', t, count=1)
     pm = PART.search(t)                        # Mehrteiler "(n/m)": n->episode, m->count
     if pm:
         r['episode_count'] = int(pm.group(2))
         if r['episode'] is None: r['episode'] = int(pm.group(1))
         t = PART.sub('', t)
+    fp = FOLGE_PRE.match(t)                     # leading "Folge N[/M]: Subtitle"
+    fo = fp or FOLGE_ONLY.match(t)             # ... or a bare "Folge N" (no subtitle)
+    if fo:                                      # fill episode/count only if still unset
+        if r['episode'] is None: r['episode'] = int(fo.group(1))
+        if fo.group(2) and r['episode_count'] is None: r['episode_count'] = int(fo.group(2))
+        t = fp.group(3) if fp else ''          # subtitle, or empty for a bare "Folge N"
+    sst = STAFFEL_TITLE.search(t)              # "- Staffel N" season segment in the title
+    if sst:
+        if r['season'] is None: r['season'] = int(sst.group(1))
+        t = STAFFEL_TITLE.sub('', t, count=1)
+    mt = TEIL.search(t)                        # "Teil N[/M]" marker: strip always, extract if unset
+    if mt:
+        if r['episode'] is None:
+            r['episode'] = _to_int(mt.group(1))
+            if mt.group(2): r['episode_count'] = int(mt.group(2))
+        t = TEIL.sub('', t)
     if r['episode'] is None:                   # paren-less notation (B5), guarded
         mf = STAFFOLGE.search(t)
-        mt = TEIL.search(t)
+        md = MIDPART.search(t)
         mn = NPART.search(t)
         if mf:
             r['season'] = int(mf.group(1)); r['episode'] = int(mf.group(2))
             t = STAFFOLGE.sub('', t)
-        elif mt:
-            r['episode'] = _to_int(mt.group(1))
-            if mt.group(2): r['episode_count'] = int(mt.group(2))
-            t = TEIL.sub('', t)
+        elif md and int(md.group(1)) <= int(md.group(2)) <= 20:   # "Titel n/m - Untertitel"
+            r['episode'] = int(md.group(1)); r['episode_count'] = int(md.group(2))
+            t = t[:md.start()] + t[md.end():]
         elif mn and int(mn.group(1)) <= int(mn.group(2)) <= 50:   # n<=m, no dates
             r['episode'] = int(mn.group(1)); r['episode_count'] = int(mn.group(2))
             t = t[:mn.start()]
@@ -356,8 +454,13 @@ def enrich(sender, topic, title, description, duration) -> dict:
         if routed['category'] and not r['category']:   # metazeile (Pass 3) wins
             r['category'] = routed['category']; kat_src = routed['kat_src']
         t = PIPESUF.sub('', t)                 # drop " | Reihe" suffix from title
+        if r['series_name']:                   # ORF "<Series> Staffel N" -> split off season
+            ssn = STAFFEL_SERIES.search(r['series_name'])
+            if ssn:
+                if r['season'] is None: r['season'] = int(ssn.group(1))
+                r['series_name'] = r['series_name'][:ssn.start()].rstrip(' -–:|,·') or None
 
-    # -- Pass 5: ARTE taxonomy (Ober=genre, Unter=medium) / duration prior -
+    # -- Pass 5: ARTE taxonomy (Ober=genre, Unter=medium) ------------------
     if sender in ARTE_LANG and ' - ' in tp:
         ober, _, unter = tp.partition(' - ')
         if ober.strip() in ARTE_OBER:
@@ -365,14 +468,41 @@ def enrich(sender, topic, title, description, duration) -> dict:
             cat = ARTE_SUB.get(unter.strip()) or ocat
             if cat and not r['category']: r['category'] = cat
             genres.update(gset); kat_src = 'arte-topic'
-    if not r['category'] and kat_src != 'arte-topic':   # no explicit medium signal
-        if r['season'] is not None and r['episode'] is not None:
-            r['category'] = 'Episode'                  # S/E notation is decisive
-            kat_src = 'season-episode'
-        else:                                          # honest low-conf prior
-            s = duration or 0
-            r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
-            kat_src = 'duration-prior'
+
+    # Episodic markers, by kind. A Mehrteiler "(n/m)" count is a serialized multi-
+    # part work (Mehrteiler / miniseries) -> Episode, overriding even a
+    # "Fernsehfilm" label. Any other series numbering -- an Sxx/Exx, a bare running
+    # episode ("Folge/Episode N", a "Teil N" marker) or a bare season ("(Staffel
+    # N)") -- fills an unknown/clip medium with Episode but does NOT override a
+    # Movie label: a feature-length film-reihe entry (Krimi-Reihe, Herzkino) keeps
+    # category Movie with its series_name, so enrich stays internally consistent
+    # where TMDB is not (Sarah Kohr = series, Rosamunde Pilcher = movies); match
+    # bridges the split later. Trailers (T) and live Events are untouched.
+    if 'T' not in flags and r['category'] != 'Event':
+        if r['episode_count'] is not None:
+            if r['category'] in (None, 'Movie', 'Clip'):
+                r['category'] = 'Episode'; kat_src = 'mehrteiler'
+        elif r['season'] is not None or r['episode'] is not None:
+            if r['category'] in (None, 'Clip'):
+                r['category'] = 'Episode'; kat_src = 'episodic'
+
+    if (r['category'] is None and (duration or 0) >= 1800         # known fiction Reihe,
+            and tp.casefold() in fiction_topics):                 # film-length, no medium signal
+        r['category'] = 'Movie'; kat_src = 'topic-fiction'
+
+    if not r['category']:                               # honest low-conf prior (last resort)
+        s = duration or 0                               # ARTE genre (if any) stays
+        r['category'] = 'Clip' if s < 120 else 'Episode' if s < 3600 else None
+        kat_src = 'duration-prior'
+
+    if 'T' in flags and r['category'] in ('Movie', 'Episode') and (duration or 0) < 300:
+        r['category'] = 'Clip'; kat_src = 'trailer'   # a short trailer is a clip, not a film/episode
+
+    if (duration or 0) < 900:                          # short companion piece about a work
+        if MAKINGOF.search(title or ''):      flags.add('M')
+        elif INTERVIEW.search(title or ''):   flags.add('I')
+        if flags & {'M', 'I'} and r['category'] in ('Movie', 'Episode'):
+            r['category'] = 'Clip'; kat_src = 'companion'
 
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
     if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
@@ -382,7 +512,7 @@ def enrich(sender, topic, title, description, duration) -> dict:
     if my:
         if not r['year']: r['year'] = int(my.group(0).strip('() '))
         t = t[:my.start()]
-    r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:')
+    r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:,·') or None
 
     r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
     r['flags'] = ''.join(sorted(flags))        # canonical alphabetical order (A<S<T<U)
