@@ -20,7 +20,6 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
@@ -1462,9 +1461,21 @@ def _lang_tag(language):
     return _LANG3.get(language, language) if language else None
 
 
+def _url_ext(url) -> str:
+    """File extension of a URL's path ('' when it carries none)."""
+    return os.path.splitext(urllib.parse.urlsplit(url).path)[1]
+
+
 def _subtitle_ext(url) -> str:
     """Sidecar extension from a subtitle URL (default '.srt' when it carries none)."""
-    return os.path.splitext(urllib.parse.urlsplit(url).path)[1] or ".srt"
+    return _url_ext(url) or ".srt"
+
+
+def _temp_base(tmpdir, row) -> str:
+    """Speaking, per-row-unique temp prefix 'theke_{id}_{path stem}' under tmpdir;
+    the row id keeps concurrent rows from colliding."""
+    stem = os.path.splitext(os.path.basename(row["path"]))[0]
+    return os.path.join(tmpdir, f"theke_{row['id']}_{stem}")
 
 
 def _queue_download(conn, cfg, args) -> dict:
@@ -1493,12 +1504,12 @@ def _download_entry(conn, cfg, row, force, totals):
     are best-effort (a missing sidecar never fails the film)."""
     _queue_status(conn, row["id"], QUEUE_STATUS["busy"], None)
     tmpdir = cfg.temp_path or tempfile.gettempdir()
-    base = os.path.join(tmpdir, f"theke_{row['id']}_{uuid.uuid4().hex}")
+    base = _temp_base(tmpdir, row)
     try:
         os.makedirs(tmpdir, exist_ok=True)
-        src = base + ".src"
+        src = base + ".src" + _url_ext(row["url"])
         _fetch(cfg, row["url"], src)
-        muxed = base + (os.path.splitext(row["path"])[1] or "." + cfg.video_ext)
+        muxed = base + ".mux" + (os.path.splitext(row["path"])[1] or "." + cfg.video_ext)
         run_remux(cfg.ffmpeg_path, src, row["remux"], muxed, _lang_tag(row["language"]))
         move_file(muxed, row["path"], force)
         if row["url_subtitle"]:
@@ -1534,8 +1545,8 @@ def _download_subtitle(cfg, row, base, force):
 
 
 def _cleanup(base):
-    """Remove every temp artefact under the unique prefix (.src, the muxed file,
-    a leftover '.part'/'.segments', the subtitle temp). Best-effort."""
+    """Remove every temp artefact under the unique prefix (the '.src', '.mux' and
+    subtitle temps plus any leftover '.part'/'.segments'). Best-effort."""
     for path in glob.glob(glob.escape(base) + "*"):
         try:
             if os.path.isdir(path):
