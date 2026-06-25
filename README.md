@@ -7,8 +7,8 @@ eine dünne Delphi-Desktop-GUI steuert dieselbe CLI.
 
 Architektur und Phasenplan siehe `CLAUDE.md`.
 
-Status: Phasen 1-5 fertig -- verfügbar sind die Befehle `config`, `fetch`,
-`enrich`, `match` und `queue`.
+Status: Phasen 1-8 fertig -- verfügbar sind die Befehle `config`, `fetch`,
+`enrich`, `match`, `queue` und `file`.
 
 ## Voraussetzungen
 
@@ -460,4 +460,76 @@ Endzustands-Schalter (`--cancelled`/`--done`/`--failed`, kombinierbar). Gibt
 theke --db build/theke.db queue delete 3 4
 theke --db build/theke.db queue delete --cancelled --done   # Aufräumen
 theke --db build/theke.db queue delete --all
+```
+
+## `theke file`
+
+Stufen 6-8: die dateibezogenen Primitive -- `download` (Stufe 6), `remux`
+(Stufe 7) und `move` (Stufe 8). Sie arbeiten **unabhängig von der Queue** auf
+expliziten URLs/Pfaden und berühren die DB nicht; die queue-gesteuerte
+Verkettung (`theke queue download`) folgt später. Ein Unterbefehl wählt die
+Aktion; einen Default gibt es nicht. Fortschritt geht nach stderr, das Ergebnis
+(in `--json` ein Objekt) nach stdout.
+
+**Konfiguration** (in `theke.json`):
+
+| Schlüssel          | Wirkung                                                              |
+| ------------------ | ------------------------------------------------------------------- |
+| `ffmpeg_path`      | Pfad/Name des ffmpeg-Binaries (Std. `"ffmpeg"`, nutzt den PATH).    |
+| `download_retries` | Wiederholungen bei Download-Fehlern (Std. `3`).                     |
+
+### `file download`
+
+Lädt `--url` nach `--out`. Eine `.m3u8`-URL wird als HLS behandelt:
+Master-Playlist -> Variante mit höchster Bandbreite -> Segmente einzeln laden
+und zu `--out` zusammenfügen (ein Init-Segment wird vorangestellt); bereits
+geladene Segmente bleiben beim Wiederholen liegen. Kann HLS nativ nicht
+verarbeitet werden -- verschlüsselt (AES-128) oder Segment-Download endgültig
+fehlgeschlagen --, übernimmt ffmpeg (`-c copy`). Jede andere URL ist ein
+einfacher HTTP-Download, der eine liegengebliebene `.part`-Datei per
+Range-Header fortsetzt (sofern der Server es unterstützt, sonst Neustart).
+Fehlgeschlagene Versuche werden bis `download_retries` mal wiederholt.
+
+| Option              | Wirkung                                                  |
+| ------------------- | -------------------------------------------------------- |
+| `-u`, `--url URL`   | Herunterzuladende Medien-URL.                            |
+| `-o`, `--out PATH`  | Zieldatei.                                               |
+| `-r`, `--retries N` | Wiederholungen bei Fehler (Std. `download_retries`).    |
+
+```powershell
+theke file download --url https://.../film.mp4 --out build/film.mp4
+theke file download --url https://.../master.m3u8 --out build/film.ts
+```
+
+### `file remux`
+
+Stream-Copy von `--in` nach `--out` via ffmpeg (kein Transcoding). `--remux`
+bestimmt, was übernommen wird: `AV` (Audio+Video), `A` (nur Audio), `V` (nur
+Video). `--language` setzt den Sprach-Tag der ersten Audiospur.
+
+| Option                 | Wirkung                                                |
+| ---------------------- | ------------------------------------------------------ |
+| `-i`, `--in PATH`      | Eingabedatei.                                          |
+| `-m`, `--remux MODE`   | Was übernehmen: `AV`, `A` (nur Audio), `V` (nur Video).|
+| `-o`, `--out PATH`     | Ausgabedatei (Endung bestimmt den Container).          |
+| `-l`, `--language CODE`| Sprach-Tag der ersten Audiospur (z. B. `deu`).         |
+
+```powershell
+theke file remux --in build/film.ts --remux AV --out build/film.mp4
+theke file remux --in build/film.ts --remux A --language fra --out build/film.aac
+```
+
+### `file move`
+
+Verschiebt `--src` nach `--dst` und legt fehlende Zielverzeichnisse an. Ein
+vorhandenes Ziel ist ein Fehler, außer mit `--force` (dann wird es ersetzt).
+
+| Option            | Wirkung                                |
+| ----------------- | -------------------------------------- |
+| `-s`, `--src PATH`| Quelldatei.                            |
+| `-d`, `--dst PATH`| Zieldatei.                             |
+| `-f`, `--force`   | Vorhandenes Ziel überschreiben.        |
+
+```powershell
+theke file move --src build/film.mp4 --dst "M:/Filme/Film (2020)/Film (2020).mp4"
 ```
