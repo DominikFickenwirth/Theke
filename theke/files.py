@@ -175,17 +175,82 @@ def _download_once(url, out) -> int:
 
 # -- ffmpeg seam --------------------------------------------------------------
 
+_DURATION_RX = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+_TIME_RX     = re.compile(r"\btime=\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+
+
+def _hms(h, m, s) -> float:
+    """Seconds from an ffmpeg HH:MM:SS(.ss) timestamp split into its parts."""
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def _fmt_hms(seconds) -> str:
+    """Whole-second HH:MM:SS rendering of a duration in seconds."""
+    s = int(seconds)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+class _FfmpegProgress:
+    """Throttled time-based reporter for an ffmpeg run of known duration: logs a
+    line each time the elapsed media time crosses the next 10% milestone."""
+
+    def __init__(self, label, duration):
+        self.label = label
+        self.duration = duration            # seconds, > 0
+        self.step = duration / 10
+        self.next = self.step
+
+    def update(self, t):
+        if t < self.next:
+            return
+        pct = min(100, int(100 * t / self.duration))
+        log.info("%s: %s / %s (%d%%)", self.label, _fmt_hms(t),
+                 _fmt_hms(self.duration), pct)
+        while self.next <= t:
+            self.next += self.step
+
+
+def _iter_ffmpeg_lines(stream):
+    """Yield ffmpeg's stderr as logical lines, splitting on both newline and the
+    carriage returns it uses for its live stat updates."""
+    buf = ""
+    while True:
+        chunk = stream.read(256)
+        if not chunk:
+            break
+        buf = (buf + chunk).replace("\r", "\n")
+        *lines, buf = buf.split("\n")
+        for line in lines:
+            if line:
+                yield line
+    if buf:
+        yield buf
+
+
 def run_ffmpeg(args) -> None:
-    """Run ffmpeg (args[0] is the binary); raise on a missing binary or non-zero
-    exit, surfacing the stderr tail. The subprocess seam -- monkeypatched in tests."""
+    """Run ffmpeg (args[0] is the binary), streaming its progress to the log;
+    raise on a missing binary or non-zero exit, surfacing the stderr tail. The
+    subprocess seam -- monkeypatched in tests."""
     try:
-        proc = subprocess.run(args, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, text=True)
     except FileNotFoundError:
         raise RuntimeError(f"ffmpeg not found: {args[0]} (set ffmpeg_path)") from None
-    if proc.returncode != 0:
-        tail = "; ".join(collections.deque((proc.stderr or "").splitlines(), 3))
-        raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}): {tail}")
+    label = os.path.basename(args[-1])
+    tail = collections.deque(maxlen=3)
+    progress = None
+    for line in _iter_ffmpeg_lines(proc.stderr):
+        tail.append(line)
+        if progress is None:
+            m = _DURATION_RX.search(line)
+            if m:
+                progress = _FfmpegProgress(label, _hms(*m.groups()))
+        m = _TIME_RX.search(line)
+        if m and progress:
+            progress.update(_hms(*m.groups()))
+    code = proc.wait()
+    if code != 0:
+        raise RuntimeError(f"ffmpeg failed (exit {code}): {'; '.join(tail)}")
 
 
 # -- move ---------------------------------------------------------------------
