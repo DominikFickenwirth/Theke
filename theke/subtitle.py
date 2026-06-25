@@ -6,6 +6,29 @@
 # subset is prototyped in analysis/subtitle_pipeline.py. Pure text in, text out.
 
 import re
+import xml.etree.ElementTree as ET
+
+# -- TTML namespaces ----------------------------------------------------------
+TT = "http://www.w3.org/ns/ttml"
+TTS = "http://www.w3.org/ns/ttml#styling"
+TTP = "http://www.w3.org/ns/ttml#parameter"
+XML = "http://www.w3.org/XML/1998/namespace"
+
+
+# -- format detection ---------------------------------------------------------
+# WebVTT is header-sniffed ("WEBVTT" first line, after an optional BOM);
+# otherwise the XML root must be <tt> in the TTML namespace. Anything else
+# (HTML page, plain text, malformed XML) is unknown.
+def detect_format(text):
+    """Classify subtitle text as 'webvtt', 'ttml' or 'unknown'."""
+    if text.lstrip("﻿").startswith("WEBVTT"):
+        return "webvtt"
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return "unknown"
+    return "ttml" if root.tag == f"{{{TT}}}tt" else "unknown"
+
 
 # -- time parsing -------------------------------------------------------------
 # TTML time: clock-time "HH:MM:SS(.fff | :frames)" and offset-time "<n><unit>"
