@@ -272,3 +272,33 @@ AND episode, and those rows were already Episode).
 
 Known remaining (minor): 1 oddball 4-digit "- Staffel 2019, Folge 7" (a year-
 style season the `\d{1,2}` cap skips); not worth a special case for one row.
+
+## Round 11 -- programming-strand topics -> slot (not series_name)  [DONE]
+
+User's explicit point: series_name sometimes holds a Sendeplatz that belongs in
+slot. The leak is the programming strands -- "Filme im Ersten", "FilmMittwoch im
+Ersten", "Debüt im Dritten", "Spielfilm in 3sat", "Der Fernsehfilm der Woche",
+"Kurzfilme im MDR", ... (20 distinct phrases, 696 rows). These describe WHERE/WHEN
+a film airs, not the show, so they were a slot masquerading as series_name (the
+real film title is already in clean_title). This is the cleanup round 5 deferred.
+
+Fix: SLOT_RX = `^<film-type head>.*<placement tail>$` routed in route_topic to
+slot=topic, series_name=None. Head is a film-type allowlist (Spielfilm,
+Fernsehfilm, Filme, Dokus, Kurzfilme, Krimis, Debüt, FilmMittwoch, ...); tail is
+an end-anchored placement (im Ersten/Dritten/Zweiten, im <ARD-sender>, in 3sat,
+der Woche). Category is left untouched -- a fiction strand keeps its Movie lift,
+which keys off the raw topic, so the move is category-neutral.
+
+GUARDS (tested + DB-verified, 0 false positives across all distinct series_name):
+the film-type head rejects real shows on the same placement ("Nuhr im Ersten" =
+Dieter Nuhr comedy); the `$` anchor rejects a placement phrase that is not the
+tail ("Kindheit im Dritten Reich" -- "Reich" follows "im Dritten").
+
+Live-DB effect: 696 series_names -> slot, category distribution UNCHANGED, zero
+category transitions.
+
+Known remaining (minor): a sender-prefixed strand ("SWR // Debüt im Dritten")
+keeps the "SWR //" prefix (a separate slot/pipe issue); non-fiction strands
+("Kurzfilme im MDR") still take their category from the duration prior rather than
+the film-type head -- routing the head's medium (like FORMAT_TOPICS) would be a
+category change, deferred to keep this round title/series-only.

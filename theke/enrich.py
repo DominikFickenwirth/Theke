@@ -170,6 +170,20 @@ FORMAT_TOPICS = {'film':'Film', 'filme':'Film', 'filme in der ard':'Film',
                  'dokus & reportagen':'Doku/Reportage',
                  'dokumentationen und reportagen':'Doku/Reportage'}
 
+# Programming-slot topics (Sendeplätze): a film-type head + an end-anchored
+# placement phrase ("Filme im Ersten", "Spielfilm in 3sat", "Der Fernsehfilm der
+# Woche"). These are a slot, not a show -> slot=topic, series_name=None (category
+# is left untouched: a fiction strand keeps its Movie lift via the raw topic). The
+# film-type head guards real shows ("Nuhr im Ersten"); the `$` anchor guards
+# "... im Dritten Reich" (a placement phrase that is not the tail).
+SLOT_HEAD = (r'(?:Der\s+|Die\s+|Das\s+)?'
+             r'(?:Spielfilme?|Fernsehfilme?|Filme?|Dokus?|Dokumentarfilme?|Dokumentation'
+             r'|Kurzfilme?|Familienfilme?|Kinderfilme?|Kulturdoku|Krimis?|Debüt'
+             r'|Sommerkino|FilmMittwoch|Filmdebüt)')
+SLOT_TAIL = (r'(?:im\s+(?:Ersten|Zweiten|Dritten|MDR|WDR|NDR|BR|SWR|HR|RBB|SR|RBTV)'
+             r'|in\s+3sat|der\s+Woche)')
+SLOT_RX   = re.compile(rf'^{SLOT_HEAD}\b.*\b{SLOT_TAIL}$', re.I)
+
 # Clip/container sammeltopics: series=None, category left to the duration prior.
 CONTAINER_TOPICS = {'tagesschau24', 'beiträge', 'br', 'sr', '3sat', 'sportflash',
                     'zib flash', 'srf news videos', 'sr 3 videos', 'vintage videos'}
@@ -236,6 +250,8 @@ def route_topic(topic) -> dict:
     if EVENT_RX.search(tp):
         out['series_name'] = tp; out['category'] = 'Event'; out['kat_src'] = 'event'
         return out
+    if SLOT_RX.match(tp):                       # programming strand -> slot, no series
+        out['slot'] = tp; return out
     out['series_name'] = tp                    # long tail: today's behavior
     return out
 

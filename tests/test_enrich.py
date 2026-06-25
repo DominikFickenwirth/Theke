@@ -107,7 +107,8 @@ def test_ard_metazeile_in_description():
     assert r["year"] == 2003
     assert r["country"] == "Deutschland/USA"
     assert r["clean_title"] == "Der Fall"
-    assert r["series_name"] == "Filmmittwoch im Ersten"
+    assert r["slot"] == "Filmmittwoch im Ersten"   # a programming strand -> slot
+    assert r["series_name"] is None                # ... not a show name (round 11)
     assert r["language"] == "de"
     assert r["flags"] == ""
     assert r["season"] is None and r["episode"] is None
@@ -1107,7 +1108,7 @@ def test_dry_run_report_is_live_and_writes_nothing(tmp_path):
         assert report == {"ARD": {
             "n": 2, "year_pct": 50.0, "country_pct": 50.0, "se_pct": 0.0,
             "cat_pct": 50.0, "unklar_pct": 0.0,
-            "genre_pct": 0.0, "slot_pct": 0.0, "events_pct": 0.0,
+            "genre_pct": 0.0, "slot_pct": 50.0, "events_pct": 0.0,  # "Filmmittwoch im Ersten" -> slot
             "flag_a_pct": 0.0, "flag_e_pct": 0.0, "flag_s_pct": 0.0,
             "flag_u_pct": 0.0, "flag_t_pct": 0.0,
         }}
