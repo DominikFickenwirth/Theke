@@ -153,10 +153,10 @@ def test_metazeile_rejected_when_country_is_a_sentence_fragment():
     # The country-shape filter rejects the whole metazeile.
     r = enrich("ARD", "Wetter", "Wetter heute",
                  "Eine Reportage über den Klimawandel aus dem Jahr 2019.", 2700)
-    assert r["category"] is None        # falls back to the duration prior (>1800s)
+    assert r["category"] == "Episode"   # 45 min, no metazeile -> duration prior
     assert r["country"] is None
     assert r["year"] is None
-    assert r["enrich_confidence"] == 0.2
+    assert r["enrich_confidence"] == 0.5
 
 
 def test_metazeile_rejected_when_country_is_a_broadcast_date():
@@ -697,7 +697,7 @@ def test_topic_routing_genre_word_sets_genre_not_series():
     r = enrich("3Sat", "Natur", "Wildes Skandinavien", "", 2700)
     assert r["genre"] == "Documentary"   # Natur rubric -> Documentary
     assert r["series_name"] is None
-    assert r["category"] is None         # genre is not a medium -> duration prior (>1800s)
+    assert r["category"] == "Episode"    # genre is not a medium -> duration prior (45 min)
 
 
 def test_topic_routing_genre_is_exact_not_substring():
@@ -822,9 +822,14 @@ def test_news_rubric_maps_to_news():
 
 
 def test_duration_prior_clip_episode_null():
-    # No category signal: <120s Clip, 120-1800s Episode, >1800s NULL.
+    # No category signal: <120s Clip, 120-3600s Episode, >=3600s NULL. The Episode
+    # ceiling is 60 min: 30-60 min long-form with no other signal is recurring TV
+    # (docs, magazines, regional shows), not a film; >=60 min stays NULL so a
+    # feature film (60-90 min TV films, longer features) is never mislabelled.
     assert enrich("ARD", "Beiträge", "A", "", 60)["category"] == "Clip"
     assert enrich("ARD", "Beiträge", "A", "", 900)["category"] == "Episode"
+    assert enrich("ARD", "Beiträge", "A", "", 2700)["category"] == "Episode"
+    assert enrich("ARD", "Beiträge", "A", "", 3599)["category"] == "Episode"
     assert enrich("ARD", "Beiträge", "A", "", 3600)["category"] is None
 
 
