@@ -350,6 +350,48 @@ Live-DB effect: 65 series_names split (slot=sender), category UNCHANGED, zero
 category transitions. 1 row remains ("SWR // ARD Room Tour" -- a sender token on
 BOTH sides, so the ambiguous "keep whole" fallback fires, as designed).
 
+# Part 3 -- category = NULL cleanup
+
+New goal (user): category is NULL too often -- find out why and categorize better.
+Baseline (re-enrich of the live DB, 709433 rows): Episode 475851, Clip 112657,
+NULL 110890 (15.6%), Movie 9877, Event 158. The NULL rows are exactly the rows
+the duration prior could not place: <120s -> Clip, <1800s -> Episode, but
+**>=1800s -> NULL** (a long-form item might be a film, so the prior refuses to
+guess), PLUS ARTE rows where the prior was suppressed entirely. Probing NULL:
+- ~50% is ARTE (super-label recognized, sub-label not a known medium -> the prior
+  was suppressed -> NULL even for short clips).
+- Non-ARTE NULL is dominated by recurring TV: of 341 topics with >=50 NULL rows
+  each (63009 rows), only ONE ("Krimi und Thriller", a film rubric) ever produces
+  a Movie; the other 339 (62734 rows) are pure TV (news, magazines, telenovelas
+  Sturm der Liebe/Rote Rosen, docs) -- safe to call Episode.
+- The long tail (1402 topics with exactly 1 NULL row) is genuinely MIXED: real
+  films (Shoplifters, Die Legende von Paul und Paula), one-off docs, concerts,
+  events, and episodic multi-parts -- no blanket rule is safe there.
+
+## Round 14 -- ARTE unknown sub-label falls to the duration prior  [DONE]
+
+ARTE was ~half the NULL bucket. An ARTE topic is "Ober - Unter"; the Ober (super-
+label) sets the genre, the Unter (sub-label) the medium. A recognized Ober used to
+SUPPRESS the duration prior, so any unrecognized sub-label left category NULL even
+for a 20-min clip. But the unknown subs are all non-medium sub-genres ("Info et
+société - Décryptages", "Kino - Rund um den Film", "Séries et fictions - Courts
+humoristiques") -- film magazines, portraits, comedy shorts, doc rubrics, never a
+feature.
+
+Fix: drop the `kat_src != 'arte-topic'` suppression -- the prior now runs whenever
+the medium is still unknown, ARTE included. The Ober genre is set first and
+survives. The prior's own >=1800s -> NULL tier still protects a possible feature
+film (a real ARTE film carries a recognized "Filme/Films" sub anyway).
+
+GUARDS (tested): a SHORT (<1800s) item under a fiction Ober with unknown sub ->
+Episode (a sub-30-min piece is never a feature); a feature-length (>1800s) one
+stays NULL (film protection), exactly like a non-ARTE row.
+
+Live-DB effect: exactly 20111 NULL -> {Episode +19408, Clip +703}, Movie
+UNCHANGED. ARTE NULL 55758 -> 7277 (the rest are >=1800s, deferred with the
+catalog-wide >=1800 question). category dist now: Episode 495259, Clip 113360,
+NULL 90779, Movie 9877, Event 158.
+
 ## Status after rounds 8-13
 
 clean_title / series_name are now substantially clean: leading "Folge/Episode N"

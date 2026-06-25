@@ -291,9 +291,10 @@ FICTION_TOPICS = {t.casefold() for t in (
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
 TITLE_META_SENDERS = {'ZDF', '3Sat'}
 # ARTE taxonomy "Ober - Unter": the super-label (Ober) carries the genre, the
-# sub-label (Unter) the medium. A recognized super-label suppresses the duration
-# prior, so an unknown sub-label leaves category NULL (honest), never a guess.
-# Keys are the source labels in every ARTE UI language (DE/FR/EN/ES/IT/PL).
+# sub-label (Unter) the medium. The Ober sets the genre; an unrecognized sub-label
+# leaves the medium to the duration prior (short -> Clip/Episode, feature-length
+# -> NULL, so a film is never mislabelled). Keys are the source labels in every
+# ARTE UI language (DE/FR/EN/ES/IT/PL).
 # Super-label -> (category, genre-tuple); category usually None (medium unknown).
 ARTE_OBER = {'Kino':(None,()),'Cinéma':(None,()),'Cinema':(None,()),'Cine':(None,()),
              'Fernsehfilme und Serien':(None,()),'Séries et fictions':(None,()),
@@ -465,8 +466,8 @@ def enrich(sender, topic, title, description, duration,
             cat = ARTE_SUB.get(unter.strip()) or ocat
             if cat and not r['category']: r['category'] = cat
             genres.update(gset); kat_src = 'arte-topic'
-    if not r['category'] and kat_src != 'arte-topic':   # honest low-conf prior
-        s = duration or 0
+    if not r['category']:                               # honest low-conf prior
+        s = duration or 0                               # ARTE genre (if any) stays
         r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
         kat_src = 'duration-prior'
 
