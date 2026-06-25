@@ -644,6 +644,18 @@ def test_non_fiction_feature_topic_stays_null():
     assert r["category"] is None
 
 
+def test_midtitle_part_marker_is_episode():
+    # "Title N/M - Subtitle": a multi-part marker in the MIDDLE of the title (a
+    # nature-doc miniseries) -- NPART is end-anchored and PART needs parens, so
+    # both miss it. It parses to episode/episode_count and (via the Mehrteiler
+    # rule) classifies as Episode; a >1800s part would otherwise fall to NULL.
+    r = enrich("3Sat", "Natur", "Wunderwelt Schweiz 3/4 - Das Tessin", "", 3027)
+    assert r["episode"] == 3
+    assert r["episode_count"] == 4
+    assert r["category"] == "Episode"
+    assert r["clean_title"] == "Wunderwelt Schweiz - Das Tessin"
+
+
 def test_short_trailer_in_film_topic_is_clip_not_movie():
     # A trailer in a film-rubric topic (Filme in der ARD -> Movie via FORMAT_TOPICS)
     # is short and carries the T flag: a trailer is always a Clip, never a Movie.
