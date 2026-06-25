@@ -487,6 +487,52 @@ def test_folge_prefix_guard_verb_and_compound_untouched():
     assert r2["episode"] is None and r2["clean_title"] == 'Anne Folger: "Fußnoten"'
 
 
+# -- round 10: "Staffel N" extraction ----------------------------------------
+
+def test_staffel_title_suffix_sets_season_and_strips():
+    # "<Title> - Staffel N (n/m)": the dash-introduced "Staffel N" is the season
+    # and is stripped from the title; the "(n/m)" stays the Mehrteiler episode.
+    r = enrich("ARTE.DE", "Séries et fictions - Serien",
+                 "Vorstadtweiber - Staffel 2 (10/10)", "", 2700)
+    assert r["season"] == 2
+    assert r["episode"] == 10
+    assert r["episode_count"] == 10
+    assert r["clean_title"] == "Vorstadtweiber"
+
+
+def test_staffel_midtitle_between_dashes_is_removed():
+    # "<Title> - Staffel N - <Subtitle>": the season segment is removed from the
+    # middle, leaving "<Title> - <Subtitle>".
+    r = enrich("ARTE.DE", "Séries et fictions - Serien",
+                 "Mord im Mittsommer - Staffel 1 - Fall 1: Tod im Fischernetz", "", 2700)
+    assert r["season"] == 1
+    assert r["clean_title"] == "Mord im Mittsommer - Fall 1: Tod im Fischernetz"
+
+
+def test_staffel_without_leading_dash_is_kept():
+    # Guard: "Staffel N" with NO dash before it is title content (a review/clip
+    # channel), not a season marker -- untouched.
+    r = enrich("ARD", "Serienkritik", "BLACK MIRROR Staffel 6: Verdammt gute Ideen", "", 600)
+    assert r["season"] is None
+    assert r["clean_title"] == "BLACK MIRROR Staffel 6: Verdammt gute Ideen"
+
+
+def test_orf_topic_trailing_staffel_splits_series_and_season():
+    # ORF convention "<Series> Staffel N" in the topic: the season is split off so
+    # the series_name groups all seasons together ("Soko Donau", not "... Staffel 20").
+    r = enrich("ORF", "Soko Donau Staffel 20", "Tod im Kloster", "", 2700)
+    assert r["series_name"] == "Soko Donau"
+    assert r["season"] == 20
+
+
+def test_reversed_staffel_in_series_is_kept():
+    # Guard: a reversed "N. Staffel" (digit before "Staffel") at the end is not the
+    # "Staffel N" suffix -- series_name and season are untouched.
+    r = enrich("BR", "Dahoam is Dahoam - 1. Staffel", "Auftakt", "", 2700)
+    assert r["series_name"] == "Dahoam is Dahoam - 1. Staffel"
+    assert r["season"] is None
+
+
 def test_episode_bare_part_of_total():
     r = enrich("ARD", "Doku", "Die Story 2/2", "", 3600)
     assert r["episode"] == 2
