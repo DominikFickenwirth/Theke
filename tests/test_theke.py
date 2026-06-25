@@ -103,17 +103,14 @@ def test_config_queue_defaults(tmp_path, monkeypatch):
     cfg = load_config(None)
     assert cfg.queue_auto_approve is False
     assert cfg.languages == ["de"]
-    assert cfg.name_template == "{title} ({year})"
 
 
 def test_config_queue_keys_from_file(tmp_path):
     path = tmp_path / "q.json"
-    write_config(path, {"queue_auto_approve": True, "languages": ["de", "en"],
-                        "name_template": "{title} [{year}]"})
+    write_config(path, {"queue_auto_approve": True, "languages": ["de", "en"]})
     cfg = load_config(str(path))
     assert cfg.queue_auto_approve is True
     assert cfg.languages == ["de", "en"]
-    assert cfg.name_template == "{title} [{year}]"
 
 
 def test_config_fiction_topics_default_empty(tmp_path, monkeypatch):
@@ -727,13 +724,13 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 6   # +phase 6-8 queue url/path/subtitle cols
+        assert user_version(conn) == 7   # +drop redundant queue.name column
     finally:
         conn.close()
 
 
 QUEUE_COLS = {
-    "id", "status", "mediathek_id", "tmdb_id", "name", "language",
+    "id", "status", "mediathek_id", "tmdb_id", "language",
     "resolution", "remux", "error", "created_at", "updated_at",
     "url", "url_subtitle", "path",
 }
