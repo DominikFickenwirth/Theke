@@ -656,6 +656,16 @@ def test_midtitle_part_marker_is_episode():
     assert r["clean_title"] == "Wunderwelt Schweiz - Das Tessin"
 
 
+def test_midtitle_part_ignores_mixed_fraction():
+    # A MIXED fraction in a film title ("8 1/2 - ...", Fellini) must NOT read as a
+    # part marker: a whole number + space directly before the "n/m" disqualifies it
+    # (else the film would be wrongly turned into an Episode).
+    r = enrich("ARTE.DE", "Kino - Filme", "8 1/2 - Ein Film von Fellini", "", 6000)
+    assert r["episode"] is None
+    assert r["episode_count"] is None
+    assert r["category"] == "Movie"
+
+
 def test_short_trailer_in_film_topic_is_clip_not_movie():
     # A trailer in a film-rubric topic (Filme in der ARD -> Movie via FORMAT_TOPICS)
     # is short and carries the T flag: a trailer is always a Clip, never a Movie.

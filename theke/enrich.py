@@ -38,6 +38,9 @@ PART    = re.compile(r'\((\d{1,2})/(\d{1,2})\)')             # Mehrteiler "(n/m)
 STAFFOLGE = re.compile(r'\bStaffel\s+(\d{1,2}),?\s+Folge\s+(\d{1,3})\b', re.I)
 TEIL      = re.compile(r'\s*[-–(]?\s*\bTeil\s+(\d{1,2}|[IVXLC]+)(?:\s*/\s*(\d{1,2}))?\b\)?', re.I)
 NPART     = re.compile(r'\s*(?<![\d./])(\d{1,2})\s*/\s*(\d{1,2})\s*$')
+# "Titel n/m - Untertitel"; the (?<!\d\s) rejects a mixed fraction "8 1/2 - ..."
+# (a whole number + space before the n/m), which is a film runtime, not a part.
+MIDPART   = re.compile(r'(?<![\d./])(?<!\d\s)(\d{1,2})/(\d{1,2})\s+(?=[-–]\s)')
 ROMAN   = {'I':1,'V':5,'X':10,'L':50,'C':100}
 PIPESUF = re.compile(r'\s*\|\|?\s*[^|]+(?:\|\|?\s*[^|]+)*$')  # trailing " | Reihe"
 # Trailing "- <Format> von <Name>" director credit (B4); no year -> not a
@@ -358,6 +361,7 @@ def enrich(sender, topic, title, description, duration,
     if r['episode'] is None:                   # paren-less notation (B5), guarded
         mf = STAFFOLGE.search(t)
         mt = TEIL.search(t)
+        md = MIDPART.search(t)
         mn = NPART.search(t)
         if mf:
             r['season'] = int(mf.group(1)); r['episode'] = int(mf.group(2))
@@ -366,6 +370,9 @@ def enrich(sender, topic, title, description, duration,
             r['episode'] = _to_int(mt.group(1))
             if mt.group(2): r['episode_count'] = int(mt.group(2))
             t = TEIL.sub('', t)
+        elif md and int(md.group(1)) <= int(md.group(2)) <= 20:   # "Titel n/m - Untertitel"
+            r['episode'] = int(md.group(1)); r['episode_count'] = int(md.group(2))
+            t = t[:md.start()] + t[md.end():]
         elif mn and int(mn.group(1)) <= int(mn.group(2)) <= 50:   # n<=m, no dates
             r['episode'] = int(mn.group(1)); r['episode_count'] = int(mn.group(2))
             t = t[:mn.start()]
