@@ -128,3 +128,31 @@ Known remaining (minor): the generic film SLOTS in the set (Filme im Ersten,
 FilmMittwoch im Ersten, Spielfilm in 3sat, ...) keep series_name = slot name; a
 later cleanup could route them via FORMAT_TOPICS for a NULL series_name. Lifted
 "Dokumentarfilmzeit" rows get no Documentary genre (the metazeile ones do).
+
+## Round 6 -- companion clips: trailer / interview / making-of -> Clip  [DONE]
+
+Probing the Movie bucket for false positives found short companion pieces filed
+as Movie/Episode (the work's medium leaked onto a clip ABOUT the work):
+- TRAILERS in a film-rubric topic: "Trailer: Gladbeck" (Filme in der ARD ->
+  Movie via FORMAT_TOPICS) stayed Movie. The T flag did not demote them.
+- ARTE short-film INTERVIEWS: under "Kino - Kurzfilme"/"Cinéma - Courts metrages"
+  (ARTE_SUB -> Movie) the companion "Interview mit X - Regisseurin"/"Rencontre
+  avec ..." rows became Movie (149 rows).
+- MAKING-OF segments ("Making of - Folge 2", ZDF Filme) -> Movie/Episode.
+
+The T flag is NOISY on its own: it also matches long-form shows that merely
+mention a trailer in the title (Trailer.AT 25-min magazine, Cinema Strikes Back
+podcast 90 min+, ESC "Vorschau" 3.4 h). So a blanket "T -> Clip" is wrong.
+
+Fix (duration-gated, so feature films are never touched):
+- T flag AND <300s -> Clip (a short trailer).
+- title is a making-of (M flag) or interview/Rencontre/Entretien/Gespräch (I
+  flag) AND <900s -> set the flag and, if Movie/Episode, demote to Clip.
+The gate is the safety: a 2-h drama titled "Interview mit einem Vampir" stays
+Movie (verified DB-wide: every Movie<900s companion hit was a real companion,
+no feature film). New flags I (interview) and M (making-of); trailer stays the
+existing T flag (a flag, not a category -- user decision).
+
+Live-DB effect: trailer demotion 166 Episode + 23 Movie -> Clip; companion
+demotion 1117 Episode + 151 Movie -> Clip; flags M=259, I=1160. No other
+transition. Movie 10051 -> 9877, Clip grows accordingly.

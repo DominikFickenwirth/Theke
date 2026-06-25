@@ -153,8 +153,10 @@ eingebaute Liste ist über die Konfiguration erweiterbar:
 | `fiction_topics` | Zusätzliche Reihen-Topics (Liste), ergänzen die eingebaute Liste (Std. `[]`). |
 
 `flags` ist ein sortierter Buchstaben-String: `A` Audiodeskription, `E` Einfache/
-Leichte Sprache, `S` Gebärdensprache, `U` eingebrannte Untertitel, `T`
-Trailer/Vorschau.
+Leichte Sprache, `I` Interview/Gespräch (Begleitstück), `M` Making-of, `S`
+Gebärdensprache, `T` Trailer/Vorschau, `U` eingebrannte Untertitel. Ein kurzes
+Begleitstück (Trailer/Interview/Making-of, < 300s bzw. < 900s) wird auf `Clip`
+herabgestuft, statt als Film/Episode zu zählen.
 `enrich_confidence` ist deterministisch: `0.9` (Metazeile/ARTE-Topic), `0.8`
 (Topic ist selbst ein Kategoriewort oder ein Event), `0.5` (Dauer-Prior), `0.2`
 (`category` = `unklar`).
