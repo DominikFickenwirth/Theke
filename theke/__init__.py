@@ -22,6 +22,7 @@ from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CAT
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
+from theke.files import is_hls, download_file, download_hls
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -1367,6 +1368,29 @@ def cmd_config(cfg) -> dict:
     return dataclasses.asdict(cfg)
 
 
+# -- file (phases 6-8: download / remux / move) -------------------------------
+# Thin handlers over theke.files; queue-independent, no DB. Filesystem work and
+# the network/ffmpeg seams live in files.py.
+
+def cmd_file(cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a file action: download / remux / move (each on explicit paths)."""
+    match args.file_cmd:
+        case "download": return _file_download(cfg, args)
+        case _: raise DbError(f"unhandled file action: {args.file_cmd}")
+
+
+def _file_download(cfg, args) -> dict:
+    retries = cfg.download_retries if args.retries is None else args.retries
+    if is_hls(args.url):
+        action, nbytes, nsegs = download_hls(args.url, args.out, retries, cfg.ffmpeg_path)
+        result = {"action": action, "out": args.out, "bytes": nbytes}
+        if action == "hls":
+            result["segments"] = nsegs
+        return result
+    nbytes = download_file(args.url, args.out, retries)
+    return {"action": "download", "out": args.out, "bytes": nbytes}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="theke",       description="Self-hosted media manager for German public broadcasters")
     parser.add_argument("-c", "--config", metavar="PATH",      help=f"config file (default: {CONFIG_DEFAULT_PATH})")
@@ -1450,6 +1474,13 @@ def build_parser() -> argparse.ArgumentParser:
     qdel.add_argument("-d", "--done",         action="store_true", help="delete all done entries")
     qdel.add_argument("-f", "--failed",       action="store_true", help="delete all failed entries")
 
+    filep = sub.add_parser("file", help="download / remux / move a single file", description="Queue-independent file primitives driven by explicit URLs/paths: download a media URL (HTTP with Range-resume, or HLS segment assembly with an ffmpeg fallback), remux via ffmpeg (stream copy), or move a file. Progress is printed to stderr.")
+    fsub = filep.add_subparsers(dest="file_cmd", required=True, metavar="action")
+    fdl = fsub.add_parser("download", help="download a media URL to a local file", description="Download --url to --out. A '.m3u8' URL is assembled from its HLS segments (ffmpeg fallback when encrypted or assembly fails); anything else is a plain HTTP download that resumes a leftover '.part' via Range. Failed downloads retry.")
+    fdl.add_argument("-u", "--url",     required=True, metavar="URL",  help="media URL to download")
+    fdl.add_argument("-o", "--out",     required=True, metavar="PATH", help="output file path")
+    fdl.add_argument("-r", "--retries", type=int, metavar="N",         help="retry attempts on error (default: config download_retries)")
+
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
     _set_default_action(parser, "queue",  qsub, "list")
@@ -1523,6 +1554,8 @@ def main(argv=None) -> int:
         match args.command:
             case "config":
                 result = cmd_config(cfg)
+            case "file":
+                result = cmd_file(cfg, args)
             case "fetch":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_fetch(conn, cfg, args)
