@@ -179,3 +179,34 @@ regex/rule, proactively -- do not wait for the counter-example. Re-checked all
 three of this session's rules DB-wide afterwards: fiction lift had 0 non-film
 contamination (the 3 "spezial" hits were real Tatort episode titles), trailer
 and companion demotions had 0 false matches.
+
+# Part 2 -- clean_title / series_name cleanup
+
+New goal (user): clean up clean_title and series_name. Common noise: the words
+"Folge"/"Episode"/"Staffel"/"Teil" leaking into the title; series_name carrying
+slot content; plus actively hunting further ugliness. Same method (verify against
+`build/theke.db` via `analysis/_reenrich.py`), TDD, a guard test per rule.
+
+## Round 8 -- ", Teil N" / Staffel-Folge comma residue in clean_title  [DONE]
+
+Probing clean_title for residue found the TEIL/STAFFOLGE strips leaving dangling
+commas:
+- "<Title>, Teil N: <Subtitle>" -> "<Title>,: <Subtitle>" (the ", " before
+  "Teil" and the ":" after were not consumed): "Tauchwandern am Bodensee,: Quer
+  durch den Untersee", "Making-of,: Die Stunts", the Zirkus-Charles-Knie /
+  Entrümpler series (19 rows with a ",:" interior).
+- "<Title>, Teil N" at the end -> trailing comma ("Jahresrückblick vom
+  28.12.2023,", "... voller Länge,").
+- "<Title>, Staffel N, Folge M" -> STAFFOLGE strip leaves a trailing comma
+  ("Der Haustier-Check,").
+
+Fix: TEIL's leading char class gains a comma (`[-–(,]?`) so ", Teil N" is removed
+whole (keeping a ": Subtitle"); the final clean_title strip set gains `,` and `·`
+so any remaining trailing comma/middot is trimmed.
+
+GUARD: an ordinary comma with no Teil/Staffel marker stays ("Stadt, Land, Fluss"
+untouched) -- the comma is only consumed when adjacent to a "Teil N" marker, and
+the final strip only trims at the ends.
+
+Live-DB effect: ",:" interiors 19 -> 0, trailing commas -> 0, trailing middots
+-> 0. category distribution unchanged (clean_title-only round).

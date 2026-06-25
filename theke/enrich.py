@@ -36,7 +36,7 @@ PART    = re.compile(r'\((\d{1,2})/(\d{1,2})\)')             # Mehrteiler "(n/m)
 # "- Teil n" (arabic or roman); a bare "n/m" only at the very end (so dates
 # like "10/06/2026" and "3 1/2 Stunden" never match).
 STAFFOLGE = re.compile(r'\bStaffel\s+(\d{1,2}),?\s+Folge\s+(\d{1,3})\b', re.I)
-TEIL      = re.compile(r'\s*[-–(]?\s*\bTeil\s+(\d{1,2}|[IVXLC]+)(?:\s*/\s*(\d{1,2}))?\b\)?', re.I)
+TEIL      = re.compile(r'\s*[-–(,]?\s*\bTeil\s+(\d{1,2}|[IVXLC]+)(?:\s*/\s*(\d{1,2}))?\b\)?', re.I)
 NPART     = re.compile(r'\s*(?<![\d./])(\d{1,2})\s*/\s*(\d{1,2})\s*$')
 # "Titel n/m - Untertitel"; the (?<!\d\s) rejects a mixed fraction "8 1/2 - ..."
 # (a whole number + space before the n/m), which is a film runtime, not a part.
@@ -448,7 +448,7 @@ def enrich(sender, topic, title, description, duration,
     if my:
         if not r['year']: r['year'] = int(my.group(0).strip('() '))
         t = t[:my.start()]
-    r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:')
+    r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:,·')
 
     r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
     r['flags'] = ''.join(sorted(flags))        # canonical alphabetical order (A<S<T<U)
