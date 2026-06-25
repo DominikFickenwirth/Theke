@@ -579,6 +579,52 @@ def test_im_dritten_reich_is_not_a_slot():
     assert r["slot"] is None
 
 
+# -- round 12: Teil marker w/ explicit S/E, and "(Staffel N[, part])" --------
+
+def test_teil_marker_stripped_even_with_explicit_se():
+    # A leading "Teil N:" marker must be stripped from the title even when an
+    # explicit (Sxx/Exx) already set the episode (the marker strip used to be
+    # gated on episode being unset, leaving "Teil 3: ..." residue).
+    r = enrich("ARD", "Doku", "Teil 3: Menschliche Knochen (S01/E03)", "", 3600)
+    assert r["season"] == 1
+    assert r["episode"] == 3
+    assert r["clean_title"] == "Menschliche Knochen"
+
+
+def test_teil_marker_with_count_does_not_add_mismatched_count_under_se():
+    # "- Teil 1/2" alongside an explicit (S05/E05): the episode is the S/E one and
+    # the marker is only stripped -- no mismatched episode_count from the "Teil 1/2".
+    r = enrich("BR", "Doku", "Paul Breitner - Teil 1/2 (S05/E05)", "", 1500)
+    assert r["episode"] == 5
+    assert r["episode_count"] is None
+    assert r["clean_title"] == "Paul Breitner"
+
+
+def test_paren_staffel_sets_season_and_strips():
+    # A trailing "(Staffel N)" parenthetical is a season marker -> set season and
+    # remove it from the title.
+    r = enrich("SRF", "Deville", "Trailer: Leo da Vinci (Staffel 1)", "", 90)
+    assert r["season"] == 1
+    assert r["clean_title"] == "Trailer: Leo da Vinci"
+
+
+def test_paren_staffel_with_inner_part():
+    # "(Staffel N, n/m)": season N, episode n, count m -- whole paren removed.
+    r = enrich("ARD", "Expedition", "Das Expeditionsteam - Risse und Kanten (Staffel 4, 2/4)", "", 2700)
+    assert r["season"] == 4
+    assert r["episode"] == 2
+    assert r["episode_count"] == 4
+    assert r["clean_title"] == "Das Expeditionsteam - Risse und Kanten"
+
+
+def test_teil_as_word_is_not_a_marker():
+    # Guard: "Urteil" / "Teil" without a following number is an ordinary word,
+    # never an episode marker.
+    r = enrich("ARD", "Nachrichten", "Urteil im Schleuserprozess", "", 1500)
+    assert r["episode"] is None
+    assert r["clean_title"] == "Urteil im Schleuserprozess"
+
+
 def test_episode_bare_part_of_total():
     r = enrich("ARD", "Doku", "Die Story 2/2", "", 3600)
     assert r["episode"] == 2
