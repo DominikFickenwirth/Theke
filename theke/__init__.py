@@ -1570,11 +1570,17 @@ def _queue_status(conn, queue_id, status, error):
         raise
 
 
+def _remux_cols(remux) -> str:
+    """The remux flags as two fixed columns ('A' left, 'V' right) so entries align
+    under each other: 'A' -> 'A ', 'V' -> ' V', 'AV' -> 'AV'."""
+    return ("A" if "A" in remux else " ") + ("V" if "V" in remux else " ")
+
+
 def _print_queue(rows):
     """One header line + one line per entry to stdout (the result)."""
     print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
     for r in rows:
-        print(f'  [{r["id"]}] {r["status"]} {r["resolution"]} {r["remux"]} '
+        print(f'  [{r["id"]}] {r["status"]} {r["resolution"]} {_remux_cols(r["remux"])} '
               f'{r["language"]} {r["path"]!r}')
 
 
