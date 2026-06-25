@@ -156,3 +156,26 @@ existing T flag (a flag, not a category -- user decision).
 Live-DB effect: trailer demotion 166 Episode + 23 Movie -> Clip; companion
 demotion 1117 Episode + 151 Movie -> Clip; flags M=259, I=1160. No other
 transition. Movie 10051 -> 9877, Clip grows accordingly.
+
+## Round 7 -- mid-title "n/m - Subtitle" multi-part marker -> Episode  [DONE]
+
+`enrich audit` flagged episodic-unparsed rows: nature-doc miniseries written
+"Titel n/m - Untertitel" (Wunderwelt Schweiz 3/4 - Das Tessin, Die Sprache der
+Tiere 1/5, Straende Europas 1/6). The "n/m" sits MID-title before a " - "
+subtitle; NPART is end-anchored and PART needs parens, so both missed it (42
+rows, 30 fell to NULL via the duration prior).
+
+Fix: a MIDPART regex `(?<![\d./])(?<!\d\s)(\d{1,2})/(\d{1,2})\s+(?=[-–]\s)` with
+an n<=m<=20 guard. The "n/m " is removed from the title (keeping "Titel -
+Untertitel") and feeds episode/episode_count -> Episode via the Mehrteiler rule.
+
+GUARD (user-raised, now tested): the `(?<!\d\s)` rejects a MIXED fraction
+"8 1/2 - ..." (Fellini) -- a whole number + space before the n/m is a runtime,
+not a part. Without it the film became an Episode. Verified DB-wide: 0 remaining
+mixed-fraction matches; exactly 30 NULL->Episode, 42 rows gain an episode number.
+
+Process note (user feedback): always add a false-positive guard test for a new
+regex/rule, proactively -- do not wait for the counter-example. Re-checked all
+three of this session's rules DB-wide afterwards: fiction lift had 0 non-film
+contamination (the 3 "spezial" hits were real Tatort episode titles), trailer
+and companion demotions had 0 false matches.
