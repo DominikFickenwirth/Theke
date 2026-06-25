@@ -22,7 +22,7 @@ from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CAT
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
-from theke.files import is_hls, download_file, download_hls, run_remux
+from theke.files import is_hls, download_file, download_hls, run_remux, move_file
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -1377,6 +1377,7 @@ def cmd_file(cfg, args: argparse.Namespace) -> dict:
     match args.file_cmd:
         case "download": return _file_download(cfg, args)
         case "remux":    return _file_remux(cfg, args)
+        case "move":     return _file_move(cfg, args)
         case _: raise DbError(f"unhandled file action: {args.file_cmd}")
 
 
@@ -1395,6 +1396,10 @@ def _file_download(cfg, args) -> dict:
 def _file_remux(cfg, args) -> dict:
     run_remux(cfg.ffmpeg_path, args.in_path, args.remux, args.out, args.language)
     return {"remux": args.remux, "out": args.out}
+
+
+def _file_move(cfg, args) -> dict:
+    return {"moved": move_file(args.src, args.dst, args.force)}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1491,6 +1496,10 @@ def build_parser() -> argparse.ArgumentParser:
     frx.add_argument("-m", "--remux",    required=True, choices=["AV", "A", "V"],            help="what to keep: AV (audio+video), A (audio), V (video)")
     frx.add_argument("-o", "--out",      required=True, metavar="PATH",                      help="output file path")
     frx.add_argument("-l", "--language", metavar="CODE",                                     help="set the audio track language tag (e.g. deu)")
+    fmv = fsub.add_parser("move", help="move a file into the library", description="Move --src to --dst, creating parent directories. An existing destination is an error unless --force.")
+    fmv.add_argument("-s", "--src",   required=True, metavar="PATH", help="source file path")
+    fmv.add_argument("-d", "--dst",   required=True, metavar="PATH", help="destination file path")
+    fmv.add_argument("-f", "--force", action="store_true",          help="overwrite an existing destination")
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")

@@ -139,6 +139,23 @@ def run_ffmpeg(args) -> None:
         raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}): {tail}")
 
 
+# -- move ---------------------------------------------------------------------
+
+def move_file(src, dst, force=False) -> str:
+    """Move src to dst, creating parent dirs. An existing dst is an error unless
+    force (then it is replaced). Return dst."""
+    if os.path.exists(dst):
+        if not force:
+            raise RuntimeError(f"destination exists: {dst}")
+        os.remove(dst)
+    parent = os.path.dirname(dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    shutil.move(src, dst)
+    log.info("moved %s -> %s", os.path.basename(src), dst)
+    return dst
+
+
 # -- remux --------------------------------------------------------------------
 
 _REMUX_CODEC = {"AV": ["-c", "copy"],
