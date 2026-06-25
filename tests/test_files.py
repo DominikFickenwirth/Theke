@@ -10,7 +10,8 @@ import theke
 import theke.files as files
 from theke import Config, main
 from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
-                         download_file, download_hls)
+                         download_file, download_hls, ffmpeg_args, run_remux,
+                         run_ffmpeg)
 
 
 def install_http(monkeypatch, mapping):
@@ -319,3 +320,76 @@ def test_cli_file_download_hls_routes_to_segments(tmp_path, capsys, monkeypatch)
 
 def test_cli_file_download_missing_args_is_usage_error(capsys):
     assert main(["file", "download"]) == 2
+
+
+# -- remux (ffmpeg stream copy) -----------------------------------------------
+
+def test_ffmpeg_args_av_copies_all():
+    assert ffmpeg_args("ffmpeg", "in.ts", "AV", "out.mp4") == [
+        "ffmpeg", "-y", "-i", "in.ts", "-c", "copy", "out.mp4"]
+
+
+def test_ffmpeg_args_audio_only():
+    assert ffmpeg_args("ffmpeg", "in.ts", "A", "out.aac") == [
+        "ffmpeg", "-y", "-i", "in.ts", "-vn", "-c:a", "copy", "out.aac"]
+
+
+def test_ffmpeg_args_video_only():
+    assert ffmpeg_args("ffmpeg", "in.ts", "V", "out.mp4") == [
+        "ffmpeg", "-y", "-i", "in.ts", "-an", "-c:v", "copy", "out.mp4"]
+
+
+def test_ffmpeg_args_sets_audio_language():
+    assert ffmpeg_args("ffmpeg", "in.ts", "AV", "out.mp4", language="deu") == [
+        "ffmpeg", "-y", "-i", "in.ts", "-c", "copy",
+        "-metadata:s:a:0", "language=deu", "out.mp4"]
+
+
+def test_ffmpeg_args_unknown_mode_raises():
+    with pytest.raises(ValueError, match="mode"):
+        ffmpeg_args("ffmpeg", "in.ts", "X", "out.mp4")
+
+
+def test_run_remux_invokes_ffmpeg_with_built_args(tmp_path, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+    seen = {}
+
+    def fake_ffmpeg(args):
+        seen["args"] = args
+        with open(args[-1], "wb") as fh:
+            fh.write(b"muxed")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    run_remux("ffmpeg", "in.ts", "AV", out, language="fra")
+    assert seen["args"] == ["ffmpeg", "-y", "-i", "in.ts", "-c", "copy",
+                            "-metadata:s:a:0", "language=fra", out]
+
+
+def test_run_ffmpeg_missing_binary_raises(tmp_path):
+    with pytest.raises(RuntimeError, match="not found"):
+        run_ffmpeg(["this-ffmpeg-does-not-exist", "-version"])
+
+
+def test_run_ffmpeg_nonzero_exit_raises(monkeypatch):
+    class Proc:
+        returncode = 1
+        stderr = "boom line 1\nboom line 2\n"
+
+    monkeypatch.setattr(files.subprocess, "run", lambda *a, **k: Proc())
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        run_ffmpeg(["ffmpeg", "-i", "x"])
+
+
+def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+    monkeypatch.setattr(files, "run_ffmpeg",
+                        lambda args: open(args[-1], "wb").write(b"ok"))
+    rc = main(["--json", "file", "remux", "--in", "in.ts", "--remux", "AV",
+               "--out", out])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"remux": "AV", "out": out}
+
+
+def test_cli_file_remux_bad_mode_is_usage_error():
+    assert main(["file", "remux", "--in", "in.ts", "--remux", "X",
+                 "--out", "o.mp4"]) == 2
