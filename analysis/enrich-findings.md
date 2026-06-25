@@ -451,6 +451,23 @@ shows (Kaffee oder Tee, phoenix parlament/vor ort, Rockpalast, Club) mixed in th
 same duration band with genuine feature films -- inseparable row-locally, so kept
 NULL (honest; normal long TV is low priority, films must not be mislabelled).
 
+## Status after rounds 14-16 (part 3: category = NULL)
+
+category = NULL fell from 110890 (15.6%) to 18895 (2.7%) across three row-local,
+deterministic rounds, with ZERO film mislabelling (Movie steady at ~9875):
+- R14: ARTE unknown sub-labels take the duration prior (genre kept).
+- R15: a bare running episode/season number implies Episode.
+- R16: the prior's Episode ceiling raised to 60 min (30-60 min long-form is
+  recurring TV, not a film), with the prior demoted to the true last resort.
+
+The residual NULL is entirely >=3600s and genuinely INSEPARABLE row-locally: the
+same 60-90 min band holds long talk/magazine/event shows (-> Episode) AND real
+feature films (-> Movie), with no metazeile, marker, or known-Reihe signal to tell
+them apart. Both remaining options were rejected on principle: a catalog topic-
+frequency gate would break enrich's per-row determinism (CLAUDE.md), and per-title
+resolution is exactly what `match` does. So the bucket is left as honest NULL
+(normal long TV is low priority; films must never be mislabelled Episode).
+
 ## Status after rounds 8-13
 
 clean_title / series_name are now substantially clean: leading "Folge/Episode N"
