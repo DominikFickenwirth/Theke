@@ -70,7 +70,8 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
     """Load the JSON config file and apply CLI overrides (None = not set).
 
     An explicitly given path must exist; the default path may be absent.
-    Unknown keys and wrong value types are errors (typo protection).
+    Unknown keys are ignored with a warning on stderr (forward compatibility);
+    wrong value types for known keys are errors (typo protection).
     """
     explicit = path is not None
     path = path or CONFIG_DEFAULT_PATH
@@ -87,16 +88,20 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
     if not isinstance(data, dict):
         raise ConfigError(f"config root in {path} must be a JSON object")
 
+    known = {}
     for key, value in data.items():
         if key not in fields:
-            raise ConfigError(f"unknown config key in {path}: {key}")
+            print(f"warning: ignoring unknown config key in {path}: {key}",
+                  file=sys.stderr)
+            continue
         if not isinstance(value, fields[key]):
             raise ConfigError(
                 f"config key {key} must be of type {fields[key].__name__}")
+        known[key] = value
     for key, value in (overrides or {}).items():
         if value is not None:
-            data[key] = value
-    return Config(**data)
+            known[key] = value
+    return Config(**known)
 
 
 # -- db -----------------------------------------------------------------------
