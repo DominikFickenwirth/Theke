@@ -20,6 +20,13 @@ log = logging.getLogger("theke")
 
 CHUNK = 1 << 16   # 64 KiB streaming buffer
 
+
+def _ensure_parent(path) -> None:
+    """Create the parent directory of an output path if it does not exist yet."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
 _BANDWIDTH_RX = re.compile(r"BANDWIDTH=(\d+)")
 _URI_RX       = re.compile(r'URI="([^"]*)"')
 _METHOD_RX    = re.compile(r"METHOD=([^,\s]+)")
@@ -104,6 +111,7 @@ def download_file(url, out, retries) -> int:
 
 def _download_once(url, out) -> int:
     part = out + ".part"
+    _ensure_parent(out)
     offset = os.path.getsize(part) if os.path.exists(part) else 0
     reader, resumed = open_url(url, offset)
     if offset and not resumed:
@@ -148,9 +156,7 @@ def move_file(src, dst, force=False) -> str:
         if not force:
             raise RuntimeError(f"destination exists: {dst}")
         os.remove(dst)
-    parent = os.path.dirname(dst)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+    _ensure_parent(dst)
     shutil.move(src, dst)
     log.info("moved %s -> %s", os.path.basename(src), dst)
     return dst
@@ -177,6 +183,7 @@ def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
     size in bytes."""
     log.info("remuxing %s -> %s (%s)", os.path.basename(in_path),
              os.path.basename(out_path), mode)
+    _ensure_parent(out_path)
     run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
     return os.path.getsize(out_path)
 
@@ -188,6 +195,7 @@ def download_hls(url, out, retries, ffmpeg_path):
     bandwidth), assemble the media playlist's segments natively, and hand off to
     ffmpeg when the stream is encrypted or native assembly fails after retries.
     Return (action, bytes, segments) with action 'hls' or 'hls-ffmpeg'."""
+    _ensure_parent(out)
     text = theke.http_get(url).decode("utf-8")
     media_url = url
     if is_master(text):
