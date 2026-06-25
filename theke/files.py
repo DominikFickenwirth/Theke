@@ -222,7 +222,12 @@ def download_hls(url, out, retries, ffmpeg_path):
 
 
 def _hls_ffmpeg(url, out, ffmpeg_path) -> int:
-    run_ffmpeg([ffmpeg_path, "-y", "-i", url, "-c", "copy", out])
+    try:
+        run_ffmpeg([ffmpeg_path, "-y", "-i", url, "-c", "copy", out])
+    except Exception:
+        if os.path.exists(out):   # drop the partial/faulty target ffmpeg left
+            os.remove(out)
+        raise
     return os.path.getsize(out)
 
 
