@@ -500,6 +500,27 @@ def test_queue_list_cli_default_action(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["count"] == 1
 
 
+def test_remux_cols_align_a_and_v():
+    # 'A' left column, 'V' right column, so flags align under each other.
+    assert theke._remux_cols("A") == "A "
+    assert theke._remux_cols("V") == " V"
+    assert theke._remux_cols("AV") == "AV"
+
+
+def test_print_queue_aligns_remux_columns(capsys):
+    rows = [{"id": 1, "status": "0", "resolution": "HD", "remux": "AV",
+             "language": "de", "path": "a.mp4"},
+            {"id": 2, "status": "0", "resolution": "SD", "remux": "A",
+             "language": "fr", "path": "b.aac"},
+            {"id": 3, "status": "0", "resolution": "HD", "remux": "V",
+             "language": "en", "path": "c.mp4"}]
+    theke._print_queue(rows)
+    out = capsys.readouterr().out
+    assert "HD AV de" in out
+    assert "SD A  fr" in out
+    assert "HD  V en" in out
+
+
 # -- cmd_queue approve -------------------------------------------------------
 
 def qid(conn, mediathek_id):
