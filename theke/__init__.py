@@ -22,7 +22,7 @@ from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CAT
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
-from theke.files import is_hls, download_file, download_hls
+from theke.files import is_hls, download_file, download_hls, run_remux
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -1376,6 +1376,7 @@ def cmd_file(cfg, args: argparse.Namespace) -> dict:
     """Dispatch a file action: download / remux / move (each on explicit paths)."""
     match args.file_cmd:
         case "download": return _file_download(cfg, args)
+        case "remux":    return _file_remux(cfg, args)
         case _: raise DbError(f"unhandled file action: {args.file_cmd}")
 
 
@@ -1389,6 +1390,11 @@ def _file_download(cfg, args) -> dict:
         return result
     nbytes = download_file(args.url, args.out, retries)
     return {"action": "download", "out": args.out, "bytes": nbytes}
+
+
+def _file_remux(cfg, args) -> dict:
+    run_remux(cfg.ffmpeg_path, args.in_path, args.remux, args.out, args.language)
+    return {"remux": args.remux, "out": args.out}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1480,6 +1486,11 @@ def build_parser() -> argparse.ArgumentParser:
     fdl.add_argument("-u", "--url",     required=True, metavar="URL",  help="media URL to download")
     fdl.add_argument("-o", "--out",     required=True, metavar="PATH", help="output file path")
     fdl.add_argument("-r", "--retries", type=int, metavar="N",         help="retry attempts on error (default: config download_retries)")
+    frx = fsub.add_parser("remux", help="remux a file via ffmpeg (stream copy)", description="Stream-copy --in into --out with ffmpeg (no transcoding). --remux picks what to keep: AV (audio+video), A (audio only), V (video only). --language tags the first audio track.")
+    frx.add_argument("-i", "--in",       dest="in_path", required=True, metavar="PATH",     help="input file path")
+    frx.add_argument("-m", "--remux",    required=True, choices=["AV", "A", "V"],            help="what to keep: AV (audio+video), A (audio), V (video)")
+    frx.add_argument("-o", "--out",      required=True, metavar="PATH",                      help="output file path")
+    frx.add_argument("-l", "--language", metavar="CODE",                                     help="set the audio track language tag (e.g. deu)")
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")

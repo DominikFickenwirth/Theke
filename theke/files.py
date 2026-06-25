@@ -139,6 +139,31 @@ def run_ffmpeg(args) -> None:
         raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}): {tail}")
 
 
+# -- remux --------------------------------------------------------------------
+
+_REMUX_CODEC = {"AV": ["-c", "copy"],
+                "A":  ["-vn", "-c:a", "copy"],
+                "V":  ["-an", "-c:v", "copy"]}
+
+
+def ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language=None) -> list:
+    """Build the ffmpeg stream-copy command for a remux mode ('AV'/'A'/'V').
+    With language set, tag the first audio track (-metadata:s:a:0 language=...)."""
+    if mode not in _REMUX_CODEC:
+        raise ValueError(f"unknown remux mode: {mode}")
+    meta = ["-metadata:s:a:0", f"language={language}"] if language else []
+    return [ffmpeg_path, "-y", "-i", in_path] + _REMUX_CODEC[mode] + meta + [out_path]
+
+
+def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
+    """Remux in_path into out_path (stream copy, no transcode); return the output
+    size in bytes."""
+    log.info("remuxing %s -> %s (%s)", os.path.basename(in_path),
+             os.path.basename(out_path), mode)
+    run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
+    return os.path.getsize(out_path)
+
+
 # -- HLS download -------------------------------------------------------------
 
 def download_hls(url, out, retries, ffmpeg_path):
