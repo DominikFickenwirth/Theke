@@ -1001,6 +1001,63 @@ def test_queue_download_existing_target_needs_force(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_queue_download_uses_descriptive_temp_names(tmp_path, monkeypatch):
+    # Temp files carry a speaking base 'theke_{id}_{path stem}'; the source takes
+    # the url's extension (.src.<ext>), the remux target the path's (.mux.<ext>).
+    seen = {}
+
+    def dl(url, out, retries):
+        seen["src"] = os.path.basename(out)
+        with open(out, "wb") as fh:
+            fh.write(b"SRC")
+        return 3
+
+    def remux(ffmpeg_path, in_path, mode, out_path, language=None):
+        seen["mux"] = os.path.basename(out_path)
+        with open(out_path, "wb") as fh:
+            fh.write(b"MUX")
+        return 3
+
+    monkeypatch.setattr(theke, "download_file", dl)
+    monkeypatch.setattr(theke, "run_remux", remux)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path)
+        insert_local(conn, "m_de", "Solo", url_video="http://h/video.mp4")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        qi = qid(conn, "m_de")
+        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert seen["src"] == f"theke_{qi}_Solo (2020).src.mp4"
+        assert seen["mux"] == f"theke_{qi}_Solo (2020).mux.mp4"
+    finally:
+        conn.close()
+
+
+def test_queue_download_temp_src_omits_ext_when_url_has_none(tmp_path, monkeypatch):
+    seen = {}
+
+    def dl(url, out, retries):
+        seen["src"] = os.path.basename(out)
+        with open(out, "wb") as fh:
+            fh.write(b"SRC")
+        return 3
+
+    monkeypatch.setattr(theke, "download_file", dl)
+    monkeypatch.setattr(theke, "run_remux", _fake_remux)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path)
+        insert_local(conn, "m_de", "Solo", url_video="http://h/stream")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        qi = qid(conn, "m_de")
+        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert seen["src"] == f"theke_{qi}_Solo (2020).src"
+    finally:
+        conn.close()
+
+
 def test_queue_download_needs_ids_or_all(tmp_path):
     conn = open_db(tmp_path)
     try:
