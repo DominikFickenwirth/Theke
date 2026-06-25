@@ -49,11 +49,15 @@ def test_config_empty_object_keeps_defaults(tmp_path):
     assert load_config(str(path)) == Config()
 
 
-def test_config_unknown_key_is_error(tmp_path):
+def test_config_unknown_key_is_ignored_with_warning(tmp_path, capsys):
     path = tmp_path / "typo.json"
-    write_config(path, {"db_pathh": "x.db"})
-    with pytest.raises(ConfigError, match="db_pathh"):
-        load_config(str(path))
+    write_config(path, {"db_pathh": "x.db", "db_path": "real.db"})
+    cfg = load_config(str(path))
+    assert cfg.db_path == "real.db"
+    assert not hasattr(cfg, "db_pathh")
+    err = capsys.readouterr().err
+    assert "db_pathh" in err
+    assert str(path) in err
 
 
 def test_config_wrong_type_is_error(tmp_path):
