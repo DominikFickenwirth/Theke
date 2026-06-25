@@ -341,11 +341,12 @@ def test_arte_taxonomy_polish():
 
 
 def test_unklar_when_no_category_signal():
-    # Long non-fiction without any metazeile/taxonomy -> honest low-confidence.
+    # A 45-min daily magazine without any metazeile/taxonomy -> Episode via the
+    # duration prior (recurring TV, not a film), at low confidence.
     r = enrich("ARD", "Hallo Niedersachsen", "Hallo Niedersachsen vom 14.06.",
                  "Aktuelle Nachrichten aus der Region.", 2700)
-    assert r["category"] is None
-    assert r["enrich_confidence"] == 0.2
+    assert r["category"] == "Episode"
+    assert r["enrich_confidence"] == 0.5
 
 
 # -- B4: trailing "- <Format> von <Name>" credit in the title ----------------
@@ -930,6 +931,16 @@ def test_fiction_topic_lifts_null_to_movie():
     r = enrich("ARD", "Tatort", "Tatort: Seenot", "", 5339)
     assert r["category"] == "Movie"
     assert r["series_name"] == "Tatort"
+
+
+def test_fiction_topic_lifts_sub_60min_film_to_movie():
+    # GUARD (round 16): a fiction-Reihe film in the 30-60 min band -- a Maerchen
+    # fairy-tale film (~58 min) -- must stay Movie. The raised duration-prior
+    # ceiling (60 min) would otherwise call it Episode; the fiction lift reclaims
+    # any film-length (>=1800s) prior guess for a known fiction topic.
+    r = enrich("ARD", "Märchen in der ARD", "Die Gänseprinzessin", "", 3536)
+    assert r["category"] == "Movie"
+    assert r["series_name"] == "Märchen in der ARD"
 
 
 def test_fiction_topic_does_not_touch_episode():

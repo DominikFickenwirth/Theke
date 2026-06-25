@@ -262,13 +262,15 @@ def route_topic(topic) -> dict:
     return out
 
 
-# Known fiction-Reihe topics: a NULL medium (no film metazeile on this airing)
-# is lifted to Movie, matching the labelled airings of the same brand so a Reihe
-# is internally consistent. Derived from the live DB: every topic here already
-# produces >=8 metazeile-labelled Movie rows (a film label never appears on talk/
-# news/sports, so this set cannot pull in non-fiction). The lift fires only on a
-# NULL category (never overriding Episode from Sxx/Exx or Clip from a trailer);
-# the residual per-airing Movie/Episode scatter is regrouped by match via
+# Known fiction-Reihe topics: a film-length (>=1800s) airing with no decisive
+# medium (no metazeile, no episodic marker) is lifted to Movie, matching the
+# labelled airings of the same brand so a Reihe is internally consistent. Derived
+# from the live DB: every topic here already produces >=8 metazeile-labelled Movie
+# rows (a film label never appears on talk/news/sports, so this set cannot pull in
+# non-fiction). The lift runs BEFORE the duration prior and only on a still-unset
+# category, so it never overrides Episode (Sxx/Exx, a count) or a Clip/trailer; a
+# sub-30-min fiction-topic clip falls past it to the prior. The residual per-airing
+# Movie/Episode scatter is regrouped by match via
 # series_name. Generic film SLOTS in this set (Filme im Ersten, FilmMittwoch im
 # Ersten, ...) keep series_name = slot for now; moving them to FORMAT_TOPICS for a
 # cleaner NULL series_name is a separate later cleanup. Matched casefold == topic.
@@ -458,7 +460,7 @@ def enrich(sender, topic, title, description, duration,
                 if r['season'] is None: r['season'] = int(ssn.group(1))
                 r['series_name'] = r['series_name'][:ssn.start()].rstrip(' -–:|,·') or None
 
-    # -- Pass 5: ARTE taxonomy (Ober=genre, Unter=medium) / duration prior -
+    # -- Pass 5: ARTE taxonomy (Ober=genre, Unter=medium) ------------------
     if sender in ARTE_LANG and ' - ' in tp:
         ober, _, unter = tp.partition(' - ')
         if ober.strip() in ARTE_OBER:
@@ -466,10 +468,6 @@ def enrich(sender, topic, title, description, duration,
             cat = ARTE_SUB.get(unter.strip()) or ocat
             if cat and not r['category']: r['category'] = cat
             genres.update(gset); kat_src = 'arte-topic'
-    if not r['category']:                               # honest low-conf prior
-        s = duration or 0                               # ARTE genre (if any) stays
-        r['category'] = 'Clip' if s < 120 else 'Episode' if s < 1800 else None
-        kat_src = 'duration-prior'
 
     # Episodic markers, by kind. A Mehrteiler "(n/m)" count is a serialized multi-
     # part work (Mehrteiler / miniseries) -> Episode, overriding even a
@@ -488,8 +486,14 @@ def enrich(sender, topic, title, description, duration,
             if r['category'] in (None, 'Clip'):
                 r['category'] = 'Episode'; kat_src = 'episodic'
 
-    if r['category'] is None and tp.casefold() in fiction_topics:   # known fiction Reihe
+    if (r['category'] is None and (duration or 0) >= 1800         # known fiction Reihe,
+            and tp.casefold() in fiction_topics):                 # film-length, no medium signal
         r['category'] = 'Movie'; kat_src = 'topic-fiction'
+
+    if not r['category']:                               # honest low-conf prior (last resort)
+        s = duration or 0                               # ARTE genre (if any) stays
+        r['category'] = 'Clip' if s < 120 else 'Episode' if s < 3600 else None
+        kat_src = 'duration-prior'
 
     if 'T' in flags and r['category'] in ('Movie', 'Episode') and (duration or 0) < 300:
         r['category'] = 'Clip'; kat_src = 'trailer'   # a short trailer is a clip, not a film/episode

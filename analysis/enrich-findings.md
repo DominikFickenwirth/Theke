@@ -414,6 +414,43 @@ join their S/E siblings as Episode rather than being lifted to Movie by the
 round-5 NULL-only fiction rule -- more consistent, not less). category dist now:
 Episode 499899, Clip 113094, NULL 86407, Movie 9875, Event 158.
 
+## Round 16 -- duration-prior Episode ceiling raised 1800s -> 3600s  [DONE]
+
+The dominant NULL cause: the duration prior left every >=1800s row with no other
+signal as NULL "to protect a possible film". But sampling the 1800-3600s (30-60
+min) NULL band -- even for RARE topics -- showed it is overwhelmingly recurring TV
+(docs, magazines, regional shows, interviews, sports highlights), essentially no
+standalone films. Genuine films cluster at >=3600s (60-90 min TV films, longer
+features); the 3600-5400s band IS film-heavy (Copacabana, Herzkino, Krause...),
+so the ceiling must stay at 60 min.
+
+Fix: the prior's Episode tier now runs to 3600s (`s < 3600`), so 30-60 min
+long-form -> Episode; >=3600s still -> NULL (films protected).
+
+Interaction fix (same round): raising the ceiling made the prior pre-empt two
+later passes in the 1800-3600 band. Resolved by making the prior the TRUE last
+resort -- moved it to run AFTER the episodic and fiction passes (it was in Pass 5,
+before them):
+- A fiction-Reihe FILM in the 30-60 min band (Märchen fairy-tale films, ~58 min)
+  was being called Episode by the prior before the round-5 fiction lift could see
+  it. With the prior last, the fiction lift (now `category is None and
+  duration>=1800 and topic in fiction_topics`) reclaims it -> Movie. (Märchen in
+  der ARD: 173 Movie.)
+- An Sxx/Exx airing got a 'duration-prior' kat_src in the 1800-3600 band (the
+  episodic pass only upgrades None/Clip, so it no-opped once the prior had set
+  Episode). With the prior last, the episodic pass sets Episode first.
+
+GUARDS (tested): a sub-60-min fiction film stays Movie (round-16 regression
+guard); an Sxx/Exx fiction airing stays Episode; a fiction trailer stays Clip; a
+metazeile film with a "Folge N" prefix stays Movie.
+
+Live-DB effect: 67512 NULL -> Episode, Movie UNCHANGED (9875). category dist now:
+Episode 567411, Clip 113094, NULL 18895 (2.7%, was 15.6% at the start of part 3),
+Movie 9875, Event 158. The remaining NULL is entirely >=3600s: long talk/magazine
+shows (Kaffee oder Tee, phoenix parlament/vor ort, Rockpalast, Club) mixed in the
+same duration band with genuine feature films -- inseparable row-locally, so kept
+NULL (honest; normal long TV is low priority, films must not be mislabelled).
+
 ## Status after rounds 8-13
 
 clean_title / series_name are now substantially clean: leading "Folge/Episode N"
