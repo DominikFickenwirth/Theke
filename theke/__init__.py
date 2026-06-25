@@ -57,7 +57,6 @@ class Config:
     match_min_confidence: float = 0.6
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
-    name_template:        str   = "{title} ({year})"
     fiction_topics:       list  = dataclasses.field(default_factory=list)
     ffmpeg_path:          str   = "ffmpeg"
     download_retries:     int   = 3
@@ -185,6 +184,10 @@ MIGRATIONS: list[tuple[str, ...]] = [
         "ALTER TABLE queue ADD COLUMN url          TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE queue ADD COLUMN url_subtitle TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE queue ADD COLUMN path         TEXT NOT NULL DEFAULT ''",
+    ),
+    (  # drop the redundant filename stem: the same title/year info already lives
+       # in `path` (the full library destination), so `name` carried nothing new.
+        "ALTER TABLE queue DROP COLUMN name",
     ),
 ]
 
@@ -1220,7 +1223,7 @@ def _queue_add(conn, cfg, args) -> dict:
     'proposed' unless queue_auto_approve is set. A mediathek_id already queued in
     an active state (proposed/approved/busy) is skipped; a terminal one does not
     block a re-queue. `deduplicated` counts the source rows collapsed or filtered.
-    Per-row columns (url/path/name/...) are CLI-overridable via _queue_overrides."""
+    Per-row columns (url/path/...) are CLI-overridable via _queue_overrides."""
     if not args.tmdb and not args.mediathek_id:
         raise ValueError("queue add needs --tmdb or --mediathek-id")
     status = QUEUE_STATUS["approved"] if cfg.queue_auto_approve else QUEUE_STATUS["proposed"]
@@ -1239,7 +1242,7 @@ def _queue_add(conn, cfg, args) -> dict:
     return totals
 
 
-_QUEUE_OVERRIDE_COLS = ("name", "language", "resolution", "remux", "url",
+_QUEUE_OVERRIDE_COLS = ("language", "resolution", "remux", "url",
                         "path", "url_subtitle")
 
 
@@ -1252,12 +1255,11 @@ def _queue_overrides(args) -> dict:
 
 def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
     """Queue the deduplicated download set of one matched film. The first pick is
-    the anchor (best resolution, primary library name); the rest carry a language
-    infix in their path."""
+    the anchor (best resolution, primary path); the rest carry a language infix in
+    their path."""
     if not cfg.tmdb_api_key:
         raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
     meta = tmdb_movie(cfg, tmdb_id)
-    name = _queue_name(cfg, meta["title"], meta["year"])
     fields = _path_fields(meta["title"], meta["year"])
     rows = {r["mediathek_id"]: dict(r) for r in conn.execute(
         "SELECT * FROM mediathek WHERE status='2' AND tmdb_id=?", (tmdb_id,))}
@@ -1265,7 +1267,7 @@ def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
     totals["deduplicated"] += len(rows) - len(picks)
     for i, p in enumerate(picks):
         src = rows[p["mediathek_id"]]
-        row = _queue_row(status, p["mediathek_id"], tmdb_id, name, p["language"],
+        row = _queue_row(status, p["mediathek_id"], tmdb_id, p["language"],
                          p["resolution"], p["remux"], src,
                          _library_path(cfg, fields, p["language"], p["remux"], i == 0))
         _queue_insert(conn, row, overrides, totals)
@@ -1273,7 +1275,7 @@ def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
 
 def _queue_add_mediathek(conn, cfg, mediathek_id, status, overrides, totals):
     """Queue one mediathek row directly (manual pick, no dedup, full 'AV', primary
-    name). Uses the TMDB title/year when the row is matched and a key is set, else
+    path). Uses the TMDB title/year when the row is matched and a key is set, else
     its enriched clean_title/series_name/season/episode."""
     r = conn.execute("SELECT * FROM mediathek WHERE mediathek_id=?",
                      (mediathek_id,)).fetchone()
@@ -1288,10 +1290,9 @@ def _queue_add_mediathek(conn, cfg, mediathek_id, status, overrides, totals):
             language = meta["original_language"]
     else:
         title, year = r["clean_title"], r["year"]
-    name = _queue_name(cfg, title, year)
     fields = _path_fields(title, year, r["series_name"], r["season"], r["episode"])
     resolution = resolution_of(r)
-    row = _queue_row(status, mediathek_id, tmdb_id, name, language, resolution,
+    row = _queue_row(status, mediathek_id, tmdb_id, language, resolution,
                      "AV", r, _library_path(cfg, fields, language, "AV", True))
     _queue_insert(conn, row, overrides, totals)
 
@@ -1305,19 +1306,13 @@ def _media_url(row, resolution) -> str:
             or row.get("url_video_small") or "")
 
 
-def _queue_row(status, mediathek_id, tmdb_id, name, language, resolution,
+def _queue_row(status, mediathek_id, tmdb_id, language, resolution,
                remux, src, path) -> dict:
     """Assemble one queue column dict from a pick + its mediathek source row."""
     return {"status": status, "mediathek_id": mediathek_id, "tmdb_id": tmdb_id,
-            "name": name, "language": language, "resolution": resolution,
+            "language": language, "resolution": resolution,
             "remux": remux, "url": _media_url(src, resolution),
             "url_subtitle": src.get("url_subtitle") or "", "path": path}
-
-
-def _queue_name(cfg, title, year) -> str:
-    """The library filename stem from the configured template. None fields render
-    empty (never the literal 'None'), e.g. a row without a year."""
-    return cfg.name_template.format(title=title or "", year=year if year is not None else "")
 
 
 def _path_fields(title, year, series=None, season=None, episode=None) -> dict:
@@ -1367,7 +1362,7 @@ def _queue_insert(conn, row, overrides, totals):
         totals["skipped"] += 1
         return
     ts = _now()
-    cols = ["status", "mediathek_id", "tmdb_id", "name", "language", "resolution",
+    cols = ["status", "mediathek_id", "tmdb_id", "language", "resolution",
             "remux", "url", "url_subtitle", "path", "created_at", "updated_at"]
     row = {**row, "created_at": ts, "updated_at": ts}
     conn.execute(f"INSERT INTO queue ({', '.join(cols)}) VALUES "
@@ -1564,7 +1559,7 @@ def _print_queue(rows):
     print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
     for r in rows:
         print(f'  [{r["id"]}] {r["status"]} {r["resolution"]} {r["remux"]} '
-              f'{r["language"]} {r["name"]!r}')
+              f'{r["language"]} {r["path"]!r}')
 
 
 # -- cli ----------------------------------------------------------------------
@@ -1683,7 +1678,6 @@ def build_parser() -> argparse.ArgumentParser:
     qadd = qsub.add_parser("add", help="stage downloads by tmdb_id or mediathek_id", description="Stage downloads. --tmdb dedups a matched film's many rows to the minimal download set (best quality per whitelisted language, shared video flagged for remux); --mediathek-id queues one row directly. New entries are 'proposed' unless queue_auto_approve is set.")
     qadd.add_argument("-t", "--tmdb",         action="append", metavar="ID", help="TMDB id to stage, deduplicated (repeatable)")
     qadd.add_argument("-m", "--mediathek-id", action="append", metavar="ID", help="mediathek_id to stage directly (repeatable)")
-    qadd.add_argument(      "--name",         metavar="NAME",                help="override the library filename stem")
     qadd.add_argument(      "--language",     metavar="CODE",                help="override the audio language code")
     qadd.add_argument(      "--resolution",  choices=["HD", "SD", "LQ"],     help="override the video resolution tier")
     qadd.add_argument(      "--remux",       choices=["AV", "A", "V"],       help="override the remux mode")
