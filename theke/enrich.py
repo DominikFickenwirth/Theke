@@ -419,6 +419,9 @@ def enrich(sender, topic, title, description, duration,
     if r['category'] is None and tp.casefold() in fiction_topics:   # known fiction Reihe
         r['category'] = 'Movie'; kat_src = 'topic-fiction'
 
+    if 'T' in flags and r['category'] in ('Movie', 'Episode') and (duration or 0) < 300:
+        r['category'] = 'Clip'; kat_src = 'trailer'   # a short trailer is a clip, not a film/episode
+
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
     if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
         t = t[:cm.start()]
