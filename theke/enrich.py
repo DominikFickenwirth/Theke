@@ -200,7 +200,7 @@ EVENT_RX = re.compile(r'\b(Berlinale|Grimme[- ]Preis|Filmpreis|Filmfest'
 SENDER_TOKENS = {'ard', 'zdf', '3sat', 'hr', 'br', 'wdr', 'ndr', 'swr', 'sr',
                  'mdr', 'rbb', 'orf', 'srf', 'rbtv', 'alpha', 'arte', 'phoenix',
                  'dw', 'kika'}
-BRANDS = ['ard wissen', 'radio bremen', 'alpha lernen']
+BRANDS = ['ard wissen', 'radio bremen', 'alpha lernen', 'das erste']
 SECTION_WORDS = {'regionalmagazin', 'sportblitz', 'wetter', 'doku', 'extra',
                  'retro', 'geschichten', 'spezial'}
 
@@ -235,8 +235,9 @@ def route_topic(topic) -> dict:
     tp = (topic or '').strip()
     if not tp:
         return out
-    if '|' in tp:                              # Dachmarke|series pipe
-        parts = [p.strip() for p in tp.split('|')]
+    sep = '|' if '|' in tp else '//' if '//' in tp else None
+    if sep:                                    # Dachmarke|series / Sender//series
+        parts = [p.strip() for p in tp.split(sep)]
         if len(parts) == 2 and parts[0] and parts[1]:
             a, b = parts
             sa, sb = _side_is_slot(a), _side_is_slot(b)

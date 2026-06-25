@@ -331,3 +331,33 @@ Live-DB effect: "Teil N" markers in clean_title 236 -> 0, "(Staffel" residue
 105 -> 2 (the 2 are the review clips, correctly kept); 339 clean_titles cleaned,
 76 seasons gained, 6 NULL -> Episode (genuine multi-part docs "(Staffel N, n/m)"
 -- correct, via the mehrteiler rule).
+
+## Round 13 -- "Sender // Series" topic split -> slot  [DONE]
+
+The last clear series_name->slot leak: a "<Sender> // <Series>" topic kept the
+sender as part of series_name ("NDR//Aktuell", "Das Erste // Plusminus", "Radio
+Bremen // Y-Kollektiv", "SWR // Debüt im Dritten" -- 67 rows). The "//" is the
+same Dachmarke separator as "|", just spelled differently.
+
+Fix: the pipe split now accepts "//" as the separator too (sep = '|' or '//');
+the existing _side_is_slot logic puts the sender side in slot and the show on the
+other side. Added "Das Erste" (the ARD main channel) to the recognized BRANDS.
+
+GUARD (tested): when NEITHER side is a sender/Dachmarke the topic is kept whole
+("Pro // Contra" stays the series_name), exactly like the "|" fallback.
+
+Live-DB effect: 65 series_names split (slot=sender), category UNCHANGED, zero
+category transitions. 1 row remains ("SWR // ARD Room Tour" -- a sender token on
+BOTH sides, so the ambiguous "keep whole" fallback fires, as designed).
+
+## Status after rounds 8-13
+
+clean_title / series_name are now substantially clean: leading "Folge/Episode N"
+prefixes, "Staffel N" (title + ORF topic + parenthetical), "Teil N" markers (incl.
+under an explicit S/E), comma/separator residue, programming strands and
+"Sender //" prefixes are all resolved, all category-neutral except the few genuine
+multi-part promotions. Remaining items are low-volume and/or judgment calls,
+documented per round: bare-SPACE "Folge N" separators (75), 4-digit "Teil"/
+"Staffel" running numbers, broadcast-date suffixes on daily shows (kept on purpose
+-- they are the only per-episode discriminator), all-caps YouTube titles, and
+colon-named shows ("FAKT:", "ZDFzoom:") that are real names, not split candidates.
