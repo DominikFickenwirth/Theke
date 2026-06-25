@@ -52,6 +52,8 @@ class Config:
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     name_template:        str   = "{title} ({year})"
     fiction_topics:       list  = dataclasses.field(default_factory=list)
+    ffmpeg_path:          str   = "ffmpeg"
+    download_retries:     int   = 3
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
