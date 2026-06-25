@@ -133,6 +133,15 @@ def test_download_full_writes_bytes_and_removes_part(tmp_path, monkeypatch):
     assert not (tmp_path / "v.mp4.part").exists()
 
 
+def test_download_creates_missing_parent_dirs(tmp_path, monkeypatch):
+    data = b"hello world payload"
+    monkeypatch.setattr(files, "open_url", Opener(data))
+    out = str(tmp_path / "new" / "sub" / "v.mp4")      # parents do not exist yet
+    n = download_file(out=out, url="http://x", retries=0)
+    assert n == len(data)
+    assert (tmp_path / "new" / "sub" / "v.mp4").read_bytes() == data
+
+
 def test_download_resumes_from_part_with_206(tmp_path, monkeypatch):
     data = b"0123456789abcdef"
     (tmp_path / "v.mp4.part").write_bytes(data[:6])   # 6 bytes already on disk
@@ -229,6 +238,23 @@ def test_hls_native_concatenates_segments_in_order(tmp_path, monkeypatch):
     assert (tmp_path / "v.ts").read_bytes() == b"AAABBB"
     assert nbytes == 6
     assert not (tmp_path / "v.ts.segments").exists()   # segdir cleaned up
+
+
+def test_hls_creates_missing_parent_dirs(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n'
+             b'#EXTINF:6,\nseg0.ts\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media})
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FROM-FFMPEG")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = str(tmp_path / "new" / "sub" / "v.ts")       # parents do not exist yet
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert (tmp_path / "new" / "sub" / "v.ts").read_bytes() == b"FROM-FFMPEG"
 
 
 def test_hls_native_prepends_init_segment(tmp_path, monkeypatch):
@@ -363,6 +389,19 @@ def test_run_remux_invokes_ffmpeg_with_built_args(tmp_path, monkeypatch):
     run_remux("ffmpeg", "in.ts", "AV", out, language="fra")
     assert seen["args"] == ["ffmpeg", "-y", "-i", "in.ts", "-c", "copy",
                             "-metadata:s:a:0", "language=fra", out]
+
+
+def test_run_remux_creates_missing_parent_dirs(tmp_path, monkeypatch):
+    out = str(tmp_path / "new" / "sub" / "out.mp4")    # parents do not exist yet
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"muxed")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    n = run_remux("ffmpeg", "in.ts", "AV", out)
+    assert (tmp_path / "new" / "sub" / "out.mp4").read_bytes() == b"muxed"
+    assert n == len(b"muxed")
 
 
 def test_run_ffmpeg_missing_binary_raises(tmp_path):
