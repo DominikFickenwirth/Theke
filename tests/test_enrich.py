@@ -424,6 +424,69 @@ def test_comma_in_plain_title_is_kept():
     assert r["episode"] is None
 
 
+# -- round 9: leading "Folge/Episode N[/M]: Subtitle" prefix -----------------
+
+def test_folge_prefix_with_se_keeps_se_episode_and_strips_prefix():
+    # "Folge <running>: <Subtitle> (Sxx/Exx)": the (S/E) is decisive for the
+    # episode number (the leading "Folge 1135" is an absolute running count, not
+    # the within-season episode), and the "Folge N:" prefix is stripped to the
+    # real episode subtitle.
+    r = enrich("MDR", "In aller Freundschaft",
+                 "Folge 1135: Flammen der Hoffnung (S29/E05)", "", 2700)
+    assert r["season"] == 29
+    assert r["episode"] == 5
+    assert r["episode_count"] is None
+    assert r["clean_title"] == "Flammen der Hoffnung"
+
+
+def test_folge_prefix_without_se_takes_the_running_number():
+    # No (S/E): the leading "Folge N" IS the episode number, and the subtitle
+    # becomes the clean_title.
+    r = enrich("ARD", "Pop", "Folge 1090: Stargazing von Myles Smith", "", 300)
+    assert r["episode"] == 1090
+    assert r["clean_title"] == "Stargazing von Myles Smith"
+
+
+def test_folge_prefix_with_count_sets_episode_count():
+    # "Folge N/M: <Subtitle>": N -> episode, M -> episode_count.
+    r = enrich("ARD-alpha", "C'est ça, la vie",
+                 "Folge 2/26: Philippe, agent immobilier", "", 1500)
+    assert r["episode"] == 2
+    assert r["episode_count"] == 26
+    assert r["clean_title"] == "Philippe, agent immobilier"
+
+
+def test_folge_prefix_dash_separator():
+    # The separator may be " - " (or " | ", " · "), not only ":".
+    r = enrich("SWR", "Westweg", "Folge 665 - Auf dem Westweg", "", 1500)
+    assert r["episode"] == 665
+    assert r["clean_title"] == "Auf dem Westweg"
+
+
+def test_episode_prefix_without_subtitle_clears_title():
+    # A bare "Episode N" (no subtitle) carries no episode title: capture N as the
+    # episode and leave clean_title empty (None) -- "Episode 684" is not a title.
+    r = enrich("ARD", "Rote Rosen", "Episode 684", "", 2700)
+    assert r["episode"] == 684
+    assert r["clean_title"] is None
+
+
+def test_folge_prefix_guard_sonderfolge_untouched():
+    # Guard: "Sonderfolge" starts with "S", not "Folge <digit>" -- not a prefix.
+    r = enrich("ARD", "Update", "Sonderfolge: Gespräch mit dem Mediziner", "", 1500)
+    assert r["episode"] is None
+    assert r["clean_title"] == "Sonderfolge: Gespräch mit dem Mediziner"
+
+
+def test_folge_prefix_guard_verb_and_compound_untouched():
+    # Guard: "Folge" as a verb (no number) and "Folger" (a substring) are never
+    # treated as the episode prefix.
+    r1 = enrich("ARD", "Doku", "Folge der Spur", "", 1500)
+    assert r1["episode"] is None and r1["clean_title"] == "Folge der Spur"
+    r2 = enrich("ARD", "Talk", 'Anne Folger: "Fußnoten"', "", 1500)
+    assert r2["episode"] is None and r2["clean_title"] == 'Anne Folger: "Fußnoten"'
+
+
 def test_episode_bare_part_of_total():
     r = enrich("ARD", "Doku", "Die Story 2/2", "", 3600)
     assert r["episode"] == 2
