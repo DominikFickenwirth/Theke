@@ -82,3 +82,55 @@ def test_detect_format_plaintext_is_unknown():
 
 def test_detect_format_malformed_xml_is_unknown():
     assert subtitle.detect_format("<tt><body><p>unclosed") == "unknown"
+
+
+# -- parse_ttml ---------------------------------------------------------------
+
+TTML_DOC = (
+    '<?xml version="1.0" encoding="utf-8"?>'
+    '<tt xmlns="http://www.w3.org/ns/ttml"'
+    ' xmlns:tts="http://www.w3.org/ns/ttml#styling"'
+    ' xmlns:ttp="http://www.w3.org/ns/ttml#parameter" ttp:frameRate="25">'
+    '<head><styling>'
+    '<style xml:id="s1" tts:fontStyle="italic"/>'
+    '<style xml:id="s2" tts:color="yellow"/>'
+    '</styling></head>'
+    '<body><div>'
+    '<p begin="00:00:01.000" end="00:00:03.000">Erste Zeile<br/>Zweite Zeile</p>'
+    '<p begin="00:00:04.000" end="00:00:06.000">Normal <span style="s1">kursiv</span> Ende</p>'
+    '<p begin="5s" end="8.5s"><span style="s2">Gelb</span></p>'
+    '</div></body></tt>'
+)
+
+
+def test_parse_ttml_cue_count_and_times():
+    doc = subtitle.parse_ttml(TTML_DOC)
+    assert len(doc.cues) == 3
+    assert (doc.cues[0].start, doc.cues[0].end) == (1.0, 3.0)
+    assert (doc.cues[2].start, doc.cues[2].end) == (5.0, 8.5)
+
+
+def test_parse_ttml_br_becomes_newline_run():
+    doc = subtitle.parse_ttml(TTML_DOC)
+    assert doc.cues[0].runs == [
+        subtitle.Run("Erste Zeile", subtitle.Style()),
+        subtitle.Run("\n", subtitle.Style()),
+        subtitle.Run("Zweite Zeile", subtitle.Style()),
+    ]
+
+
+def test_parse_ttml_inline_italic_span():
+    doc = subtitle.parse_ttml(TTML_DOC)
+    assert doc.cues[1].runs == [
+        subtitle.Run("Normal ", subtitle.Style()),
+        subtitle.Run("kursiv", subtitle.Style(italic=True)),
+        subtitle.Run(" Ende", subtitle.Style()),
+    ]
+
+
+def test_parse_ttml_referenced_style_colour():
+    doc = subtitle.parse_ttml(TTML_DOC)
+    # named "yellow" resolves to #FFFF00 (Ttml2Color table)
+    assert doc.cues[2].runs == [
+        subtitle.Run("Gelb", subtitle.Style(color="#FFFF00")),
+    ]
