@@ -134,6 +134,28 @@ def test_config_languages_wrong_type_is_error(tmp_path):
         load_config(str(path))
 
 
+def test_config_file_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.ffmpeg_path == "ffmpeg"
+    assert cfg.download_retries == 3
+
+
+def test_config_file_keys_from_file(tmp_path):
+    path = tmp_path / "f.json"
+    write_config(path, {"ffmpeg_path": "/opt/ffmpeg/ffmpeg", "download_retries": 5})
+    cfg = load_config(str(path))
+    assert cfg.ffmpeg_path == "/opt/ffmpeg/ffmpeg"
+    assert cfg.download_retries == 5
+
+
+def test_config_download_retries_wrong_type_is_error(tmp_path):
+    path = tmp_path / "fr.json"
+    write_config(path, {"download_retries": "3"})   # must be an int
+    with pytest.raises(ConfigError, match="download_retries"):
+        load_config(str(path))
+
+
 # -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [

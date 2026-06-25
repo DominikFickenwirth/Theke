@@ -22,6 +22,7 @@ from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CAT
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
+from theke.files import is_hls, download_file, download_hls, run_remux, move_file
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -52,6 +53,8 @@ class Config:
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     name_template:        str   = "{title} ({year})"
     fiction_topics:       list  = dataclasses.field(default_factory=list)
+    ffmpeg_path:          str   = "ffmpeg"
+    download_retries:     int   = 3
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
@@ -1365,6 +1368,40 @@ def cmd_config(cfg) -> dict:
     return dataclasses.asdict(cfg)
 
 
+# -- file (phases 6-8: download / remux / move) -------------------------------
+# Thin handlers over theke.files; queue-independent, no DB. Filesystem work and
+# the network/ffmpeg seams live in files.py.
+
+def cmd_file(cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a file action: download / remux / move (each on explicit paths)."""
+    match args.file_cmd:
+        case "download": return _file_download(cfg, args)
+        case "remux":    return _file_remux(cfg, args)
+        case "move":     return _file_move(cfg, args)
+        case _: raise DbError(f"unhandled file action: {args.file_cmd}")
+
+
+def _file_download(cfg, args) -> dict:
+    retries = cfg.download_retries if args.retries is None else args.retries
+    if is_hls(args.url):
+        action, nbytes, nsegs = download_hls(args.url, args.out, retries, cfg.ffmpeg_path)
+        result = {"action": action, "out": args.out, "bytes": nbytes}
+        if action == "hls":
+            result["segments"] = nsegs
+        return result
+    nbytes = download_file(args.url, args.out, retries)
+    return {"action": "download", "out": args.out, "bytes": nbytes}
+
+
+def _file_remux(cfg, args) -> dict:
+    run_remux(cfg.ffmpeg_path, args.in_path, args.mode, args.out, args.language)
+    return {"remux": args.mode, "out": args.out}
+
+
+def _file_move(cfg, args) -> dict:
+    return {"moved": move_file(args.in_path, args.out, args.force)}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="theke",       description="Self-hosted media manager for German public broadcasters")
     parser.add_argument("-c", "--config", metavar="PATH",      help=f"config file (default: {CONFIG_DEFAULT_PATH})")
@@ -1448,6 +1485,22 @@ def build_parser() -> argparse.ArgumentParser:
     qdel.add_argument("-d", "--done",         action="store_true", help="delete all done entries")
     qdel.add_argument("-f", "--failed",       action="store_true", help="delete all failed entries")
 
+    filep = sub.add_parser("file", help="download / remux / move a single file", description="Queue-independent file primitives driven by explicit URLs/paths: download a media URL (HTTP with Range-resume, or HLS segment assembly with an ffmpeg fallback), remux via ffmpeg (stream copy), or move a file. Progress is printed to stderr.")
+    fsub = filep.add_subparsers(dest="file_cmd", required=True, metavar="action")
+    fdl = fsub.add_parser("download", help="download a media URL to a local file", description="Download --url to --out. A '.m3u8' URL is assembled from its HLS segments (ffmpeg fallback when encrypted or assembly fails); anything else is a plain HTTP download that resumes a leftover '.part' via Range. Failed downloads retry.")
+    fdl.add_argument("-u", "--url",     required=True, metavar="URL",  help="media URL to download")
+    fdl.add_argument("-o", "--out",     required=True, metavar="PATH", help="output file path")
+    fdl.add_argument("-r", "--retries", type=int, metavar="N",         help="retry attempts on error (default: config download_retries)")
+    frx = fsub.add_parser("remux", help="remux a file via ffmpeg (stream copy)", description="Stream-copy --in into --out with ffmpeg (no transcoding). --mode picks what to keep: AV (audio+video), A (audio only), V (video only). --language tags the first audio track.")
+    frx.add_argument("-i", "--in",       dest="in_path", required=True, metavar="PATH",     help="input file path")
+    frx.add_argument("-m", "--mode",     required=True, choices=["AV", "A", "V"],            help="what to keep: AV (audio+video), A (audio), V (video)")
+    frx.add_argument("-o", "--out",      required=True, metavar="PATH",                      help="output file path")
+    frx.add_argument("-l", "--language", metavar="CODE",                                     help="set the audio track language tag (e.g. deu)")
+    fmv = fsub.add_parser("move", help="move a file into the library", description="Move --in to --out, creating parent directories. An existing destination is an error unless --force.")
+    fmv.add_argument("-i", "--in",    dest="in_path", required=True, metavar="PATH", help="source file path")
+    fmv.add_argument("-o", "--out",   required=True, metavar="PATH",                 help="destination file path")
+    fmv.add_argument("-f", "--force", action="store_true",                           help="overwrite an existing destination")
+
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
     _set_default_action(parser, "queue",  qsub, "list")
@@ -1521,6 +1574,8 @@ def main(argv=None) -> int:
         match args.command:
             case "config":
                 result = cmd_config(cfg)
+            case "file":
+                result = cmd_file(cfg, args)
             case "fetch":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_fetch(conn, cfg, args)
