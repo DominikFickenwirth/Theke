@@ -369,7 +369,7 @@ def test_default_action_untouched_for_commands_without_default():
 def test_cli_bare_enrich_dispatches_run(tmp_path, monkeypatch):
     import theke
     seen = {}
-    def fake_run(conn, args):
+    def fake_run(conn, cfg, args):
         seen["cmd"] = args.enrich_cmd
         return {"enriched": 0}
     monkeypatch.setattr(theke, "_enrich_run", fake_run)

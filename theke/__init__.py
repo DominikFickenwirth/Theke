@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD
+from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
@@ -51,6 +51,7 @@ class Config:
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     name_template:        str   = "{title} ({year})"
+    fiction_topics:       list  = dataclasses.field(default_factory=list)
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
@@ -581,7 +582,7 @@ def cmd_enrich(conn, cfg, args: argparse.Namespace) -> dict:
     """Dispatch a enrich action: `run` writes the enrich columns; the others
     (`report`/`audit`/`show`/`dist`) are read-only inspection tools."""
     match args.enrich_cmd:
-        case "run":    return _enrich_run(conn, args)
+        case "run":    return _enrich_run(conn, cfg, args)
         case "reset":  return _enrich_reset(conn, args)
         case "report": return _enrich_report_cmd(conn, args)
         case "audit":  return _enrich_audit_cmd(conn, args)
@@ -590,15 +591,16 @@ def cmd_enrich(conn, cfg, args: argparse.Namespace) -> dict:
         case _: raise DbError(f"unhandled enrich action: {args.enrich_cmd}")
 
 
-def _enrich_run(conn, args) -> dict:
+def _enrich_run(conn, cfg, args) -> dict:
     """Enrich mediathek rows into the enrich columns and flip status 0 -> 1.
     By default only unenriched rows (status '0'); --force reprocesses all."""
     sql = _ENRICH_READ if not args.force else _ENRICH_READ.replace(
         " WHERE status='0'", "")
+    fiction = FICTION_TOPICS | {t.casefold() for t in cfg.fiction_topics}
     log.info("enriching rows")
     conn.execute("BEGIN")
     try:
-        count = _enrich_rows(conn, conn.execute(sql))
+        count = _enrich_rows(conn, conn.execute(sql), fiction)
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -625,7 +627,7 @@ def _reset(conn, sets, where) -> dict:
     return {"reset": count}
 
 
-def _enrich_rows(conn, rows, batch=5000) -> int:
+def _enrich_rows(conn, rows, fiction_topics=FICTION_TOPICS, batch=5000) -> int:
     """Stream rows through enrich(), write updates in batches; log every 50k."""
     count = 0
     reported = 0
@@ -644,7 +646,7 @@ def _enrich_rows(conn, rows, batch=5000) -> int:
 
     for row in rows:
         meta = enrich(row["sender"], row["topic"], row["title"],
-                        row["description"], row["duration"])
+                        row["description"], row["duration"], fiction_topics)
         meta["mediathek_id"] = row["mediathek_id"]
         params.append(meta)
         if len(params) >= batch:

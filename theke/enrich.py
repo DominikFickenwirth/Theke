@@ -295,8 +295,12 @@ def _confidence(kat_src, category):
     return 0.2 if category is None else 0.5
 
 
-def enrich(sender, topic, title, description, duration) -> dict:
-    """A mediathek row -> extracted metadata dict (keys == ENRICH_COLS)."""
+def enrich(sender, topic, title, description, duration,
+            fiction_topics=FICTION_TOPICS) -> dict:
+    """A mediathek row -> extracted metadata dict (keys == ENRICH_COLS).
+
+    fiction_topics is the casefolded fiction-Reihe allowlist (built-in default;
+    the CLI passes the default unioned with config['fiction_topics'])."""
     t = title or ''; d = (description or '').strip(); tp = topic or ''
     flags = set()
     genres = set()
@@ -412,7 +416,7 @@ def enrich(sender, topic, title, description, duration) -> dict:
             if r['category'] in (None, 'Clip'):
                 r['category'] = 'Episode'; kat_src = 'episodic'
 
-    if r['category'] is None and tp.casefold() in FICTION_TOPICS:   # known fiction Reihe
+    if r['category'] is None and tp.casefold() in fiction_topics:   # known fiction Reihe
         r['category'] = 'Movie'; kat_src = 'topic-fiction'
 
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
