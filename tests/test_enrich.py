@@ -644,6 +644,23 @@ def test_non_fiction_feature_topic_stays_null():
     assert r["category"] is None
 
 
+def test_short_trailer_in_film_topic_is_clip_not_movie():
+    # A trailer in a film-rubric topic (Filme in der ARD -> Movie via FORMAT_TOPICS)
+    # is short and carries the T flag: a trailer is always a Clip, never a Movie.
+    r = enrich("ARD", "Filme in der ARD", "Trailer: Gladbeck", "", 123)
+    assert "T" in r["flags"]
+    assert r["category"] == "Clip"
+
+
+def test_long_trailer_themed_show_stays_episode():
+    # The trailer demotion is gated on a SHORT duration: a long-form show whose
+    # title merely mentions "Trailer" (a 25-min magazine about film trailers) keeps
+    # the T flag but is NOT demoted -- it stays its duration-prior medium (Episode).
+    r = enrich("ServusTV", "Trailer.AT", "Trailer.AT: Folge 6", "", 1559)
+    assert "T" in r["flags"]
+    assert r["category"] == "Episode"
+
+
 def test_fiction_topics_extendable_via_param():
     # The allowlist is configurable (it grows over time): a topic absent from the
     # built-in default stays NULL, but lifts to Movie when supplied via the
