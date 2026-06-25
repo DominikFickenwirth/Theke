@@ -392,6 +392,28 @@ UNCHANGED. ARTE NULL 55758 -> 7277 (the rest are >=1800s, deferred with the
 catalog-wide >=1800 question). category dist now: Episode 495259, Clip 113360,
 NULL 90779, Movie 9877, Event 158.
 
+## Round 15 -- a bare episode OR season number implies Episode  [DONE]
+
+The episodic lift required season AND episode together, so a row carrying only a
+running episode number ("Sturm der Liebe - Episode 332", "Folge 5", a "Teil N"
+marker) or only a season ("(Staffel 2)") fell through to the duration prior and,
+being feature-length, landed in NULL (4372 rows). A running episode/season number
+is itself a series signal.
+
+Fix: the episodic branch now fires on `season is not None OR episode is not None`
+(was AND). It still only fills a NULL/Clip medium, never overriding a Movie label,
+so a film-Reihe airing with a "Folge N" prefix keeps category Movie (consistent
+with the round-4 Sxx/Exx rule).
+
+GUARD (tested): a metazeile-labelled film with a "Folge 3" prefix stays Movie (the
+lift skips a non-NULL/Clip medium).
+
+Live-DB effect: 4372 NULL -> Episode; Clip -266 (short numbered series items ->
+Episode); Movie -2 (two fiction-topic airings that now expose an episode marker
+join their S/E siblings as Episode rather than being lifted to Movie by the
+round-5 NULL-only fiction rule -- more consistent, not less). category dist now:
+Episode 499899, Clip 113094, NULL 86407, Movie 9875, Event 158.
+
 ## Status after rounds 8-13
 
 clean_title / series_name are now substantially clean: leading "Folge/Episode N"

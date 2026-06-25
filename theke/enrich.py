@@ -473,17 +473,18 @@ def enrich(sender, topic, title, description, duration,
 
     # Episodic markers, by kind. A Mehrteiler "(n/m)" count is a serialized multi-
     # part work (Mehrteiler / miniseries) -> Episode, overriding even a
-    # "Fernsehfilm" label. An explicit Sxx/Exx is series numbering that fills an
-    # unknown/clip medium with Episode but does NOT override a Movie label: a
-    # feature-length film-reihe entry (Krimi-Reihe, Herzkino) keeps category Movie
-    # with its series_name, so enrich stays internally consistent where TMDB is
-    # not (Sarah Kohr = series, Rosamunde Pilcher = movies); match bridges the
-    # split later. Trailers (T) and live Events are untouched.
+    # "Fernsehfilm" label. Any other series numbering -- an Sxx/Exx, a bare running
+    # episode ("Folge/Episode N", a "Teil N" marker) or a bare season ("(Staffel
+    # N)") -- fills an unknown/clip medium with Episode but does NOT override a
+    # Movie label: a feature-length film-reihe entry (Krimi-Reihe, Herzkino) keeps
+    # category Movie with its series_name, so enrich stays internally consistent
+    # where TMDB is not (Sarah Kohr = series, Rosamunde Pilcher = movies); match
+    # bridges the split later. Trailers (T) and live Events are untouched.
     if 'T' not in flags and r['category'] != 'Event':
         if r['episode_count'] is not None:
             if r['category'] in (None, 'Movie', 'Clip'):
                 r['category'] = 'Episode'; kat_src = 'mehrteiler'
-        elif r['season'] is not None and r['episode'] is not None:
+        elif r['season'] is not None or r['episode'] is not None:
             if r['category'] in (None, 'Clip'):
                 r['category'] = 'Episode'; kat_src = 'episodic'
 
