@@ -83,7 +83,9 @@ von `enrich show` haben bewusst keines.)
 **stdout vs. stderr:** stdout trägt nur das Ergebnis (im `--json`-Modus das eine
 JSON-Objekt). Fortschritt und Diagnose laufen als Klartext (`-> ...`) über
 stderr -- eine lange Stufe bleibt sichtbar, ohne das parsebare Ergebnis zu
-verschmutzen.
+verschmutzen. Lange Übertragungen melden Fortschritt: Downloads (HTTP wie HLS)
+je 100 MiB eine Zeile (mit Prozent, wenn die Größe bekannt ist), ffmpeg-Läufe
+(remux, HLS-Fallback) alle 10 % der Mediendauer (`HH:MM:SS / HH:MM:SS (P%)`).
 
 **Präzedenz der Konfiguration:** CLI-Parameter > Konfigurationsdatei > Defaults.
 
