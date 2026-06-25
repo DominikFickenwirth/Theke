@@ -513,14 +513,59 @@ def test_run_ffmpeg_missing_binary_raises(tmp_path):
         run_ffmpeg(["this-ffmpeg-does-not-exist", "-version"])
 
 
-def test_run_ffmpeg_nonzero_exit_raises(monkeypatch):
-    class Proc:
-        returncode = 1
-        stderr = "boom line 1\nboom line 2\n"
+class FakePopen:
+    """Fake subprocess.Popen for run_ffmpeg: serves stderr_text as the process
+    stderr stream and returns returncode from wait()."""
 
-    monkeypatch.setattr(files.subprocess, "run", lambda *a, **k: Proc())
+    def __init__(self, stderr_text, returncode):
+        self.stderr = io.StringIO(stderr_text)
+        self._rc = returncode
+
+    def wait(self):
+        return self._rc
+
+
+def test_run_ffmpeg_nonzero_exit_raises(monkeypatch):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen("boom line 1\nboom line 2\n", 1))
     with pytest.raises(RuntimeError, match="ffmpeg failed"):
         run_ffmpeg(["ffmpeg", "-i", "x"])
+
+
+# ffmpeg writes its live stat lines with a carriage return (no newline) until the
+# run ends; the Duration line comes once up front. 40 s total, time= every 4 s.
+FFMPEG_STDERR = (
+    "ffmpeg version 6.0\n"
+    "  Duration: 00:00:40.00, start: 0.000000, bitrate: 1000 kb/s\n"
+    "frame=  100 q=-1.0 size=    1kB time=00:00:04.00 bitrate=2.0kbits/s\r"
+    "frame=  200 q=-1.0 size=    2kB time=00:00:08.00 bitrate=2.0kbits/s\r"
+    "frame=  300 q=-1.0 size=    3kB time=00:00:12.00 bitrate=2.0kbits/s\r"
+    "frame= 1000 q=-1.0 size=   10kB time=00:00:40.00 bitrate=2.0kbits/s\r"
+    "\n")
+
+
+def test_run_ffmpeg_logs_progress_from_duration_and_time(monkeypatch, caplog):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(FFMPEG_STDERR, 0))
+    caplog.set_level(logging.INFO, logger="theke")
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])           # label = out.mp4
+    # 40 s total -> 10% step is 4 s; times 4/8/12/40 s -> 10/20/30/100 percent
+    msgs = [r.getMessage() for r in caplog.records if "%" in r.getMessage()]
+    assert msgs == [
+        "out.mp4: 00:00:04 / 00:00:40 (10%)",
+        "out.mp4: 00:00:08 / 00:00:40 (20%)",
+        "out.mp4: 00:00:12 / 00:00:40 (30%)",
+        "out.mp4: 00:00:40 / 00:00:40 (100%)"]
+
+
+def test_run_ffmpeg_without_duration_logs_no_progress(monkeypatch, caplog):
+    stderr = ("frame=  100 time=00:00:04.00 bitrate=2.0kbits/s\r"
+              "frame=  200 time=00:00:08.00 bitrate=2.0kbits/s\r\n")
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(stderr, 0))
+    caplog.set_level(logging.INFO, logger="theke")
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])
+    assert [r.getMessage() for r in caplog.records if "%" in r.getMessage()] == []
 
 
 def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):
