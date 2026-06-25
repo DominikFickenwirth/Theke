@@ -6,6 +6,7 @@ needed). Sections: config / DB / CLI.
 
 import argparse
 import dataclasses
+import glob
 import hashlib
 import io
 import json
@@ -1208,6 +1209,7 @@ def cmd_queue(conn, cfg, args: argparse.Namespace) -> dict:
                             "A", "approved")
         case "cancel":  return _queue_set_status(conn, args, QUEUE_ACTIVE, "C", "cancelled")
         case "delete":  return _queue_delete(conn, args)
+        case "download": return _queue_download(conn, cfg, args)
         case _: raise DbError(f"unhandled queue action: {args.queue_cmd}")
 
 
@@ -1441,6 +1443,121 @@ def _queue_delete(conn, args) -> dict:
     return {"deleted": n}
 
 
+# -- queue download (phases 6-8: chained off the self-contained queue row) ----
+# The gated stage: for approved rows, run download -> remux -> move using only
+# the queue row (url/remux/language/url_subtitle/path). Each row downloads and
+# remuxes under a unique temp prefix (parallel-safe), moves to its stored path,
+# then drops its temp files. A failing row is marked 'failed' (with the error)
+# and never aborts the batch. The file primitives are the theke.files seams.
+
+# ffmpeg wants an ISO 639-2/B audio tag; map the common 2-letter codes, pass the
+# rest through (an unknown code is harmless metadata, not a failure).
+_LANG3 = {"de": "deu", "en": "eng", "fr": "fra", "es": "spa", "it": "ita",
+          "nl": "nld", "pl": "pol", "ru": "rus", "tr": "tur", "ar": "ara"}
+
+
+def _lang_tag(language):
+    """ISO 639-2 audio tag from the queue's language code (None when unset)."""
+    return _LANG3.get(language, language) if language else None
+
+
+def _subtitle_ext(url) -> str:
+    """Sidecar extension from a subtitle URL (default '.srt' when it carries none)."""
+    return os.path.splitext(urllib.parse.urlsplit(url).path)[1] or ".srt"
+
+
+def _queue_download(conn, cfg, args) -> dict:
+    """Run download -> remux -> move for the given approved ids, or every
+    approved row with --all. Only rows in 'approved' are eligible (the gate);
+    re-approve a failed row to retry it."""
+    if args.all and args.ids:
+        raise ValueError("give queue ids or --all, not both")
+    if not args.all and not args.ids:
+        raise ValueError("give queue ids or --all")
+    sql = "SELECT * FROM queue WHERE status='A'"
+    params = []
+    if not args.all:
+        sql += " AND id IN (" + ",".join("?" * len(args.ids)) + ")"
+        params = list(args.ids)
+    sql += " ORDER BY created_at, id"
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    totals = {"downloaded": 0, "failed": 0}
+    for row in rows:
+        _download_entry(conn, cfg, row, args.force, totals)
+    return totals
+
+
+def _download_entry(conn, cfg, row, force, totals):
+    """Process one approved row end to end under a unique temp prefix. Subtitles
+    are best-effort (a missing sidecar never fails the film)."""
+    _queue_status(conn, row["id"], QUEUE_STATUS["busy"], None)
+    tmpdir = cfg.temp_path or tempfile.gettempdir()
+    base = os.path.join(tmpdir, f"theke_{row['id']}_{uuid.uuid4().hex}")
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+        src = base + ".src"
+        _fetch(cfg, row["url"], src)
+        muxed = base + (os.path.splitext(row["path"])[1] or "." + cfg.video_ext)
+        run_remux(cfg.ffmpeg_path, src, row["remux"], muxed, _lang_tag(row["language"]))
+        move_file(muxed, row["path"], force)
+        if row["url_subtitle"]:
+            try:
+                _download_subtitle(cfg, row, base, force)
+            except Exception as exc:
+                log.warning("queue %s subtitle skipped: %s", row["id"], exc)
+        _cleanup(base)
+        _queue_status(conn, row["id"], QUEUE_STATUS["done"], None)
+        totals["downloaded"] += 1
+        log.info("queue %s done -> %s", row["id"], row["path"])
+    except Exception as exc:
+        _cleanup(base)
+        _queue_status(conn, row["id"], QUEUE_STATUS["failed"], str(exc))
+        totals["failed"] += 1
+        log.warning("queue %s failed: %s", row["id"], exc)
+
+
+def _fetch(cfg, url, out):
+    """Download a media URL to `out`, routing HLS playlists to the segment path."""
+    if is_hls(url):
+        download_hls(url, out, cfg.download_retries, cfg.ffmpeg_path)
+    else:
+        download_file(url, out, cfg.download_retries)
+
+
+def _download_subtitle(cfg, row, base, force):
+    """Fetch the subtitle to a sidecar next to the film (same stem as its path)."""
+    ext = _subtitle_ext(row["url_subtitle"])
+    tmp = base + ".sub" + ext
+    download_file(row["url_subtitle"], tmp, cfg.download_retries)
+    move_file(tmp, os.path.splitext(row["path"])[0] + ext, force)
+
+
+def _cleanup(base):
+    """Remove every temp artefact under the unique prefix (.src, the muxed file,
+    a leftover '.part'/'.segments', the subtitle temp). Best-effort."""
+    for path in glob.glob(glob.escape(base) + "*"):
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _queue_status(conn, queue_id, status, error):
+    """Set one queue row's status (+error) in its own transaction, so the long
+    filesystem work runs outside any open transaction."""
+    conn.execute("BEGIN")
+    try:
+        conn.execute("UPDATE queue SET status=?, error=?, updated_at=? WHERE id=?",
+                     (status, error, _now(), queue_id))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def _print_queue(rows):
     """One header line + one line per entry to stdout (the result)."""
     print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
@@ -1587,6 +1704,10 @@ def build_parser() -> argparse.ArgumentParser:
     qdel.add_argument("-c", "--cancelled",    action="store_true", help="delete all cancelled entries")
     qdel.add_argument("-d", "--done",         action="store_true", help="delete all done entries")
     qdel.add_argument("-f", "--failed",       action="store_true", help="delete all failed entries")
+    qdl = qsub.add_parser("download", help="download/remux/move approved entries", description="Run the download -> remux -> move pipeline for approved entries, driven entirely by the queue row (url/remux/language/url_subtitle/path). Each row works under a unique temp prefix and lands at its stored path; temp files are removed afterwards. A failing row is marked 'failed' and does not abort the batch. Give queue ids or --all. Progress is printed to stderr.")
+    qdl.add_argument("ids",             nargs="*", type=int, metavar="ID", help="approved queue entry ids to download")
+    qdl.add_argument("-a", "--all",           action="store_true", help="download every approved entry")
+    qdl.add_argument("-f", "--force",         action="store_true", help="overwrite an existing destination file")
 
     filep = sub.add_parser("file", help="download / remux / move a single file", description="Queue-independent file primitives driven by explicit URLs/paths: download a media URL (HTTP with Range-resume, or HLS segment assembly with an ffmpeg fallback), remux via ffmpeg (stream copy), or move a file. Progress is printed to stderr.")
     fsub = filep.add_subparsers(dest="file_cmd", required=True, metavar="action")

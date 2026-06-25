@@ -796,8 +796,9 @@ def _fake_remux(ffmpeg_path, in_path, mode, out_path, language=None):
 
 def download_cfg(tmp_path, **kw):
     lib = (tmp_path / "lib").as_posix() + "/{Title} ({Year})/{Title} ({Year}).mp4"
-    return Config(tmdb_api_key="KEY", languages=["de"],
-                  temp_path=str(tmp_path / "scratch"), library_path=lib, **kw)
+    kw.setdefault("languages", ["de"])
+    return Config(tmdb_api_key="KEY", temp_path=str(tmp_path / "scratch"),
+                  library_path=lib, **kw)
 
 
 def insert_local(conn, mediathek_id, clean_title, **kw):
@@ -833,7 +834,7 @@ def test_queue_download_audio_only_remux_mode(tmp_path, monkeypatch):
     seen = {}
 
     def remux(ffmpeg_path, in_path, mode, out_path, language=None):
-        seen[os.path.basename(out_path)] = (mode, language)
+        seen[mode] = (language, os.path.splitext(out_path)[1])   # tag + temp ext
         with open(out_path, "wb") as fh:
             fh.write(b"MUX")
         return 3
@@ -849,9 +850,12 @@ def test_queue_download_audio_only_remux_mode(tmp_path, monkeypatch):
         conn.execute("UPDATE queue SET status='A'")
         result = cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
         assert result == {"downloaded": 2, "failed": 0}
-        # de -> AV mp4 tagged deu; fr -> A aac tagged fra
-        assert seen["Mein Film (2020).mp4"] == ("AV", "deu")
-        assert seen["Mein Film (2020).fr.aac"] == ("A", "fra")
+        # de -> AV remux tagged deu into a .mp4; fr -> A remux tagged fra into a .aac
+        assert seen["AV"] == ("deu", ".mp4")
+        assert seen["A"] == ("fra", ".aac")
+        lib = (tmp_path / "lib") / "Mein Film (2020)"
+        assert (lib / "Mein Film (2020).mp4").is_file()      # anchor video
+        assert (lib / "Mein Film (2020).fr.aac").is_file()   # fr audio sidecar
     finally:
         conn.close()
 
