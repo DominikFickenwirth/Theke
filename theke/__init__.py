@@ -1453,7 +1453,8 @@ def _queue_delete(conn, args) -> dict:
 # ffmpeg wants an ISO 639-2/B audio tag; map the common 2-letter codes, pass the
 # rest through (an unknown code is harmless metadata, not a failure).
 _LANG3 = {"de": "deu", "en": "eng", "fr": "fra", "es": "spa", "it": "ita",
-          "nl": "nld", "pl": "pol", "ru": "rus", "tr": "tur", "ar": "ara"}
+          "nl": "nld", "pl": "pol", "ru": "rus", "tr": "tur", "ar": "ara",
+          "pt": "por"}
 
 
 def _lang_tag(language):
