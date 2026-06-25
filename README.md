@@ -503,33 +503,33 @@ theke file download --url https://.../master.m3u8 --out build/film.ts
 
 ### `file remux`
 
-Stream-Copy von `--in` nach `--out` via ffmpeg (kein Transcoding). `--remux`
+Stream-Copy von `--in` nach `--out` via ffmpeg (kein Transcoding). `--mode`
 bestimmt, was übernommen wird: `AV` (Audio+Video), `A` (nur Audio), `V` (nur
 Video). `--language` setzt den Sprach-Tag der ersten Audiospur.
 
 | Option                 | Wirkung                                                |
 | ---------------------- | ------------------------------------------------------ |
 | `-i`, `--in PATH`      | Eingabedatei.                                          |
-| `-m`, `--remux MODE`   | Was übernehmen: `AV`, `A` (nur Audio), `V` (nur Video).|
+| `-m`, `--mode MODE`    | Was übernehmen: `AV`, `A` (nur Audio), `V` (nur Video).|
 | `-o`, `--out PATH`     | Ausgabedatei (Endung bestimmt den Container).          |
 | `-l`, `--language CODE`| Sprach-Tag der ersten Audiospur (z. B. `deu`).         |
 
 ```powershell
-theke file remux --in build/film.ts --remux AV --out build/film.mp4
-theke file remux --in build/film.ts --remux A --language fra --out build/film.aac
+theke file remux --in build/film.ts --mode AV --out build/film.mp4
+theke file remux --in build/film.ts --mode A --language fra --out build/film.aac
 ```
 
 ### `file move`
 
-Verschiebt `--src` nach `--dst` und legt fehlende Zielverzeichnisse an. Ein
+Verschiebt `--in` nach `--out` und legt fehlende Zielverzeichnisse an. Ein
 vorhandenes Ziel ist ein Fehler, außer mit `--force` (dann wird es ersetzt).
 
 | Option            | Wirkung                                |
 | ----------------- | -------------------------------------- |
-| `-s`, `--src PATH`| Quelldatei.                            |
-| `-d`, `--dst PATH`| Zieldatei.                             |
+| `-i`, `--in PATH` | Quelldatei.                            |
+| `-o`, `--out PATH`| Zieldatei.                             |
 | `-f`, `--force`   | Vorhandenes Ziel überschreiben.        |
 
 ```powershell
-theke file move --src build/film.mp4 --dst "M:/Filme/Film (2020)/Film (2020).mp4"
+theke file move --in build/film.mp4 --out "M:/Filme/Film (2020)/Film (2020).mp4"
 ```

@@ -1394,12 +1394,12 @@ def _file_download(cfg, args) -> dict:
 
 
 def _file_remux(cfg, args) -> dict:
-    run_remux(cfg.ffmpeg_path, args.in_path, args.remux, args.out, args.language)
-    return {"remux": args.remux, "out": args.out}
+    run_remux(cfg.ffmpeg_path, args.in_path, args.mode, args.out, args.language)
+    return {"remux": args.mode, "out": args.out}
 
 
 def _file_move(cfg, args) -> dict:
-    return {"moved": move_file(args.src, args.dst, args.force)}
+    return {"moved": move_file(args.in_path, args.out, args.force)}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1491,15 +1491,15 @@ def build_parser() -> argparse.ArgumentParser:
     fdl.add_argument("-u", "--url",     required=True, metavar="URL",  help="media URL to download")
     fdl.add_argument("-o", "--out",     required=True, metavar="PATH", help="output file path")
     fdl.add_argument("-r", "--retries", type=int, metavar="N",         help="retry attempts on error (default: config download_retries)")
-    frx = fsub.add_parser("remux", help="remux a file via ffmpeg (stream copy)", description="Stream-copy --in into --out with ffmpeg (no transcoding). --remux picks what to keep: AV (audio+video), A (audio only), V (video only). --language tags the first audio track.")
+    frx = fsub.add_parser("remux", help="remux a file via ffmpeg (stream copy)", description="Stream-copy --in into --out with ffmpeg (no transcoding). --mode picks what to keep: AV (audio+video), A (audio only), V (video only). --language tags the first audio track.")
     frx.add_argument("-i", "--in",       dest="in_path", required=True, metavar="PATH",     help="input file path")
-    frx.add_argument("-m", "--remux",    required=True, choices=["AV", "A", "V"],            help="what to keep: AV (audio+video), A (audio), V (video)")
+    frx.add_argument("-m", "--mode",     required=True, choices=["AV", "A", "V"],            help="what to keep: AV (audio+video), A (audio), V (video)")
     frx.add_argument("-o", "--out",      required=True, metavar="PATH",                      help="output file path")
     frx.add_argument("-l", "--language", metavar="CODE",                                     help="set the audio track language tag (e.g. deu)")
-    fmv = fsub.add_parser("move", help="move a file into the library", description="Move --src to --dst, creating parent directories. An existing destination is an error unless --force.")
-    fmv.add_argument("-s", "--src",   required=True, metavar="PATH", help="source file path")
-    fmv.add_argument("-d", "--dst",   required=True, metavar="PATH", help="destination file path")
-    fmv.add_argument("-f", "--force", action="store_true",          help="overwrite an existing destination")
+    fmv = fsub.add_parser("move", help="move a file into the library", description="Move --in to --out, creating parent directories. An existing destination is an error unless --force.")
+    fmv.add_argument("-i", "--in",    dest="in_path", required=True, metavar="PATH", help="source file path")
+    fmv.add_argument("-o", "--out",   required=True, metavar="PATH",                 help="destination file path")
+    fmv.add_argument("-f", "--force", action="store_true",                           help="overwrite an existing destination")
 
     _set_default_action(parser, "enrich", csub, "run")
     _set_default_action(parser, "match",  msub, "run")
