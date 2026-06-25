@@ -184,7 +184,12 @@ def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
     log.info("remuxing %s -> %s (%s)", os.path.basename(in_path),
              os.path.basename(out_path), mode)
     _ensure_parent(out_path)
-    run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
+    try:
+        run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
+    except Exception:
+        if os.path.exists(out_path):   # drop the partial/faulty target ffmpeg left
+            os.remove(out_path)
+        raise
     return os.path.getsize(out_path)
 
 
