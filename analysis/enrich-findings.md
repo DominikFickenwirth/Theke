@@ -93,3 +93,38 @@ Residual inconsistency (deferred to match, see analysis/match-notes.md):
 a film-reihe splits across Movie/Episode by whether each airing carried the
 "Krimi/Fernsehfilm" metazeile (e.g. Sarah Kohr: 2 Movie vs 26 Episode).
 series_name is consistent across all of them, so match can regroup.
+
+## Round 5 -- fiction-topic allowlist lifts NULL -> Movie  [DONE]
+
+The documented "feature-length crime fiction stuck in NULL" loss (Tatort etc.)
+is recovered IN enrich (not deferred to match): per the user's convention
+(film-reihen = Movie with series_name), a Reihe should be one consistent medium.
+
+Many airings of a crime-/TV-film Reihe carry NO film metazeile, so they fell to
+the duration prior and, being feature-length (>1800s), landed in NULL. Sampled
+the Tatort NULL bucket: 579 rows 60-90 min, 89 rows >90 min, 4 rows 30-60 min --
+all genuine ~90 min crime films, no making-of/interview noise.
+
+Fix: a FICTION_TOPICS allowlist; when category is still NULL after all other
+passes and the topic is a known fiction Reihe (and not a trailer), -> Movie,
+kat_src 'topic-fiction' (confidence 0.5). Fires ONLY on NULL, so it never
+overrides Episode (Sxx/Exx) or Clip (trailer) -- the per-airing scatter inside a
+Reihe is left for match to regroup via series_name (unchanged from round 4).
+
+Allowlist derivation (data-driven, the safety net): every topic in the set
+already produces >=8 metazeile-labelled Movie rows in the live DB. A film label
+("Spielfilm/Fernsehfilm/Krimi/...") never appears on talk/news/sports, so this
+threshold cannot admit non-fiction. 44 topics qualify (Tatort 511 Movie,
+Polizeiruf 110 42, Der Usedom-Krimi 85, Donna Leon 60, Praxis mit Meerblick 149,
+the named Krimi-/Herzkino-Reihen, plus a few generic film SLOTS like "Filme im
+Ersten"). Configurable: config['fiction_topics'] (casefolded) is unioned with the
+built-in default, since the brand list changes over time.
+
+Live-DB effect: exactly 1328 transitions, ALL NULL->Movie, no other transition
+(verified by joining the pre/post re-enrich snapshots on mediathek_id). Movie
+8723 -> 10051, NULL 112254 -> 110926. Zero regressions.
+
+Known remaining (minor): the generic film SLOTS in the set (Filme im Ersten,
+FilmMittwoch im Ersten, Spielfilm in 3sat, ...) keep series_name = slot name; a
+later cleanup could route them via FORMAT_TOPICS for a NULL series_name. Lifted
+"Dokumentarfilmzeit" rows get no Documentary genre (the metazeile ones do).

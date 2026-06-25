@@ -143,6 +143,15 @@ theke --db build/theke.db enrich run            # enriched = N
 theke --db build/theke.db enrich run --force    # alles neu
 ```
 
+Bekannte Spielfilm-/Krimi-Reihen-Topics (Tatort, Polizeiruf 110, die benannten
+Krimi-/Fernsehfilm-Reihen) heben eine sonst leere `category` auf `Movie` an, damit
+eine Reihe einheitlich bleibt -- auch Ausstrahlungen ohne Film-Metazeile. Die
+eingebaute Liste ist über die Konfiguration erweiterbar:
+
+| Schlüssel        | Wirkung                                                            |
+| ---------------- | ----------------------------------------------------------------- |
+| `fiction_topics` | Zusätzliche Reihen-Topics (Liste), ergänzen die eingebaute Liste (Std. `[]`). |
+
 `flags` ist ein sortierter Buchstaben-String: `A` Audiodeskription, `E` Einfache/
 Leichte Sprache, `S` Gebärdensprache, `U` eingebrannte Untertitel, `T`
 Trailer/Vorschau.

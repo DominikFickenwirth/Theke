@@ -42,15 +42,23 @@ airings carry the "Krimi/Fernsehfilm" metazeile. So a series splits, e.g.:
 - "Der Bozen-Krimi": 71 Movie vs 4 Episode vs 2 Clip
 `series_name` IS set consistently across all of them, so match can regroup.
 
-Worst offenders are the famous crime-film series, scattered across all four
-media by per-airing labelling (live DB):
-- "Tatort":         672 None / 511 Movie / 181 Episode / 166 Clip
-- "Polizeiruf 110": 140 None /  42 Movie /  33 Episode /  21 Clip
-- "Krimi und Thriller" slot None bucket = 192 feature-length crime films
-  (Donna Leon, Usedom-Krimi, Blind ermittelt, Mordkommission Istanbul, ...).
-The None rows are the real loss: feature-length crime fiction invisible to any
-category-gated search. enrich cannot lift them per-row -- a 88-min None with no
-label is indistinguishable from a long talk show without cross-row context.
+Worst offenders are the famous crime-film series, scattered across media by
+per-airing labelling. UPDATE (enrich round 5): the NULL bucket of KNOWN fiction
+Reihen is now lifted to Movie in enrich (FICTION_TOPICS allowlist, topics with
+>=8 metazeile-Movie rows), so e.g. Tatort is now ~1183 Movie / 181 Episode /
+166 Clip instead of 511 Movie / 672 None / ... The remaining split that match
+must bridge is Movie vs Episode (the Episode rows carry Sxx/Exx without a film
+label; round 4 keeps those Episode):
+- "Tatort":         Movie (labelled + lifted) vs 181 Episode vs 166 Clip
+- "Polizeiruf 110": Movie (labelled + lifted) vs  33 Episode vs  21 Clip
+
+Still NOT lifted (the residual real loss): feature-length crime fiction under a
+generic SLOT topic that is NOT a specific brand, e.g. the "Krimi und Thriller"
+slot NULL bucket (~192 films: Donna Leon airings filed under the slot, Blind
+ermittelt, ...). enrich cannot lift those per-row -- a slot-labelled 88-min NULL
+is indistinguishable from a long talk show without cross-row context. match must
+still consider NULL rows whose series_name/clean_title match a feature-length
+fiction id.
 
 ## What `match` must do (bridging logic)
 
