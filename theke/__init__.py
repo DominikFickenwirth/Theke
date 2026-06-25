@@ -11,10 +11,15 @@ import io
 import json
 import logging
 import lzma
+import os
 import re
+import shutil
 import sqlite3
 import sys
+import tempfile
+import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
@@ -55,6 +60,10 @@ class Config:
     fiction_topics:       list  = dataclasses.field(default_factory=list)
     ffmpeg_path:          str   = "ffmpeg"
     download_retries:     int   = 3
+    temp_path:            str   = ""
+    video_ext:            str   = "mp4"
+    audio_ext:            str   = "aac"
+    library_path:         str   = "movies/{Title} ({Year})/{Title} ({Year}).mp4"
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
@@ -168,6 +177,13 @@ MIGRATIONS: list[tuple[str, ...]] = [
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL
         )""",
+    ),
+    (  # phase 6-8: everything queue download needs, resolved at add time so the
+       # row is self-contained (no mediathek/config lookup at download): the
+       # source media url, the subtitle url, and the full library destination.
+        "ALTER TABLE queue ADD COLUMN url          TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE queue ADD COLUMN url_subtitle TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE queue ADD COLUMN path         TEXT NOT NULL DEFAULT ''",
     ),
 ]
 
@@ -1201,17 +1217,19 @@ def _queue_add(conn, cfg, args) -> dict:
     set; `--mediathek-id` queues one row directly ('AV'). New entries are
     'proposed' unless queue_auto_approve is set. A mediathek_id already queued in
     an active state (proposed/approved/busy) is skipped; a terminal one does not
-    block a re-queue. `deduplicated` counts the source rows collapsed or filtered."""
+    block a re-queue. `deduplicated` counts the source rows collapsed or filtered.
+    Per-row columns (url/path/name/...) are CLI-overridable via _queue_overrides."""
     if not args.tmdb and not args.mediathek_id:
         raise ValueError("queue add needs --tmdb or --mediathek-id")
     status = QUEUE_STATUS["approved"] if cfg.queue_auto_approve else QUEUE_STATUS["proposed"]
+    overrides = _queue_overrides(args)
     totals = {"queued": 0, "skipped": 0, "deduplicated": 0}
     conn.execute("BEGIN")
     try:
         for tid in args.tmdb or []:
-            _queue_add_tmdb(conn, cfg, str(tid), status, totals)
+            _queue_add_tmdb(conn, cfg, str(tid), status, overrides, totals)
         for mid in args.mediathek_id or []:
-            _queue_add_mediathek(conn, cfg, mid, status, totals)
+            _queue_add_mediathek(conn, cfg, mid, status, overrides, totals)
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -1219,24 +1237,42 @@ def _queue_add(conn, cfg, args) -> dict:
     return totals
 
 
-def _queue_add_tmdb(conn, cfg, tmdb_id, status, totals):
-    """Queue the deduplicated download set of one matched film."""
+_QUEUE_OVERRIDE_COLS = ("name", "language", "resolution", "remux", "url",
+                        "path", "url_subtitle")
+
+
+def _queue_overrides(args) -> dict:
+    """The queue columns explicitly overridden on the CLI (None = not given);
+    applied verbatim over the computed values, so a manual escape hatch."""
+    return {c: getattr(args, c) for c in _QUEUE_OVERRIDE_COLS
+            if getattr(args, c, None) is not None}
+
+
+def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
+    """Queue the deduplicated download set of one matched film. The first pick is
+    the anchor (best resolution, primary library name); the rest carry a language
+    infix in their path."""
     if not cfg.tmdb_api_key:
         raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
     meta = tmdb_movie(cfg, tmdb_id)
     name = _queue_name(cfg, meta["title"], meta["year"])
-    rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM mediathek WHERE status='2' AND tmdb_id=?", (tmdb_id,))]
-    picks = select_downloads(rows, cfg.languages, meta["original_language"])
+    fields = _path_fields(meta["title"], meta["year"])
+    rows = {r["mediathek_id"]: dict(r) for r in conn.execute(
+        "SELECT * FROM mediathek WHERE status='2' AND tmdb_id=?", (tmdb_id,))}
+    picks = select_downloads(list(rows.values()), cfg.languages, meta["original_language"])
     totals["deduplicated"] += len(rows) - len(picks)
-    for p in picks:
-        _queue_insert(conn, status, p["mediathek_id"], tmdb_id, name,
-                      p["language"], p["resolution"], p["remux"], totals)
+    for i, p in enumerate(picks):
+        src = rows[p["mediathek_id"]]
+        row = _queue_row(status, p["mediathek_id"], tmdb_id, name, p["language"],
+                         p["resolution"], p["remux"], src,
+                         _library_path(cfg, fields, p["language"], p["remux"], i == 0))
+        _queue_insert(conn, row, overrides, totals)
 
 
-def _queue_add_mediathek(conn, cfg, mediathek_id, status, totals):
-    """Queue one mediathek row directly (manual pick, no dedup, full 'AV'). Uses
-    the TMDB name when the row is matched and a key is set, else its clean_title."""
+def _queue_add_mediathek(conn, cfg, mediathek_id, status, overrides, totals):
+    """Queue one mediathek row directly (manual pick, no dedup, full 'AV', primary
+    name). Uses the TMDB title/year when the row is matched and a key is set, else
+    its enriched clean_title/series_name/season/episode."""
     r = conn.execute("SELECT * FROM mediathek WHERE mediathek_id=?",
                      (mediathek_id,)).fetchone()
     if r is None:
@@ -1245,13 +1281,35 @@ def _queue_add_mediathek(conn, cfg, mediathek_id, status, totals):
     tmdb_id, language = r["tmdb_id"] or "", r["language"]
     if tmdb_id and cfg.tmdb_api_key:
         meta = tmdb_movie(cfg, tmdb_id)
-        name = _queue_name(cfg, meta["title"], meta["year"])
+        title, year = meta["title"], meta["year"]
         if language == "ov":
             language = meta["original_language"]
     else:
-        name = _queue_name(cfg, r["clean_title"], r["year"])
-    _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
-                  resolution_of(r), "AV", totals)
+        title, year = r["clean_title"], r["year"]
+    name = _queue_name(cfg, title, year)
+    fields = _path_fields(title, year, r["series_name"], r["season"], r["episode"])
+    resolution = resolution_of(r)
+    row = _queue_row(status, mediathek_id, tmdb_id, name, language, resolution,
+                     "AV", r, _library_path(cfg, fields, language, "AV", True))
+    _queue_insert(conn, row, overrides, totals)
+
+
+_RES_URL = {"HD": "url_video_hd", "SD": "url_video", "LQ": "url_video_small"}
+
+
+def _media_url(row, resolution) -> str:
+    """Source media url for the chosen resolution, falling back to any present."""
+    return (row.get(_RES_URL[resolution]) or row.get("url_video")
+            or row.get("url_video_small") or "")
+
+
+def _queue_row(status, mediathek_id, tmdb_id, name, language, resolution,
+               remux, src, path) -> dict:
+    """Assemble one queue column dict from a pick + its mediathek source row."""
+    return {"status": status, "mediathek_id": mediathek_id, "tmdb_id": tmdb_id,
+            "name": name, "language": language, "resolution": resolution,
+            "remux": remux, "url": _media_url(src, resolution),
+            "url_subtitle": src.get("url_subtitle") or "", "path": path}
 
 
 def _queue_name(cfg, title, year) -> str:
@@ -1260,20 +1318,58 @@ def _queue_name(cfg, title, year) -> str:
     return cfg.name_template.format(title=title or "", year=year if year is not None else "")
 
 
-def _queue_insert(conn, status, mediathek_id, tmdb_id, name, language,
-                  resolution, remux, totals):
-    """Insert one queue row unless the mediathek_id is already queued active."""
+def _path_fields(title, year, series=None, season=None, episode=None) -> dict:
+    """The placeholder values for the library_path template. Series/Season/Episode
+    are reserved for the (later) series layout; for movies they render empty."""
+    return {"Title": title, "Year": year, "Series": series,
+            "Season": season, "Episode": episode}
+
+
+def _render_template(template, fields) -> str:
+    """Substitute {Placeholder} (case-insensitive) from `fields`. An optional
+    ':N' zero-pads an integer to N digits ({Season:2} -> '03'). None/empty values
+    render empty (never 'None'); an unknown placeholder is an error (typo guard)."""
+    lookup = {k.casefold(): v for k, v in fields.items()}
+
+    def repl(match):
+        key, width = match.group(1).casefold(), match.group(2)
+        if key not in lookup:
+            raise KeyError(f"unknown template placeholder: {match.group(1)}")
+        value = lookup[key]
+        if value is None or value == "":
+            return ""
+        return f"{int(value):0{int(width)}d}" if width else str(value)
+
+    return re.sub(r"\{([A-Za-z_]+)(?::(\d+))?\}", repl, template)
+
+
+def _library_path(cfg, fields, language, remux, primary) -> str:
+    """Resolve the full library destination for one queue row: render the
+    configured template, drop its extension and re-apply video_ext (or audio_ext
+    for audio-only rows). Non-anchor picks get a '.<language>' infix so several
+    language variants of one film coexist in the same folder."""
+    stem = os.path.splitext(_render_template(cfg.library_path, fields))[0]
+    ext = cfg.audio_ext if remux == "A" else cfg.video_ext
+    infix = "" if primary else f".{language}"
+    return f"{stem}{infix}.{ext}"
+
+
+def _queue_insert(conn, row, overrides, totals):
+    """Insert one queue column dict unless its mediathek_id is already queued
+    active. CLI overrides replace computed columns last; the timestamps are set
+    here so an override can never forge them."""
+    row = {**row, **overrides}
     actives = "(" + ",".join("?" * len(QUEUE_ACTIVE)) + ")"
     if conn.execute(f"SELECT 1 FROM queue WHERE mediathek_id=? AND status IN "
-                    f"{actives}", (mediathek_id, *QUEUE_ACTIVE)).fetchone():
+                    f"{actives}", (row["mediathek_id"], *QUEUE_ACTIVE)).fetchone():
         totals["skipped"] += 1
         return
     ts = _now()
-    conn.execute("INSERT INTO queue (status, mediathek_id, tmdb_id, name, "
-                 "language, resolution, remux, created_at, updated_at) "
-                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                 (status, mediathek_id, tmdb_id, name, language, resolution,
-                  remux, ts, ts))
+    cols = ["status", "mediathek_id", "tmdb_id", "name", "language", "resolution",
+            "remux", "url", "url_subtitle", "path", "created_at", "updated_at"]
+    row = {**row, "created_at": ts, "updated_at": ts}
+    conn.execute(f"INSERT INTO queue ({', '.join(cols)}) VALUES "
+                 f"({', '.join(':' + c for c in cols)})", row)
     totals["queued"] += 1
 
 
@@ -1469,6 +1565,13 @@ def build_parser() -> argparse.ArgumentParser:
     qadd = qsub.add_parser("add", help="stage downloads by tmdb_id or mediathek_id", description="Stage downloads. --tmdb dedups a matched film's many rows to the minimal download set (best quality per whitelisted language, shared video flagged for remux); --mediathek-id queues one row directly. New entries are 'proposed' unless queue_auto_approve is set.")
     qadd.add_argument("-t", "--tmdb",         action="append", metavar="ID", help="TMDB id to stage, deduplicated (repeatable)")
     qadd.add_argument("-m", "--mediathek-id", action="append", metavar="ID", help="mediathek_id to stage directly (repeatable)")
+    qadd.add_argument(      "--name",         metavar="NAME",                help="override the library filename stem")
+    qadd.add_argument(      "--language",     metavar="CODE",                help="override the audio language code")
+    qadd.add_argument(      "--resolution",  choices=["HD", "SD", "LQ"],     help="override the video resolution tier")
+    qadd.add_argument(      "--remux",       choices=["AV", "A", "V"],       help="override the remux mode")
+    qadd.add_argument(      "--url",          metavar="URL",                 help="override the source media URL")
+    qadd.add_argument(      "--url-subtitle", metavar="URL",                 help="override the subtitle URL")
+    qadd.add_argument(      "--path",         metavar="PATH",                help="override the target library path")
     qlst = qsub.add_parser("list", help="list queue entries (default)", description="List queue entries, newest creation last. Filter by lifecycle state with --status.")
     qlst.add_argument("-s", "--status",       choices=list(QUEUE_STATUS), metavar="STATE", help="filter by state: " + ", ".join(QUEUE_STATUS))
     qapp = qsub.add_parser("approve", help="approve proposed entries for download", description="Move proposed entries to approved (the gate to download). Give queue ids or --all. With --force, re-approve entries in any state (e.g. cancelled or done).")

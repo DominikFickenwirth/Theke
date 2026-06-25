@@ -388,13 +388,34 @@ def test_queue_add_library_path_placeholders_case_insensitive(tmp_path, monkeypa
     conn = open_db(tmp_path)
     try:
         cfg = Config(tmdb_api_key="KEY", languages=["de"],
-                     library_path="x/{TITLE}/{name}.{year}.mp4")
+                     library_path="x/{TITLE}/{Title} ({YEAR}).mp4")
         insert_mediathek(conn, "m_de", language="de")
         cmd_queue(conn, cfg, qargs(tmdb=["100"]))
-        # {TITLE}=Mein Film, {name}=Mein Film (2020), {year}=2020; ext re-applied
-        assert queue_rows(conn)[0]["path"] == "x/Mein Film/Mein Film (2020).2020.mp4"
+        # {TITLE}/{Title}=Mein Film, {YEAR}=2020; placeholders are case-insensitive
+        assert queue_rows(conn)[0]["path"] == "x/Mein Film/Mein Film (2020).mp4"
     finally:
         conn.close()
+
+
+def test_render_template_movie_and_series_placeholders():
+    from theke import _render_template
+    # movie fields; Series/Season/Episode render empty (None)
+    movie = {"Title": "Mein Film", "Year": 2020, "Series": None,
+             "Season": None, "Episode": None}
+    assert _render_template("{title} ({year})", movie) == "Mein Film (2020)"
+    # series fields with ':N' zero-padding (2-digit), case-insensitive keys
+    series = {"Title": "Pilot", "Year": 2021, "Series": "My Show",
+              "Season": 3, "Episode": 7}
+    out = _render_template(
+        "series/{Series} ({Year})/Season {Season:2}/"
+        "{series} S{SEASON:2}E{episode:2} {Title}.mp4", series)
+    assert out == "series/My Show (2021)/Season 03/My Show S03E07 Pilot.mp4"
+
+
+def test_render_template_unknown_placeholder_raises():
+    from theke import _render_template
+    with pytest.raises(KeyError, match="bogus"):
+        _render_template("{bogus}", {"Title": "X"})
 
 
 def test_queue_add_custom_extensions(tmp_path, monkeypatch):
