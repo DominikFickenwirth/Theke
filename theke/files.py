@@ -19,6 +19,7 @@ import theke   # for http_get, resolved at call time (avoids an import cycle)
 log = logging.getLogger("theke")
 
 CHUNK = 1 << 16   # 64 KiB streaming buffer
+PROGRESS_BYTES = 100 << 20   # emit a transfer-progress line every 100 MiB
 
 
 def _ensure_parent(path) -> None:
@@ -26,6 +27,39 @@ def _ensure_parent(path) -> None:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+
+# -- transfer progress --------------------------------------------------------
+
+def _content_length(reader):
+    """Total byte length advertised by a urllib response, or None when absent
+    (chunked stream, or a test BytesIO with no getheader)."""
+    try:
+        return int(reader.getheader("Content-Length"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+class _Progress:
+    """Throttled byte-transfer reporter: logs a '-> label: ...' line each time the
+    running byte count crosses a PROGRESS_BYTES milestone (with a percent when the
+    total is known). Read PROGRESS_BYTES off the module so tests can shrink it."""
+
+    def __init__(self, label, total):
+        self.label = label
+        self.total = total                  # bytes, or None when unknown
+        self.next = PROGRESS_BYTES          # next milestone to announce
+
+    def update(self, done):
+        if done < self.next:
+            return
+        mib = done / (1 << 20)
+        if self.total:
+            log.info("%s: %.0f MiB / %.0f MiB (%d%%)", self.label, mib,
+                     self.total / (1 << 20), 100 * done // self.total)
+        else:
+            log.info("%s: %.0f MiB", self.label, mib)
+        self.next = (done // PROGRESS_BYTES + 1) * PROGRESS_BYTES
+
 
 _BANDWIDTH_RX = re.compile(r"BANDWIDTH=(\d+)")
 _URI_RX       = re.compile(r'URI="([^"]*)"')
@@ -119,6 +153,11 @@ def _download_once(url, out) -> int:
         log.info("range not honored; restarting")
     elif offset:
         log.info("resuming at %d bytes", offset)
+    total = _content_length(reader)
+    if total is not None and resumed:
+        total += offset                  # 206 Content-Length covers only the remainder
+    progress = _Progress(os.path.basename(out), total)
+    done = offset
     try:
         with open(part, "ab" if offset else "wb") as fh:   # wb truncates a stale part
             while True:
@@ -126,6 +165,8 @@ def _download_once(url, out) -> int:
                 if not buf:
                     break
                 fh.write(buf)
+                done += len(buf)
+                progress.update(done)
     finally:
         reader.close()
     os.replace(part, out)
@@ -239,10 +280,15 @@ def _download_segments(out, init, segments, retries) -> int:
     parts = ([("seg_init", init)] if init else []) + \
             [(f"seg_{i:05d}.ts", u) for i, u in enumerate(segments)]
     log.info("downloading %d HLS segments", len(segments))
+    progress = _Progress(os.path.basename(out), None)
     for attempt in range(retries + 1):
         try:
+            done = 0
             for name, seg_url in parts:
-                _fetch_segment(os.path.join(segdir, name), seg_url)
+                path = os.path.join(segdir, name)
+                _fetch_segment(path, seg_url)
+                done += os.path.getsize(path)
+                progress.update(done)
             break
         except Exception as exc:
             if attempt == retries:
