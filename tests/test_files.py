@@ -11,7 +11,7 @@ import theke.files as files
 from theke import Config, main
 from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
                          download_file, download_hls, ffmpeg_args, run_remux,
-                         run_ffmpeg)
+                         run_ffmpeg, move_file)
 
 
 def install_http(monkeypatch, mapping):
@@ -393,3 +393,44 @@ def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):
 def test_cli_file_remux_bad_mode_is_usage_error():
     assert main(["file", "remux", "--in", "in.ts", "--remux", "X",
                  "--out", "o.mp4"]) == 2
+
+
+# -- move ---------------------------------------------------------------------
+
+def test_move_creates_parent_dirs_and_moves(tmp_path):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"film")
+    dst = tmp_path / "lib" / "Movie (2020)" / "Movie (2020).mp4"
+    out = move_file(str(src), str(dst), force=False)
+    assert out == str(dst)
+    assert dst.read_bytes() == b"film"
+    assert not src.exists()
+
+
+def test_move_existing_dst_errors(tmp_path):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"new")
+    dst = tmp_path / "dst.mp4"
+    dst.write_bytes(b"old")
+    with pytest.raises(RuntimeError, match="exists"):
+        move_file(str(src), str(dst), force=False)
+    assert dst.read_bytes() == b"old"          # untouched
+    assert src.exists()
+
+
+def test_move_force_overwrites(tmp_path):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"new")
+    dst = tmp_path / "dst.mp4"
+    dst.write_bytes(b"old")
+    move_file(str(src), str(dst), force=True)
+    assert dst.read_bytes() == b"new"
+
+
+def test_cli_file_move_json(tmp_path, capsys):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"x")
+    dst = str(tmp_path / "lib" / "out.mp4")
+    rc = main(["--json", "file", "move", "--src", str(src), "--dst", dst])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"moved": dst}
