@@ -210,3 +210,33 @@ the final strip only trims at the ends.
 
 Live-DB effect: ",:" interiors 19 -> 0, trailing commas -> 0, trailing middots
 -> 0. category distribution unchanged (clean_title-only round).
+
+## Round 9 -- leading "Folge/Episode N[/M]: Subtitle" prefix  [DONE]
+
+The biggest clean_title noise: 13118 titles started with "Folge <num>" (plus
+"Episode <num>"), the broadcaster's running-number prefix in front of the real
+episode title -- "Folge 1135: Flammen der Hoffnung (S29/E05)", "Folge 665 - Auf
+dem Westweg", "Folge 2/26: Philippe, agent immobilier", bare "Episode 684".
+
+Fix: two start-anchored regexes. FOLGE_PRE matches "(Folge|Episode) N[/M]<sep>
+<Subtitle>" (sep = `:` | ` - ` | ` · ` | ` | `), FOLGE_ONLY a bare "Folge N"
+with no subtitle. N fills episode and M episode_count, but ONLY when still unset
+-- so an explicit (Sxx/Exx) still wins (the leading "Folge 1135" is an absolute
+running number, the within-season E05 is the real episode). The subtitle becomes
+clean_title; a bare "Folge N" leaves an empty title, now coerced to None (no
+episode title exists). The `\s+\d` after the keyword is the guard.
+
+GUARDS (tested): "Sonderfolge:" (starts with S, not "Folge <digit>"), "Folge der
+Spur" (verb, no number), "Anne Folger:" (substring) are all untouched.
+
+Live-DB effect: "Folge <num>" clean_titles 13118 -> 75, "Episode <num>" -> 1;
+14287 clean_titles cleaned, 3353 rows gained an episode number, 1431 bare
+"Folge/Episode N" -> NULL title (plus 14 pre-existing empty-string titles like
+"Teil 1" coerced to NULL). category distribution UNCHANGED -- zero category
+transitions (the "/M" count only fired where the row was already an Episode).
+
+Known remaining (minor): 75 rows use a bare SPACE as the separator ("Folge 957
+Kurswechsel", "Folge 38 Glücksritter - Podcast ..."); a space-separator rule is
+not worth the false-positive risk (the number can be real title content) for 75
+rows. A pre-existing "Teil N von M" form (not "Teil N/M") still leaves a "von M)"
+residue ("Folge 30 Unternehmergeist (Teil 2 von 2)") -- deferred.

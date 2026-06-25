@@ -38,6 +38,12 @@ PART    = re.compile(r'\((\d{1,2})/(\d{1,2})\)')             # Mehrteiler "(n/m)
 STAFFOLGE = re.compile(r'\bStaffel\s+(\d{1,2}),?\s+Folge\s+(\d{1,3})\b', re.I)
 TEIL      = re.compile(r'\s*[-–(,]?\s*\bTeil\s+(\d{1,2}|[IVXLC]+)(?:\s*/\s*(\d{1,2}))?\b\)?', re.I)
 NPART     = re.compile(r'\s*(?<![\d./])(\d{1,2})\s*/\s*(\d{1,2})\s*$')
+# Leading "Folge N[/M]: <Subtitle>" (also "Episode N", separators : · | - ): the
+# running number is the episode (M the count), and the subtitle is the real
+# title. \s+\d after the word rejects "Sonderfolge"/"Folge der Spur"/"Folger".
+FOLGE_PRE  = re.compile(r'^(?:Folge|Episode)\s+(\d{1,4})(?:\s*/\s*(\d{1,4}))?'
+                        r'(?:\s*:\s*|\s+[·|–-]\s+)(.+)$', re.I)
+FOLGE_ONLY = re.compile(r'^(?:Folge|Episode)\s+(\d{1,4})(?:\s*/\s*(\d{1,4}))?\s*$', re.I)
 # "Titel n/m - Untertitel"; the (?<!\d\s) rejects a mixed fraction "8 1/2 - ..."
 # (a whole number + space before the n/m), which is a film runtime, not a part.
 MIDPART   = re.compile(r'(?<![\d./])(?<!\d\s)(\d{1,2})/(\d{1,2})\s+(?=[-–]\s)')
@@ -358,6 +364,12 @@ def enrich(sender, topic, title, description, duration,
         r['episode_count'] = int(pm.group(2))
         if r['episode'] is None: r['episode'] = int(pm.group(1))
         t = PART.sub('', t)
+    fp = FOLGE_PRE.match(t)                     # leading "Folge N[/M]: Subtitle"
+    fo = fp or FOLGE_ONLY.match(t)             # ... or a bare "Folge N" (no subtitle)
+    if fo:                                      # fill episode/count only if still unset
+        if r['episode'] is None: r['episode'] = int(fo.group(1))
+        if fo.group(2) and r['episode_count'] is None: r['episode_count'] = int(fo.group(2))
+        t = fp.group(3) if fp else ''          # subtitle, or empty for a bare "Folge N"
     if r['episode'] is None:                   # paren-less notation (B5), guarded
         mf = STAFFOLGE.search(t)
         mt = TEIL.search(t)
@@ -448,7 +460,7 @@ def enrich(sender, topic, title, description, duration,
     if my:
         if not r['year']: r['year'] = int(my.group(0).strip('() '))
         t = t[:my.start()]
-    r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:,·')
+    r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:,·') or None
 
     r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
     r['flags'] = ''.join(sorted(flags))        # canonical alphabetical order (A<S<T<U)
