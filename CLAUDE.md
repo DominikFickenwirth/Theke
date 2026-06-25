@@ -23,7 +23,7 @@ download from liste.mediathekview.de).
   aborts/re-runs are safe and every phase is callable on its own.
 - Non-implemented phases are **tentative** -- don't over-engineer ahead.
 - Middle-phase ordering: build the full **manual acquisition path** as one vertical slice
-  (fetch --> enrich --> pick by id --> queue --> approve --> download --> remux --> copy),
+  (fetch --> enrich --> pick by id --> queue --> approve --> download --> remux --> move),
   then add the **wishlist** as automation on the same machinery.
 
 1. **Scaffolding** (done) -- config (`theke.json`), DB layer (`theke.db`), CLI skeleton.
@@ -42,7 +42,7 @@ download from liste.mediathekview.de).
    approval before download. Staging via `tmdb_id` is deduplicated automatically.
 6. **Download** -- plain HTTP download of approved items.
 7. **Remux** -- FFmpeg pipeline, extracting audio and converting containers to mp4.
-8. **Copy** -- Copy into movie library. **Manual path complete here.**
+8. **Move** -- Move into movie library. **Manual path complete here.**
 9. **Wishlist** -- entries by TMDB ID, auto availability checks feeding the same
    queue. Pure automation on earlier phases.
 10. **Scheduler** -- in-app scheduler; runs unattended.
@@ -80,7 +80,7 @@ queue table                              |
    |                                     | [Indexer]
    | [Approval]                          |
    V                                     |
-[Download] --> [Remux] --> [Copy] --> media folders
+[Download] --> [Remux] --> [Move] --> media folders
 ```
 
 ## Data model
