@@ -525,6 +525,14 @@ def test_orf_topic_trailing_staffel_splits_series_and_season():
     assert r["season"] == 20
 
 
+def test_orf_topic_dash_staffel_leaves_no_dangling_separator():
+    # "<Series> - Staffel N": stripping the trailing " Staffel N" must also drop
+    # the now-dangling separator (was "TWIN TEAMS -").
+    r = enrich("ORF", "TWIN TEAMS - Staffel 1", "Pilot", "", 2700)
+    assert r["series_name"] == "TWIN TEAMS"
+    assert r["season"] == 1
+
+
 def test_reversed_staffel_in_series_is_kept():
     # Guard: a reversed "N. Staffel" (digit before "Staffel") at the end is not the
     # "Staffel N" suffix -- series_name and season are untouched.

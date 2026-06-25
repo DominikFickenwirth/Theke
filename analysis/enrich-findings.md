@@ -240,3 +240,35 @@ Kurswechsel", "Folge 38 Glücksritter - Podcast ..."); a space-separator rule is
 not worth the false-positive risk (the number can be real title content) for 75
 rows. A pre-existing "Teil N von M" form (not "Teil N/M") still leaves a "von M)"
 residue ("Folge 30 Unternehmergeist (Teil 2 von 2)") -- deferred.
+
+## Round 10 -- "Staffel N" season extraction (title suffix + ORF topic)  [DONE]
+
+"Staffel N" leaked into both clean_title and series_name without ever setting the
+season:
+- clean_title: "Vorstadtweiber - Staffel 2 (10/10)", "Mord im Mittsommer -
+  Staffel 1 - Fall 1: Tod im Fischernetz" (857 rows, mostly ARTE.DE).
+- series_name (ORF "<Series> Staffel N" convention): "Soko Donau Staffel 20",
+  "Bakabu Staffel 2" (1150 rows, ORF) -- so all seasons of one show scattered
+  into distinct series_names.
+
+Fix: STAFFEL_TITLE `[-–]\s*Staffel\s+(\d{1,2})` removes a DASH-introduced "Staffel
+N" segment from the title and sets the season; STAFFEL_SERIES `\s+Staffel\s+
+(\d{1,2})$` splits a trailing "Staffel N" off the topic/series_name (re-grouping
+"Soko Donau Staffel 10/20/..." -> "Soko Donau"), trimming the now-dangling
+separator ("TWIN TEAMS - Staffel 1" -> "TWIN TEAMS"). Season filled only when
+unset.
+
+GUARDS (tested + DB-verified): the leading-dash requirement rejects review-clip
+content where "Staffel N" is real title text ("BLACK MIRROR Staffel 6: ...",
+"THE WITCHER Staffel 3 Kritik" -- no dash before); the end-anchored `\d` after
+"Staffel" rejects the reversed "N. Staffel" ("Dahoam is Dahoam - 1. Staffel") and
+the relay-race noun ("DSV-Mixed-Staffel holt Bronze", no trailing digit).
+
+Live-DB effect: 1965 rows gained a season, 1151 series_names regrouped, 856
+clean_titles cleaned; "- Staffel N" in clean_title 857 -> 1, trailing "Staffel N"
+in series_name -> 0, dangling separators -> 0. category distribution UNCHANGED
+(setting a season alone never overrides a medium; the episodic rule needs season
+AND episode, and those rows were already Episode).
+
+Known remaining (minor): 1 oddball 4-digit "- Staffel 2019, Folge 7" (a year-
+style season the `\d{1,2}` cap skips); not worth a special case for one row.

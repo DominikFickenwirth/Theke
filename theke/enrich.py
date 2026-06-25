@@ -44,6 +44,12 @@ NPART     = re.compile(r'\s*(?<![\d./])(\d{1,2})\s*/\s*(\d{1,2})\s*$')
 FOLGE_PRE  = re.compile(r'^(?:Folge|Episode)\s+(\d{1,4})(?:\s*/\s*(\d{1,4}))?'
                         r'(?:\s*:\s*|\s+[·|–-]\s+)(.+)$', re.I)
 FOLGE_ONLY = re.compile(r'^(?:Folge|Episode)\s+(\d{1,4})(?:\s*/\s*(\d{1,4}))?\s*$', re.I)
+# Season markers. STAFFEL_TITLE: a dash-introduced "- Staffel N" segment in the
+# title (the dash distinguishes the real season marker from review-clip content
+# like "BLACK MIRROR Staffel 6: ..."). STAFFEL_SERIES: a trailing "Staffel N" on
+# the topic/series_name (the ORF "<Series> Staffel N" convention).
+STAFFEL_TITLE  = re.compile(r'\s*[-–]\s*Staffel\s+(\d{1,2})\b', re.I)
+STAFFEL_SERIES = re.compile(r'\s+Staffel\s+(\d{1,2})$', re.I)
 # "Titel n/m - Untertitel"; the (?<!\d\s) rejects a mixed fraction "8 1/2 - ..."
 # (a whole number + space before the n/m), which is a film runtime, not a part.
 MIDPART   = re.compile(r'(?<![\d./])(?<!\d\s)(\d{1,2})/(\d{1,2})\s+(?=[-–]\s)')
@@ -370,6 +376,10 @@ def enrich(sender, topic, title, description, duration,
         if r['episode'] is None: r['episode'] = int(fo.group(1))
         if fo.group(2) and r['episode_count'] is None: r['episode_count'] = int(fo.group(2))
         t = fp.group(3) if fp else ''          # subtitle, or empty for a bare "Folge N"
+    sst = STAFFEL_TITLE.search(t)              # "- Staffel N" season segment in the title
+    if sst:
+        if r['season'] is None: r['season'] = int(sst.group(1))
+        t = STAFFEL_TITLE.sub('', t, count=1)
     if r['episode'] is None:                   # paren-less notation (B5), guarded
         mf = STAFFOLGE.search(t)
         mt = TEIL.search(t)
@@ -410,6 +420,11 @@ def enrich(sender, topic, title, description, duration,
         if routed['category'] and not r['category']:   # metazeile (Pass 3) wins
             r['category'] = routed['category']; kat_src = routed['kat_src']
         t = PIPESUF.sub('', t)                 # drop " | Reihe" suffix from title
+        if r['series_name']:                   # ORF "<Series> Staffel N" -> split off season
+            ssn = STAFFEL_SERIES.search(r['series_name'])
+            if ssn:
+                if r['season'] is None: r['season'] = int(ssn.group(1))
+                r['series_name'] = r['series_name'][:ssn.start()].rstrip(' -–:|,·') or None
 
     # -- Pass 5: ARTE taxonomy (Ober=genre, Unter=medium) / duration prior -
     if sender in ARTE_LANG and ' - ' in tp:
