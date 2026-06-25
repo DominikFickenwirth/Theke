@@ -625,6 +625,31 @@ def test_teil_as_word_is_not_a_marker():
     assert r["clean_title"] == "Urteil im Schleuserprozess"
 
 
+# -- round 13: "Sender // Series" topic split -------------------------------
+
+def test_double_slash_sender_goes_to_slot():
+    # A "<Sender> // <Series>" topic: the sender side is a slot, the series side is
+    # the show -- same split as the "|" Dachmarke pipe, but with "//".
+    r = enrich("ARD", "NDR//Aktuell", "Meldung", "", 900)
+    assert r["slot"] == "NDR"
+    assert r["series_name"] == "Aktuell"
+
+
+def test_double_slash_das_erste_brand():
+    # "Das Erste" (the ARD main channel) is recognized as the slot side.
+    r = enrich("SR", "Das Erste // Plusminus", "Ausgabe", "", 1500)
+    assert r["slot"] == "Das Erste"
+    assert r["series_name"] == "Plusminus"
+
+
+def test_double_slash_neither_side_sender_is_kept_whole():
+    # Guard: when neither side is a sender/Dachmarke, do not split -- keep the
+    # whole topic as the series_name (title // subtitle).
+    r = enrich("ARD", "Pro // Contra", "Debatte", "", 1500)
+    assert r["slot"] is None
+    assert r["series_name"] == "Pro // Contra"
+
+
 def test_episode_bare_part_of_total():
     r = enrich("ARD", "Doku", "Die Story 2/2", "", 3600)
     assert r["episode"] == 2
