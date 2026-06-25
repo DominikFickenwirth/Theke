@@ -388,6 +388,42 @@ def test_episode_staffel_folge_without_parens():
     assert r["clean_title"] == "Der Fall"
 
 
+# -- round 8: ", Teil N" comma residue ---------------------------------------
+
+def test_teil_with_leading_comma_and_subtitle_leaves_no_residue():
+    # "<Title>, Teil N: <Subtitle>": the ", Teil N" part is removed whole, so no
+    # ",:" residue is left (regression: was "Tauchwandern am Bodensee,: Quer ...").
+    r = enrich("ARD", "Tauchwandern",
+                 "Tauchwandern am Bodensee, Teil 2: Quer durch den Untersee", "", 1500)
+    assert r["episode"] == 2
+    assert r["clean_title"] == "Tauchwandern am Bodensee: Quer durch den Untersee"
+
+
+def test_teil_with_leading_comma_at_end_leaves_no_trailing_comma():
+    # "<Title>, Teil N" at the very end: no dangling trailing comma.
+    r = enrich("SRF", "Jahr", "Jahresrückblick vom 28.12.2023, Teil 4", "", 1500)
+    assert r["episode"] == 4
+    assert r["clean_title"] == "Jahresrückblick vom 28.12.2023"
+
+
+def test_staffel_folge_trailing_comma_is_trimmed():
+    # "<Title>, Staffel N, Folge M": the STAFFOLGE strip leaves a trailing comma
+    # that the final normalization must remove (was "Der Haustier-Check,").
+    r = enrich("ZDF", "Der Haustier-Check",
+                 "Der Haustier-Check, Staffel 1, Folge 3", "", 1500)
+    assert r["season"] == 1
+    assert r["episode"] == 3
+    assert r["clean_title"] == "Der Haustier-Check"
+
+
+def test_comma_in_plain_title_is_kept():
+    # Guard: an ordinary comma (no Teil/Staffel marker) is part of the title and
+    # must survive untouched.
+    r = enrich("ARD", "Doku", "Stadt, Land, Fluss", "", 1500)
+    assert r["clean_title"] == "Stadt, Land, Fluss"
+    assert r["episode"] is None
+
+
 def test_episode_bare_part_of_total():
     r = enrich("ARD", "Doku", "Die Story 2/2", "", 3600)
     assert r["episode"] == 2
