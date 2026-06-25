@@ -17,7 +17,7 @@ SRC = "build/theke.db"
 DST = "analysis/_enr.db"
 
 RAW = ["mediathek_id", "sender", "topic", "title", "description", "duration", "url_website"]
-OUT = ["category", "series_name", "season", "episode", "episode_count",
+OUT = ["category", "series_name", "slot", "season", "episode", "episode_count",
        "clean_title", "year", "country", "language", "genre", "flags",
        "enrich_confidence"]
 

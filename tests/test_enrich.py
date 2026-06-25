@@ -541,6 +541,43 @@ def test_reversed_staffel_in_series_is_kept():
     assert r["season"] is None
 
 
+# -- round 11: programming-slot topics -> slot (not series_name) -------------
+
+def test_film_strand_topic_becomes_slot_not_series():
+    # A programming strand ("<film-type> im/in <channel>") is a Sendeplatz, not a
+    # show: it belongs in slot, and series_name stays empty (the film title is in
+    # clean_title).
+    r = enrich("MDR", "Kurzfilme im MDR", "Der kurze Film", "", 1500)
+    assert r["slot"] == "Kurzfilme im MDR"
+    assert r["series_name"] is None
+
+
+def test_film_strand_slot_keeps_fiction_movie_category():
+    # Moving the strand to slot is category-neutral: a strand that is also a
+    # fiction Reihe keeps its Movie lift (the lift keys off the raw topic).
+    r = enrich("ARD", "Filme im Ersten", "Der Fall", "", 5400)
+    assert r["slot"] == "Filme im Ersten"
+    assert r["series_name"] is None
+    assert r["category"] == "Movie"
+
+
+def test_real_show_im_ersten_stays_series():
+    # Guard: "Nuhr im Ersten" is a comedy SHOW (Dieter Nuhr), not a film strand --
+    # the head is not a film-type word, so it stays a series_name.
+    r = enrich("ARD", "Nuhr im Ersten", "Ausgabe 5", "", 2700)
+    assert r["series_name"] == "Nuhr im Ersten"
+    assert r["slot"] is None
+
+
+def test_im_dritten_reich_is_not_a_slot():
+    # Guard: "Kindheit im Dritten Reich" contains "im Dritten" but the placement
+    # phrase is not end-anchored ("Reich" follows) and the head is not a film
+    # word -- it stays a series_name.
+    r = enrich("ARD", "Kindheit im Dritten Reich", "Teil 1", "", 2700)
+    assert r["series_name"] == "Kindheit im Dritten Reich"
+    assert r["slot"] is None
+
+
 def test_episode_bare_part_of_total():
     r = enrich("ARD", "Doku", "Die Story 2/2", "", 3600)
     assert r["episode"] == 2
