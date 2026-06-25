@@ -838,6 +838,33 @@ def test_season_episode_implies_episode_over_duration_prior():
     assert r["category"] == "Episode"
 
 
+def test_bare_episode_number_implies_episode():
+    # A running episode number alone (a "Folge/Episode N" prefix, no season) is a
+    # series signal: a long episode (>1800s) becomes Episode, not NULL. Telenovela
+    # "Sturm der Liebe - Episode 332" is the canonical case.
+    r = enrich("ONE", "Sturm der Liebe", "Episode 332", "", 2863)
+    assert r["episode"] == 332
+    assert r["category"] == "Episode"
+
+
+def test_bare_season_number_implies_episode():
+    # A season marker alone (a "(Staffel N)" parenthetical, no episode) is equally
+    # a series signal: a long item (>1800s) becomes Episode, not NULL.
+    r = enrich("ARD", "Vorstadtweiber", "Rückkehr (Staffel 2)", "", 3000)
+    assert r["season"] == 2
+    assert r["category"] == "Episode"
+
+
+def test_bare_episode_number_does_not_override_movie():
+    # GUARD: a running "Folge N" prefix on a metazeile-labelled film does NOT
+    # demote the Movie -- the episodic lift only fills a NULL/Clip medium, so a
+    # film-Reihe airing keeps category Movie (consistent with the S/E rule).
+    r = enrich("ARD", "Marie Brand", "Folge 3: Der Fall",
+                 "Krimi, Deutschland 2020", 5400)
+    assert r["episode"] == 3
+    assert r["category"] == "Movie"
+
+
 def test_mehrteiler_count_overrides_movie_label():
     # "(5/6)" is a multi-part marker: a miniseries, not a standalone film. It
     # overrides the Movie label that topic 'Fernsehfilm' would otherwise give --
