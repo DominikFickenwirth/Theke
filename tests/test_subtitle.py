@@ -43,3 +43,42 @@ def test_parse_time_empty_and_indefinite_are_none():
 def test_parse_time_rejects_garbage():
     with pytest.raises(ValueError):
         subtitle.parse_time("nonsense")
+
+
+# -- detect_format ------------------------------------------------------------
+
+TTML_MIN = (
+    '<?xml version="1.0" encoding="utf-8"?>'
+    '<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+    '<p begin="00:00:01.000" end="00:00:02.000">Hallo</p>'
+    '</div></body></tt>'
+)
+
+VTT_MIN = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHallo\n"
+
+# Real NDR subtitle URLs serve an HTML page, not a subtitle file.
+HTML_PAGE = '<!DOCTYPE html>\n<html><head><title>UT</title></head><body></body></html>'
+
+
+def test_detect_format_ttml():
+    assert subtitle.detect_format(TTML_MIN) == "ttml"
+
+
+def test_detect_format_webvtt():
+    assert subtitle.detect_format(VTT_MIN) == "webvtt"
+
+
+def test_detect_format_webvtt_with_bom():
+    assert subtitle.detect_format("﻿" + VTT_MIN) == "webvtt"
+
+
+def test_detect_format_html_is_unknown():
+    assert subtitle.detect_format(HTML_PAGE) == "unknown"
+
+
+def test_detect_format_plaintext_is_unknown():
+    assert subtitle.detect_format("just some text, not a subtitle") == "unknown"
+
+
+def test_detect_format_malformed_xml_is_unknown():
+    assert subtitle.detect_format("<tt><body><p>unclosed") == "unknown"
