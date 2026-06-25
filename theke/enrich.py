@@ -44,6 +44,11 @@ PIPESUF = re.compile(r'\s*\|\|?\s*[^|]+(?:\|\|?\s*[^|]+)*$')  # trailing " | Rei
 # metazeile, just strip it off the title (no country/year extraction).
 CREDIT  = re.compile(r'\s+[-–]\s+(?:Film|' + CATWORD + r')\s+von\s+\S.*$', re.I)
 TRAILER = re.compile(r'\b(Trailer|Teaser|Vorschau|Vorab|Preview|Präview)\b', re.I)
+# Companion pieces ABOUT a work (not the work): a making-of (M flag) or an
+# interview/Rencontre/Entretien with its makers (I flag). Short pieces only, so a
+# feature film merely titled "Interview mit ..." is never caught (see enrich()).
+MAKINGOF  = re.compile(r'\bMaking[ -]of\b', re.I)
+INTERVIEW = re.compile(r'^\s*(?:Interview mit|Rencontre avec|Entretien avec|Gespräch mit)\b', re.I)
 
 # Parenthetical marker vocabulary -> (target, value). 'flag' adds a letter to
 # the flags string (A audio-description, S sign-language, U burned-in subs;
@@ -421,6 +426,12 @@ def enrich(sender, topic, title, description, duration,
 
     if 'T' in flags and r['category'] in ('Movie', 'Episode') and (duration or 0) < 300:
         r['category'] = 'Clip'; kat_src = 'trailer'   # a short trailer is a clip, not a film/episode
+
+    if (duration or 0) < 900:                          # short companion piece about a work
+        if MAKINGOF.search(title or ''):      flags.add('M')
+        elif INTERVIEW.search(title or ''):   flags.add('I')
+        if flags & {'M', 'I'} and r['category'] in ('Movie', 'Episode'):
+            r['category'] = 'Clip'; kat_src = 'companion'
 
     cm = CREDIT.search(t)                                 # trailing "- Film von <Name>" (B4)
     if cm and not re.search(r'(?:19|20)\d\d', cm.group(0)):
