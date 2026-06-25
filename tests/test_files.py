@@ -384,14 +384,14 @@ def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):
     out = str(tmp_path / "out.mp4")
     monkeypatch.setattr(files, "run_ffmpeg",
                         lambda args: open(args[-1], "wb").write(b"ok"))
-    rc = main(["--json", "file", "remux", "--in", "in.ts", "--remux", "AV",
+    rc = main(["--json", "file", "remux", "--in", "in.ts", "--mode", "AV",
                "--out", out])
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == {"remux": "AV", "out": out}
 
 
 def test_cli_file_remux_bad_mode_is_usage_error():
-    assert main(["file", "remux", "--in", "in.ts", "--remux", "X",
+    assert main(["file", "remux", "--in", "in.ts", "--mode", "X",
                  "--out", "o.mp4"]) == 2
 
 
@@ -431,6 +431,6 @@ def test_cli_file_move_json(tmp_path, capsys):
     src = tmp_path / "src.mp4"
     src.write_bytes(b"x")
     dst = str(tmp_path / "lib" / "out.mp4")
-    rc = main(["--json", "file", "move", "--src", str(src), "--dst", dst])
+    rc = main(["--json", "file", "move", "--in", str(src), "--out", dst])
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == {"moved": dst}
