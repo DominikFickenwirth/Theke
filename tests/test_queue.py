@@ -145,10 +145,13 @@ def insert_mediathek(conn, mediathek_id, status="2", tmdb_id="100", language="de
 
 def qargs(queue_cmd="add", tmdb=None, mediathek_id=None, status=None,
           ids=None, all=False, force=False, cancelled=False, done=False,
-          failed=False, json=False):
+          failed=False, json=False, name=None, language=None, resolution=None,
+          remux=None, url=None, path=None, url_subtitle=None):
     return SimpleNamespace(queue_cmd=queue_cmd, tmdb=tmdb, mediathek_id=mediathek_id,
                            status=status, ids=ids or [], all=all, force=force,
-                           cancelled=cancelled, done=done, failed=failed, json=json)
+                           cancelled=cancelled, done=done, failed=failed, json=json,
+                           name=name, language=language, resolution=resolution,
+                           remux=remux, url=url, path=path, url_subtitle=url_subtitle)
 
 
 def stub_tmdb(monkeypatch):
@@ -301,6 +304,129 @@ def test_queue_add_cli_json(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == {"queued": 1, "skipped": 0,
                                                    "deduplicated": 0}
+
+
+# -- queue add: url / path / subtitle population (phase 6-8 prep) -------------
+# queue download must run off the queue row alone, so add resolves the source
+# url, the full library path and the subtitle url at staging time.
+
+def test_queue_add_tmdb_fills_url_and_path(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)   # title "Mein Film", year 2020, original_language en
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", duration=6000, url_video="http://de")
+        insert_mediathek(conn, "m_fr", language="fr", duration=6000, url_video="http://fr")  # shares video -> audio
+        cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+        rows = {r["mediathek_id"]: r for r in queue_rows(conn)}
+        # anchor de: AV video -> .mp4, no language infix; primary source url
+        assert rows["m_de"]["url"] == "http://de"
+        assert rows["m_de"]["path"] == "movies/Mein Film (2020)/Mein Film (2020).mp4"
+        # fr shares de's video -> audio-only, language infix + audio ext
+        assert rows["m_fr"]["remux"] == "A"
+        assert rows["m_fr"]["url"] == "http://fr"
+        assert rows["m_fr"]["path"] == "movies/Mein Film (2020)/Mein Film (2020).fr.aac"
+    finally:
+        conn.close()
+
+
+def test_queue_add_tmdb_second_video_gets_language_infix(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", duration=6000, url_video="http://de")
+        insert_mediathek(conn, "m_fr", language="fr", duration=5000, url_video="http://fr")  # own video (diff duration)
+        cmd_queue(conn, CFG, qargs(tmdb=["100"]))
+        rows = {r["mediathek_id"]: r for r in queue_rows(conn)}
+        assert rows["m_de"]["remux"] == "AV"
+        assert rows["m_de"]["path"] == "movies/Mein Film (2020)/Mein Film (2020).mp4"
+        # non-anchor video keeps its own video but is tagged with the language
+        assert rows["m_fr"]["remux"] == "AV"
+        assert rows["m_fr"]["path"] == "movies/Mein Film (2020)/Mein Film (2020).fr.mp4"
+    finally:
+        conn.close()
+
+
+def test_queue_add_tmdb_hd_url_selected(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", url_video="http://sd",
+                         url_video_hd="http://hd")
+        cmd_queue(conn, Config(tmdb_api_key="KEY", languages=["de"]), qargs(tmdb=["100"]))
+        assert queue_rows(conn)[0]["url"] == "http://hd"
+    finally:
+        conn.close()
+
+
+def test_queue_add_mediathek_fills_url_and_path(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)   # not needed (no tmdb_id)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_solo", status="1", tmdb_id="", language="de",
+                         clean_title="Solo", year=2019, url_video="http://s")
+        cmd_queue(conn, CFG, qargs(mediathek_id=["m_solo"]))
+        r = queue_rows(conn)[0]
+        assert r["url"] == "http://s"
+        assert r["path"] == "movies/Solo (2019)/Solo (2019).mp4"
+    finally:
+        conn.close()
+
+
+def test_queue_add_fills_subtitle_url(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de", url_subtitle="http://sub.vtt")
+        cmd_queue(conn, CFG, qargs(mediathek_id=["m_de"]))
+        assert queue_rows(conn)[0]["url_subtitle"] == "http://sub.vtt"
+    finally:
+        conn.close()
+
+
+def test_queue_add_library_path_placeholders_case_insensitive(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = Config(tmdb_api_key="KEY", languages=["de"],
+                     library_path="x/{TITLE}/{name}.{year}.mp4")
+        insert_mediathek(conn, "m_de", language="de")
+        cmd_queue(conn, cfg, qargs(tmdb=["100"]))
+        # {TITLE}=Mein Film, {name}=Mein Film (2020), {year}=2020; ext re-applied
+        assert queue_rows(conn)[0]["path"] == "x/Mein Film/Mein Film (2020).2020.mp4"
+    finally:
+        conn.close()
+
+
+def test_queue_add_custom_extensions(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = Config(tmdb_api_key="KEY", languages=["de", "fr"],
+                     video_ext="mkv", audio_ext="m4a")
+        insert_mediathek(conn, "m_de", language="de", duration=6000)
+        insert_mediathek(conn, "m_fr", language="fr", duration=6000)   # shares video -> audio
+        cmd_queue(conn, cfg, qargs(tmdb=["100"]))
+        rows = {r["mediathek_id"]: r for r in queue_rows(conn)}
+        assert rows["m_de"]["path"] == "movies/Mein Film (2020)/Mein Film (2020).mkv"
+        assert rows["m_fr"]["path"] == "movies/Mein Film (2020)/Mein Film (2020).fr.m4a"
+    finally:
+        conn.close()
+
+
+def test_queue_add_cli_overrides_columns(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de")
+        cmd_queue(conn, CFG, qargs(mediathek_id=["m_de"], url="http://o",
+                                   path="P/x.mp4", language="xx", resolution="HD",
+                                   remux="V", name="N", url_subtitle="http://o.srt"))
+        r = queue_rows(conn)[0]
+        assert (r["url"], r["path"], r["language"], r["resolution"], r["remux"],
+                r["name"], r["url_subtitle"]) == (
+            "http://o", "P/x.mp4", "xx", "HD", "V", "N", "http://o.srt")
+    finally:
+        conn.close()
 
 
 # -- cmd_queue list ----------------------------------------------------------

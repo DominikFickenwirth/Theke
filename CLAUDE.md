@@ -37,12 +37,12 @@ download from liste.mediathekview.de).
    for everything below.
 4. **Match** (done) -- `theke match` matches a given TMDB ID with mediathek rows
    by resolving the ID's metadata via TMDB API, and flips `status` '1' -> '2'.
-5. **Download queue** -- staging of downloads via `mediathek_id` or `tmdb_id`
+5. **Download queue** (done) -- staging of downloads via `mediathek_id` or `tmdb_id`
    into SQLite table `queue`. Depending on config, queue entries may need manual
    approval before download. Staging via `tmdb_id` is deduplicated automatically.
-6. **Download** -- plain HTTP download of approved items.
-7. **Remux** -- FFmpeg pipeline, extracting audio and converting containers to mp4.
-8. **Move** -- Move into movie library. **Manual path complete here.**
+6. **Download** (done) -- plain HTTP download of approved items.
+7. **Remux** (done) -- FFmpeg pipeline, extracting audio and converting containers to mp4.
+8. **Move** (done) -- Move into movie library. **Manual path complete here.**
 9. **Wishlist** -- entries by TMDB ID, auto availability checks feeding the same
    queue. Pure automation on earlier phases.
 10. **Scheduler** -- in-app scheduler; runs unattended.

@@ -156,6 +156,26 @@ def test_config_download_retries_wrong_type_is_error(tmp_path):
         load_config(str(path))
 
 
+def test_config_pipeline_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.temp_path == ""
+    assert cfg.video_ext == "mp4"
+    assert cfg.audio_ext == "aac"
+    assert cfg.library_path == "movies/{Title} ({Year})/{Title} ({Year}).mp4"
+
+
+def test_config_pipeline_keys_from_file(tmp_path):
+    path = tmp_path / "p.json"
+    write_config(path, {"temp_path": "/scratch", "video_ext": "mkv",
+                        "audio_ext": "m4a", "library_path": "L/{title}.mp4"})
+    cfg = load_config(str(path))
+    assert cfg.temp_path == "/scratch"
+    assert cfg.video_ext == "mkv"
+    assert cfg.audio_ext == "m4a"
+    assert cfg.library_path == "L/{title}.mp4"
+
+
 # -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [
