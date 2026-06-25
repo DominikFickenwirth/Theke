@@ -302,3 +302,32 @@ keeps the "SWR //" prefix (a separate slot/pipe issue); non-fiction strands
 ("Kurzfilme im MDR") still take their category from the duration prior rather than
 the film-type head -- routing the head's medium (like FORMAT_TOPICS) would be a
 category change, deferred to keep this round title/series-only.
+
+## Round 12 -- Teil marker under explicit S/E + "(Staffel N[, part])"  [DONE]
+
+Residue hunt in clean_title turned up two leaks:
+- A "Teil N" marker (incl. leading "Teil N:") survived whenever an explicit
+  (Sxx/Exx) had already set the episode: the marker strip was gated inside the
+  `if episode is None` block, so "Teil 3: Menschliche Knochen (S01/E03)" ->
+  "Teil 3: Menschliche Knochen", "Aschenberg Teil 4 - ..." kept the "Teil 4"
+  (236 rows).
+- A parenthetical "(Staffel N)" / "(Staffel N, Teil k)" / "(Staffel N, n/m)" was
+  never parsed at all -- "Trailer: Leo da Vinci (Staffel 1)", "... (Staffel 4,
+  2/4)" (100 rows), some leaving an unbalanced "(Staffel 2" when TEIL ate the
+  inner ", Teil k)".
+
+Fix: TEIL now runs unconditionally -- it always strips the marker, but fills
+episode/count ONLY when episode is still unset (so an S/E episode is never paired
+with a mismatched "Teil 1/2" count). New PARENSEASON regex parses the
+parenthetical: season always (if unset), inner Teil/Folge/n-m as episode/count
+(only if episode unset), whole paren removed.
+
+GUARDS (tested): "Urteil"/"Stadtteil"/"Teil davon" stay (TEIL needs `\bTeil\s+\d`);
+a "(Staffel N <free text>)" review-clip paren ("... (Staffel 2 Kritik)",
+"(Staffel 2 Tag 21)") is NOT matched (PARENSEASON only takes a bare season or a
+Teil/Folge/n-m part), so real clip titles survive.
+
+Live-DB effect: "Teil N" markers in clean_title 236 -> 0, "(Staffel" residue
+105 -> 2 (the 2 are the review clips, correctly kept); 339 clean_titles cleaned,
+76 seasons gained, 6 NULL -> Episode (genuine multi-part docs "(Staffel N, n/m)"
+-- correct, via the mehrteiler rule).

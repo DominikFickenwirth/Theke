@@ -50,6 +50,11 @@ FOLGE_ONLY = re.compile(r'^(?:Folge|Episode)\s+(\d{1,4})(?:\s*/\s*(\d{1,4}))?\s*
 # the topic/series_name (the ORF "<Series> Staffel N" convention).
 STAFFEL_TITLE  = re.compile(r'\s*[-–]\s*Staffel\s+(\d{1,2})\b', re.I)
 STAFFEL_SERIES = re.compile(r'\s+Staffel\s+(\d{1,2})$', re.I)
+# Parenthetical season "(Staffel N)" or "(Staffel N, <part>)" (part = Teil k,
+# Folge k, or n/m). Season N, optional episode/count from the inner part.
+PARENSEASON = re.compile(r'\s*\(\s*Staffel\s+(\d{1,2})'
+                         r'(?:\s*,\s*(?:Teil\s+(\d{1,2})|Folge\s+(\d{1,3})|(\d{1,2})\s*/\s*(\d{1,2})))?'
+                         r'\s*\)', re.I)
 # "Titel n/m - Untertitel"; the (?<!\d\s) rejects a mixed fraction "8 1/2 - ..."
 # (a whole number + space before the n/m), which is a film runtime, not a part.
 MIDPART   = re.compile(r'(?<![\d./])(?<!\d\s)(\d{1,2})/(\d{1,2})\s+(?=[-–]\s)')
@@ -381,6 +386,14 @@ def enrich(sender, topic, title, description, duration,
         elif sender == 'KiKA':
             m = LEADC.search(t)                # KiKA leading "NN."
             if m: r['episode'] = int(m.group(1)); t = LEADC.sub('', t)
+    ps = PARENSEASON.search(t)                 # "(Staffel N[, part])": season + opt. part
+    if ps:
+        if r['season'] is None: r['season'] = int(ps.group(1))
+        if r['episode'] is None:
+            ep = ps.group(2) or ps.group(3) or ps.group(4)
+            if ep: r['episode'] = int(ep)
+            if ps.group(5): r['episode_count'] = int(ps.group(5))
+        t = PARENSEASON.sub('', t, count=1)
     pm = PART.search(t)                        # Mehrteiler "(n/m)": n->episode, m->count
     if pm:
         r['episode_count'] = int(pm.group(2))
@@ -396,18 +409,19 @@ def enrich(sender, topic, title, description, duration,
     if sst:
         if r['season'] is None: r['season'] = int(sst.group(1))
         t = STAFFEL_TITLE.sub('', t, count=1)
+    mt = TEIL.search(t)                        # "Teil N[/M]" marker: strip always, extract if unset
+    if mt:
+        if r['episode'] is None:
+            r['episode'] = _to_int(mt.group(1))
+            if mt.group(2): r['episode_count'] = int(mt.group(2))
+        t = TEIL.sub('', t)
     if r['episode'] is None:                   # paren-less notation (B5), guarded
         mf = STAFFOLGE.search(t)
-        mt = TEIL.search(t)
         md = MIDPART.search(t)
         mn = NPART.search(t)
         if mf:
             r['season'] = int(mf.group(1)); r['episode'] = int(mf.group(2))
             t = STAFFOLGE.sub('', t)
-        elif mt:
-            r['episode'] = _to_int(mt.group(1))
-            if mt.group(2): r['episode_count'] = int(mt.group(2))
-            t = TEIL.sub('', t)
         elif md and int(md.group(1)) <= int(md.group(2)) <= 20:   # "Titel n/m - Untertitel"
             r['episode'] = int(md.group(1)); r['episode_count'] = int(md.group(2))
             t = t[:md.start()] + t[md.end():]
