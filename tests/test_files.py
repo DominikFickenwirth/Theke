@@ -2,6 +2,7 @@
 
 import io
 import json
+import logging
 import os
 
 import pytest
@@ -218,6 +219,54 @@ def test_download_raises_after_exhausting_retries(tmp_path, monkeypatch):
         download_file(out=out, url="http://x", retries=2)
 
 
+# -- byte progress (downloads) ------------------------------------------------
+
+def test_content_length_from_header_and_missing():
+    class R:
+        def getheader(self, name): return "1234"
+    assert files._content_length(R()) == 1234
+    assert files._content_length(io.BytesIO(b"x")) is None     # no getheader -> None
+
+
+def test_progress_known_total_formats_mib_and_percent(caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    p = files._Progress("v.mp4", total=300 << 20)              # default step is 100 MiB
+    for done in (100 << 20, 200 << 20, 300 << 20):
+        p.update(done)
+    # percents: 100*100//300=33, 100*200//300=66, 100*300//300=100 (integer division)
+    assert [r.getMessage() for r in caplog.records] == [
+        "v.mp4: 100 MiB / 300 MiB (33%)",
+        "v.mp4: 200 MiB / 300 MiB (66%)",
+        "v.mp4: 300 MiB / 300 MiB (100%)"]
+
+
+def test_progress_unknown_total_formats_mib_only(caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    p = files._Progress("v.mp4", total=None)
+    p.update(100 << 20)
+    p.update(200 << 20)
+    assert [r.getMessage() for r in caplog.records] == [
+        "v.mp4: 100 MiB", "v.mp4: 200 MiB"]
+
+
+def test_progress_skips_steps_below_threshold(caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    p = files._Progress("v.mp4", total=None)
+    p.update(50 << 20)                                          # below 100 MiB -> silent
+    assert caplog.records == []
+
+
+def test_download_logs_a_progress_line_per_threshold(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(files, "CHUNK", 4)                      # 4-byte reads
+    monkeypatch.setattr(files, "PROGRESS_BYTES", 4)            # milestone every 4 bytes
+    data = b"0123456789AB"                                      # 12 bytes -> 3 chunks
+    monkeypatch.setattr(files, "open_url", Opener(data))
+    caplog.set_level(logging.INFO, logger="theke")
+    download_file(out=str(tmp_path / "v.mp4"), url="http://x/v.mp4", retries=0)
+    progress = [r.getMessage() for r in caplog.records if "MiB" in r.getMessage()]
+    assert len(progress) == 3                                   # at 4, 8, 12 bytes
+
+
 # -- HLS download + ffmpeg fallback -------------------------------------------
 
 MASTER_URL = "https://h/v/master.m3u8"
@@ -335,6 +384,18 @@ def test_hls_native_failure_falls_back_to_ffmpeg(tmp_path, monkeypatch):
                                          ffmpeg_path="ffmpeg")
     assert action == "hls-ffmpeg"
     assert (tmp_path / "v.ts").read_bytes() == b"FALLBACK"
+
+
+def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(files, "PROGRESS_BYTES", 2)            # milestone every 2 bytes
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT,
+                               "https://h/v/seg0.ts": b"AAA",  # 3 bytes -> done 3
+                               "https://h/v/seg1.ts": b"BBB"}) # 3 bytes -> done 6
+    caplog.set_level(logging.INFO, logger="theke")
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg")
+    progress = [r.getMessage() for r in caplog.records if "MiB" in r.getMessage()]
+    assert len(progress) == 2                                  # after 3 bytes and 6 bytes
 
 
 # -- file download CLI --------------------------------------------------------
