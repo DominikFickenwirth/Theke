@@ -661,6 +661,33 @@ def test_long_trailer_themed_show_stays_episode():
     assert r["category"] == "Episode"
 
 
+def test_arte_companion_interview_is_clip_not_movie():
+    # Under an ARTE short-film sub-label ("Kurzfilme" -> Movie), a companion
+    # interview with the director is filed in the same topic but is a clip about
+    # the film, not the film. A short companion piece is demoted to Clip and
+    # carries the I (interview) flag.
+    r = enrich("ARTE.DE", "Kino - Kurzfilme",
+                 'Interview mit Ellen Ekman - Regisseurin von "Discokugel"', "", 449)
+    assert r["category"] == "Clip"
+    assert "I" in r["flags"]
+
+
+def test_making_of_is_clip_not_movie():
+    # A making-of is a companion clip and carries the M (making-of) flag.
+    r = enrich("ZDF", "Filme", "Making of - Folge 2 - Shut up & Dance", "", 185)
+    assert r["category"] == "Clip"
+    assert "M" in r["flags"]
+
+
+def test_feature_film_titled_interview_stays_movie():
+    # The companion demotion/flag is gated on a short duration: a feature-length
+    # film whose title merely starts with "Interview mit" (a 2-h drama) stays Movie
+    # and gets NO interview flag.
+    r = enrich("ARTE.DE", "Kino - Filme", "Interview mit einem Vampir", "", 6840)
+    assert r["category"] == "Movie"
+    assert "I" not in r["flags"]
+
+
 def test_fiction_topics_extendable_via_param():
     # The allowlist is configurable (it grows over time): a topic absent from the
     # built-in default stays NULL, but lifts to Movie when supplied via the
