@@ -345,19 +345,22 @@ theke --db build/theke.db match reset --status-only  # nur status 2 -> 1
 
 ## `theke queue`
 
-Stufe 5: stellt Downloads in die Tabelle `queue` (Review-Queue + Download-Akte in
-einem). Reine DB-Stufe -- nichts hier berührt das Dateisystem; der eigentliche
-Download ist Stufe 6. Ein Unterbefehl wählt die Aktion: `add` stellt ein,
-`list`/`approve`/`cancel` verwalten. Ohne Aktion läuft der Default `list`, d. h.
-`theke queue` entspricht `theke queue list`.
+Stufen 5-8: stellt Downloads in die Tabelle `queue` (Review-Queue + Download-Akte
+in einem) und führt sie aus. `add`/`list`/`approve`/`cancel`/`delete` sind reine
+DB-Operationen; `download` ist die einzige Aktion, die das Dateisystem berührt
+(das Tor). Ohne Aktion läuft der Default `list`, d. h. `theke queue` entspricht
+`theke queue list`.
 
 Der Lebenszyklus einer Zeile (Spalte `status`, ein Zeichen; ASCII-aufsteigend in
 Ablaufreihenfolge, damit eine einfache Sortierung dem Fortschritt folgt):
 `proposed` (`0`) -> `approved` (`A`) -> `busy`/downloading (`B`) -> `done` (`D`),
-daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile trägt zudem `name`
-(Bibliotheks-Dateiname), `language`,
-`resolution` (`HD`/`SD`/`LQ`) und `remux` (`A` = nur Audio, `V` = nur Video,
-`AV` = beides) für die Remux-Stufe.
+daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile ist **selbsttragend**:
+sie enthält alles, was `download` braucht, ohne erneut in die `mediathek`-Tabelle
+oder die Konfiguration zu schauen -- `name` (Anzeige-Stamm), `language`,
+`resolution` (`HD`/`SD`/`LQ`), `remux` (`A` = nur Audio, `V` = nur Video,
+`AV` = beides), `url` (Quell-Medien-URL), `url_subtitle` (optional) und `path`
+(vollständiges Zielverzeichnis in der Bibliothek). Alle drei werden beim `add`
+aufgelöst und sind dort per CLI überschreibbar.
 
 **Konfiguration** (in `theke.json`):
 
@@ -366,6 +369,18 @@ daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile trägt zudem `name`
 | `queue_auto_approve`  | `true` stellt direkt auf `approved` statt `proposed` (Std. `false`). |
 | `languages`           | Sprach-Whitelist **und** Präferenzreihenfolge (Std. `["de"]`).    |
 | `name_template`       | Vorlage für `name`, gefüllt mit TMDB-Titel + -Jahr (Std. `"{title} ({year})"`). |
+| `library_path`        | Vorlage für `path` (Std. `"movies/{Title} ({Year})/{Title} ({Year}).mp4"`). |
+| `video_ext`           | Endung der Videodatei (Std. `"mp4"`).                             |
+| `audio_ext`           | Endung der Audiodatei (Std. `"aac"`).                             |
+| `temp_path`           | Scratch-Verzeichnis für Download/Remux (Std. `""` = System-Temp). |
+
+Die `library_path`-Platzhalter sind **case-insensitiv**: `{Title}`, `{Year}` (für
+Filme) sowie -- für das spätere Serien-Layout reserviert -- `{Series}`,
+`{Season}`, `{Episode}`; ein `:N` füllt eine Zahl auf N Stellen mit führenden
+Nullen (`{Season:2}` -> `03`). Die Endung der Vorlage wird verworfen und durch
+`video_ext` ersetzt (bzw. `audio_ext` bei reinen Audio-Zeilen). Nicht-Anker-Picks
+(weitere Sprachen desselben Films) erhalten ein Sprachkürzel vor der Endung,
+z. B. `Film (2020).fr.mp4` bzw. `Film (2020).fr.aac`.
 
 ### `queue add`
 
@@ -382,14 +397,28 @@ gesetzt ist. Eine bereits aktiv (P/A/D) eingereihte `mediathek_id` wird
 nicht. Beide Optionen sind wiederholbar. `deduplicated` meldet die dabei
 zusammengefassten/herausgefilterten Quellzeilen.
 
+Dabei werden zugleich die download-relevanten Spalten aufgelöst: `url` aus der
+zur `resolution` passenden Medien-URL, `url_subtitle` aus der Quellzeile und
+`path` aus `library_path` (mit TMDB-Titel/-Jahr, sonst `clean_title`/`year`).
+Jede dieser Spalten lässt sich per Option überschreiben (Escape-Hatch, z. B. ein
+manueller Zielpfad).
+
 | Option                    | Wirkung                                                  |
 | ------------------------- | -------------------------------------------------------- |
 | `-t`, `--tmdb ID`         | TMDB-ID einstellen, dedupliziert (wiederholbar).         |
 | `-m`, `--mediathek-id ID` | `mediathek_id` direkt einstellen (wiederholbar).         |
+| `--name NAME`             | `name` überschreiben (Anzeige-Stamm).                    |
+| `--language CODE`         | `language` überschreiben.                                |
+| `--resolution {HD,SD,LQ}` | `resolution` überschreiben.                              |
+| `--remux {AV,A,V}`        | `remux`-Modus überschreiben.                             |
+| `--url URL`               | Quell-Medien-URL überschreiben.                          |
+| `--url-subtitle URL`      | Untertitel-URL überschreiben.                            |
+| `--path PATH`             | Zielpfad in der Bibliothek überschreiben.                |
 
 ```powershell
 theke --db build/theke.db queue add --tmdb 1474601     # queued/skipped/deduplicated
 theke --db build/theke.db queue add --mediathek-id <id>
+theke --db build/theke.db queue add --mediathek-id <id> --path "M:/Filme/X (2020)/X (2020).mp4"
 ```
 
 ### `queue list`
@@ -462,14 +491,38 @@ theke --db build/theke.db queue delete --cancelled --done   # Aufräumen
 theke --db build/theke.db queue delete --all
 ```
 
+### `queue download`
+
+Führt für `approved`-Einträge die Kette **Download -> Remux -> Move** aus (das
+Tor: die einzige Queue-Aktion, die Dateien schreibt). Quelle ist allein die
+Queue-Zeile: `url` wird nach `temp_path` geladen (HLS-Playlist oder direkter
+HTTP-Download), gemäß `remux` mit dem Sprach-Tag aus `language` remuxt (beides
+unter einem eindeutigen Temp-Präfix, damit parallele Downloads nicht
+kollidieren), nach `path` verschoben und ein etwaiger `url_subtitle` als Sidecar
+neben den Film gelegt. Nach erfolgreichem Move werden alle Temp-Dateien des
+Eintrags gelöscht. Nur `approved`-Zeilen sind berechtigt; eine fehlgeschlagene
+Zeile wird `failed` (mit Fehlertext) markiert und bricht den Lauf nicht ab --
+zum Wiederholen erneut `approve` (`--force`). Gibt `downloaded`/`failed` aus.
+
+| Option          | Wirkung                                          |
+| --------------- | ------------------------------------------------ |
+| `ID ...`        | Herunterzuladende (genehmigte) Eintrags-IDs.     |
+| `-a`, `--all`   | Alle genehmigten Einträge herunterladen.         |
+| `-f`, `--force` | Vorhandene Zieldatei überschreiben.              |
+
+```powershell
+theke --db build/theke.db queue download 3
+theke --db build/theke.db queue download --all
+```
+
 ## `theke file`
 
 Stufen 6-8: die dateibezogenen Primitive -- `download` (Stufe 6), `remux`
 (Stufe 7) und `move` (Stufe 8). Sie arbeiten **unabhängig von der Queue** auf
-expliziten URLs/Pfaden und berühren die DB nicht; die queue-gesteuerte
-Verkettung (`theke queue download`) folgt später. Ein Unterbefehl wählt die
-Aktion; einen Default gibt es nicht. Fortschritt geht nach stderr, das Ergebnis
-(in `--json` ein Objekt) nach stdout.
+expliziten URLs/Pfaden und berühren die DB nicht (die queue-gesteuerte
+Verkettung leistet `theke queue download`); nützlich für Tests und Einzelfälle.
+Ein Unterbefehl wählt die Aktion; einen Default gibt es nicht. Fortschritt geht
+nach stderr, das Ergebnis (in `--json` ein Objekt) nach stdout.
 
 **Konfiguration** (in `theke.json`):
 

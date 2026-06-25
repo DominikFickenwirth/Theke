@@ -156,6 +156,26 @@ def test_config_download_retries_wrong_type_is_error(tmp_path):
         load_config(str(path))
 
 
+def test_config_pipeline_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.temp_path == ""
+    assert cfg.video_ext == "mp4"
+    assert cfg.audio_ext == "aac"
+    assert cfg.library_path == "movies/{Title} ({Year})/{Title} ({Year}).mp4"
+
+
+def test_config_pipeline_keys_from_file(tmp_path):
+    path = tmp_path / "p.json"
+    write_config(path, {"temp_path": "/scratch", "video_ext": "mkv",
+                        "audio_ext": "m4a", "library_path": "L/{title}.mp4"})
+    cfg = load_config(str(path))
+    assert cfg.temp_path == "/scratch"
+    assert cfg.video_ext == "mkv"
+    assert cfg.audio_ext == "m4a"
+    assert cfg.library_path == "L/{title}.mp4"
+
+
 # -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [
@@ -707,7 +727,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 5   # phase 2 + phase 3 cols + rename + phase 5 queue
+        assert user_version(conn) == 6   # +phase 6-8 queue url/path/subtitle cols
     finally:
         conn.close()
 
@@ -715,6 +735,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
 QUEUE_COLS = {
     "id", "status", "mediathek_id", "tmdb_id", "name", "language",
     "resolution", "remux", "error", "created_at", "updated_at",
+    "url", "url_subtitle", "path",
 }
 
 
