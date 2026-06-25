@@ -366,6 +366,104 @@ def test_default_action_untouched_for_commands_without_default():
     assert theke._inject_default_action(parser, ["fetch", "--force"]) == ["fetch", "--force"]
 
 
+# -- short option aliases ---------------------------------------------------
+
+def test_short_global_options():
+    args = _parse(["-c", "cfg.json", "-d", "x.db", "-j", "fetch"])
+    assert args.config == "cfg.json"
+    assert args.db == "x.db"
+    assert args.json is True
+
+
+def test_short_queue_delete_cluster():
+    args = _parse(["queue", "delete", "-cdf"])
+    assert args.cancelled is True
+    assert args.done is True
+    assert args.failed is True
+    assert args.all is False
+
+
+def test_short_fetch_force():
+    assert _parse(["fetch", "-f"]).force is True
+
+
+def test_short_enrich_reset_status_only():
+    assert _parse(["enrich", "reset", "-s"]).status_only is True
+
+
+def test_short_enrich_report():
+    args = _parse(["enrich", "report", "-s", "ARD", "-m", "5", "-l", "-d", "-b"])
+    assert args.sender == "ARD"
+    assert args.min_rows == 5
+    assert args.live is True
+    assert args.diff is True
+    assert args.by_confidence is True
+
+
+def test_short_enrich_audit():
+    args = _parse(["enrich", "audit", "-s", "ZDF", "-c", "country-shape", "-l", "3"])
+    assert args.sender == "ZDF"
+    assert args.check == "country-shape"
+    assert args.limit == 3
+
+
+def test_short_enrich_show():
+    args = _parse(["enrich", "show", "-s", "ARD", "-m", "0.2", "-M", "0.9", "-l", "7"])
+    assert args.sender == "ARD"
+    assert args.min_conf == 0.2
+    assert args.max_conf == 0.9
+    assert args.limit == 7
+
+
+def test_short_enrich_dist():
+    args = _parse(["enrich", "dist", "-s", "ARD", "-f", "category", "-l", "10"])
+    assert args.sender == "ARD"
+    assert args.field == "category"
+    assert args.limit == 10
+
+
+def test_short_match_run():
+    args = _parse(["match", "run", "-t", "603", "-T", "series", "-s", "1", "-e", "2", "-d", "-m", "0.5"])
+    assert args.tmdb == "603"
+    assert args.type == "series"
+    assert args.season == 1
+    assert args.episode == 2
+    assert args.dry_run is True
+    assert args.min_conf == 0.5
+
+
+def test_short_match_show():
+    args = _parse(["match", "show", "-t", "603", "-T", "movie", "-m", "0.3", "-l", "5"])
+    assert args.tmdb == "603"
+    assert args.type == "movie"
+    assert args.min_conf == 0.3
+    assert args.limit == 5
+
+
+def test_short_match_reset_status_only():
+    assert _parse(["match", "reset", "-s"]).status_only is True
+
+
+def test_short_queue_add():
+    args = _parse(["queue", "add", "-t", "603", "-m", "7"])
+    assert args.tmdb == ["603"]
+    assert args.mediathek_id == ["7"]
+
+
+def test_short_queue_list_status():
+    assert _parse(["queue", "list", "-s", "proposed"]).status == "proposed"
+
+
+def test_short_queue_approve():
+    args = _parse(["queue", "approve", "-a", "-f"])
+    assert args.all is True
+    assert args.force is True
+
+
+def test_short_queue_cancel_all():
+    assert _parse(["queue", "cancel", "-a"]).all is True
+
+
 def test_cli_bare_enrich_dispatches_run(tmp_path, monkeypatch):
     import theke
     seen = {}
