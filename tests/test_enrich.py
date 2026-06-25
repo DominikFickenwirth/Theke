@@ -302,22 +302,23 @@ def test_arte_taxonomy_french():
 
 
 def test_arte_taxonomy_french_super_label():
-    # No medium sub-label -> category stays NULL (honest); the super-label
-    # "Histoire" sets the genre (Documentary, History).
+    # No medium sub-label, feature-length (>1800s): the duration prior cannot
+    # decide a long-form medium -> category stays NULL (a film is protected). The
+    # super-label "Histoire" still sets the genre; confidence reflects the NULL.
     r = enrich("ARTE.FR", "Histoire - XXe siècle", "Pompeji", "", 3600)
     assert r["category"] is None
     assert r["genre"] == "Documentary, History"
     assert r["language"] == "fr"
-    assert r["enrich_confidence"] == 0.9
+    assert r["enrich_confidence"] == 0.2
 
 
 def test_arte_taxonomy_english():
     r = enrich("ARTE.EN", "Politics and society - Investigation and reports",
                  "Story", "", 3600)
-    assert r["category"] is None         # no medium sub-label -> NULL
+    assert r["category"] is None         # no sub-label, >1800s -> NULL (prior)
     assert r["genre"] == "News"          # super-label -> News
     assert r["language"] == "en"
-    assert r["enrich_confidence"] == 0.9
+    assert r["enrich_confidence"] == 0.2
 
 
 def test_arte_taxonomy_spanish():
@@ -778,12 +779,30 @@ def test_konzert_maps_to_clip_music():
     assert r["genre"] == "Music"
 
 
-def test_arte_ambiguous_super_label_is_null_category():
-    # "Fernsehfilme und Serien" with no medium sub-label: Movie-vs-series
-    # undecidable -> NULL, and that super-label carries no genre.
+def test_arte_unknown_sub_short_falls_to_duration_prior():
+    # An unknown medium sub-label no longer leaves NULL: a SHORT item (<1800s)
+    # under a recognized super-label takes the duration prior (Episode). A sub-30-
+    # min piece under a fiction rubric is never a feature, so a film is not at
+    # risk. The fiction super-label still carries no genre.
     r = enrich("ARTE.DE", "Fernsehfilme und Serien - Kurz und witzig", "X", "", 1500)
-    assert r["category"] is None
+    assert r["category"] == "Episode"
     assert r["genre"] is None
+
+
+def test_arte_unknown_sub_long_stays_null():
+    # GUARD: a feature-length (>1800s) item under a fiction super-label with an
+    # unknown sub-label stays NULL -- the duration prior protects a possible film,
+    # exactly as for a non-ARTE row.
+    r = enrich("ARTE.DE", "Fernsehfilme und Serien - Kurz und witzig", "X", "", 5400)
+    assert r["category"] is None
+
+
+def test_arte_unknown_sub_short_nonfiction_keeps_genre():
+    # A short item under a non-fiction super-label: Episode via the prior, with
+    # the super-label's genre preserved (News here).
+    r = enrich("ARTE.FR", "Info et société - Décryptages", "Le sujet", "", 1500)
+    assert r["category"] == "Episode"
+    assert r["genre"] == "News"
 
 
 def test_arte_series_sub_label_maps_to_episode():
