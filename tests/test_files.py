@@ -10,7 +10,20 @@ import theke
 import theke.files as files
 from theke import Config, main
 from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
-                         download_file)
+                         download_file, download_hls)
+
+
+def install_http(monkeypatch, mapping):
+    """Monkeypatch theke.http_get to serve URL-mapped bytes (or raise an
+    Exception value); an unmapped URL is an error."""
+    def fake_get(url):
+        value = mapping.get(url)
+        if value is None:
+            raise RuntimeError(f"unexpected url: {url}")
+        if isinstance(value, Exception):
+            raise value
+        return value
+    monkeypatch.setattr(theke, "http_get", fake_get)
 
 
 # -- m3u8 parsing (pure) ------------------------------------------------------
@@ -193,3 +206,116 @@ def test_download_raises_after_exhausting_retries(tmp_path, monkeypatch):
     out = str(tmp_path / "v.mp4")
     with pytest.raises(RuntimeError, match="always down"):
         download_file(out=out, url="http://x", retries=2)
+
+
+# -- HLS download + ffmpeg fallback -------------------------------------------
+
+MASTER_URL = "https://h/v/master.m3u8"
+MEDIA_URL  = "https://h/v/media.m3u8"
+MASTER_TXT = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nmedia.m3u8\n"
+MEDIA_TXT  = b"#EXTM3U\n#EXTINF:6,\nseg0.ts\n#EXTINF:6,\nseg1.ts\n#EXT-X-ENDLIST\n"
+
+
+def test_hls_native_concatenates_segments_in_order(tmp_path, monkeypatch):
+    install_http(monkeypatch, {MASTER_URL: MASTER_TXT, MEDIA_URL: MEDIA_TXT,
+                               "https://h/v/seg0.ts": b"AAA",
+                               "https://h/v/seg1.ts": b"BBB"})
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MASTER_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls"
+    assert nsegs == 2
+    assert (tmp_path / "v.ts").read_bytes() == b"AAABBB"
+    assert nbytes == 6
+    assert not (tmp_path / "v.ts.segments").exists()   # segdir cleaned up
+
+
+def test_hls_native_prepends_init_segment(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n'
+             b'#EXTINF:4,\nseg0.m4s\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media,
+                               "https://h/v/init.mp4": b"INIT",
+                               "https://h/v/seg0.m4s": b"DATA"})
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert (tmp_path / "v.ts").read_bytes() == b"INITDATA"
+
+
+def test_hls_resume_skips_existing_segment_files(tmp_path, monkeypatch):
+    # seg1 already on disk; its URL is omitted from the map -> fetching it errors
+    monkeypatch.setattr(files, "run_ffmpeg",
+                        lambda args: pytest.fail("should not fall back"))
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA"})
+    out = str(tmp_path / "v.ts")
+    segdir = tmp_path / "v.ts.segments"
+    segdir.mkdir()
+    (segdir / "seg_00001.ts").write_bytes(b"BBB")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls"
+    assert (tmp_path / "v.ts").read_bytes() == b"AAABBB"
+
+
+def test_hls_encrypted_falls_back_to_ffmpeg(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n'
+             b'#EXTINF:6,\nseg0.ts\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media})
+    seen = {}
+
+    def fake_ffmpeg(args):
+        seen["args"] = args
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FROM-FFMPEG")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert (tmp_path / "v.ts").read_bytes() == b"FROM-FFMPEG"
+    assert MEDIA_URL in seen["args"] and "ffmpeg" in seen["args"]
+
+
+def test_hls_native_failure_falls_back_to_ffmpeg(tmp_path, monkeypatch):
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                               "https://h/v/seg1.ts": RuntimeError("seg gone")})
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FALLBACK")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert (tmp_path / "v.ts").read_bytes() == b"FALLBACK"
+
+
+# -- file download CLI --------------------------------------------------------
+
+def test_cli_file_download_direct_json(tmp_path, capsys, monkeypatch):
+    out = str(tmp_path / "v.mp4")
+    monkeypatch.setattr(files, "open_url", Opener(b"data"))
+    rc = main(["--json", "file", "download", "--url", "http://x/v.mp4", "--out", out])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"action": "download", "out": out, "bytes": 4}
+    assert captured.out.strip().count("\n") == 0      # one JSON line on stdout
+    assert "-> downloading" in captured.err            # progress on stderr
+
+
+def test_cli_file_download_hls_routes_to_segments(tmp_path, capsys, monkeypatch):
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                               "https://h/v/seg1.ts": b"BBB"})
+    out = str(tmp_path / "v.ts")
+    rc = main(["--json", "file", "download", "--url", MEDIA_URL, "--out", out])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "action": "hls", "out": out, "bytes": 6, "segments": 2}
+    assert (tmp_path / "v.ts").read_bytes() == b"AAABBB"
+
+
+def test_cli_file_download_missing_args_is_usage_error(capsys):
+    assert main(["file", "download"]) == 2
