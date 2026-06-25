@@ -6,12 +6,16 @@
 # through run_ffmpeg. CLI wiring + result emission live in __init__.py.
 
 import logging
+import os
 import re
 import urllib.parse
+import urllib.request
 
 import theke   # for http_get, resolved at call time (avoids an import cycle)
 
 log = logging.getLogger("theke")
+
+CHUNK = 1 << 16   # 64 KiB streaming buffer
 
 _BANDWIDTH_RX = re.compile(r"BANDWIDTH=(\d+)")
 _URI_RX       = re.compile(r'URI="([^"]*)"')
@@ -66,3 +70,52 @@ def parse_media_playlist(text, base_url):
         elif line and not line.startswith("#"):
             segments.append(urllib.parse.urljoin(base_url, line))
     return init, segments, encrypted
+
+
+# -- direct download ----------------------------------------------------------
+
+def open_url(url, offset=0):
+    """Open a URL for streaming; return (reader, resumed). With offset>0 a Range
+    request is sent and resumed is True only when the server honors it (HTTP 206).
+    The network seam for the direct downloader -- monkeypatched in tests."""
+    headers = {"User-Agent": theke.USER_AGENT}
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    response = urllib.request.urlopen(urllib.request.Request(url, headers=headers))
+    return response, response.status == 206
+
+
+def download_file(url, out, retries) -> int:
+    """Stream url to out, resuming a leftover '.part' via Range when possible.
+    On error retry up to `retries` times (each retry resumes from the current
+    '.part' size). Return the byte count. The seam is open_url."""
+    log.info("downloading %s", url.rsplit("/", 1)[-1])
+    for attempt in range(retries + 1):
+        try:
+            return _download_once(url, out)
+        except Exception as exc:
+            if attempt == retries:
+                raise
+            log.info("download error (%s); retry %d/%d", exc, attempt + 1, retries)
+
+
+def _download_once(url, out) -> int:
+    part = out + ".part"
+    offset = os.path.getsize(part) if os.path.exists(part) else 0
+    reader, resumed = open_url(url, offset)
+    if offset and not resumed:
+        offset = 0   # server ignored the Range -> rewrite from scratch
+        log.info("range not honored; restarting")
+    elif offset:
+        log.info("resuming at %d bytes", offset)
+    try:
+        with open(part, "ab" if offset else "wb") as fh:   # wb truncates a stale part
+            while True:
+                buf = reader.read(CHUNK)
+                if not buf:
+                    break
+                fh.write(buf)
+    finally:
+        reader.close()
+    os.replace(part, out)
+    return os.path.getsize(out)
