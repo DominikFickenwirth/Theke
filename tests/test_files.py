@@ -404,6 +404,32 @@ def test_run_remux_creates_missing_parent_dirs(tmp_path, monkeypatch):
     assert n == len(b"muxed")
 
 
+def test_run_remux_removes_faulty_output_on_failure(tmp_path, monkeypatch):
+    out = tmp_path / "out.mp4"
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:        # ffmpeg writes a partial file...
+            fh.write(b"partial garbage")
+        raise RuntimeError("ffmpeg failed (exit 1): boom")   # ...then dies
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        run_remux("ffmpeg", "in.ts", "AV", str(out))
+    assert not out.exists()                     # faulty target cleaned up
+
+
+def test_run_remux_failure_without_output_is_fine(tmp_path, monkeypatch):
+    out = tmp_path / "out.mp4"
+
+    def fake_ffmpeg(args):
+        raise RuntimeError("ffmpeg failed (exit 1): no output written")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        run_remux("ffmpeg", "in.ts", "AV", str(out))
+    assert not out.exists()
+
+
 def test_run_ffmpeg_missing_binary_raises(tmp_path):
     with pytest.raises(RuntimeError, match="not found"):
         run_ffmpeg(["this-ffmpeg-does-not-exist", "-version"])
