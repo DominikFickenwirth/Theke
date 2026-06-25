@@ -1,0 +1,68 @@
+# -- files (phases 6-8: download / remux / move) ------------------------------
+# Queue-independent file primitives driven by explicit URLs/paths: download a
+# media URL (plain HTTP with Range-resume, or HLS segment assembly with an ffmpeg
+# fallback), remux via ffmpeg (stream copy, no transcode), move into the library.
+# Network is touched through http_get/open_url (monkeypatched in tests); ffmpeg
+# through run_ffmpeg. CLI wiring + result emission live in __init__.py.
+
+import logging
+import re
+import urllib.parse
+
+import theke   # for http_get, resolved at call time (avoids an import cycle)
+
+log = logging.getLogger("theke")
+
+_BANDWIDTH_RX = re.compile(r"BANDWIDTH=(\d+)")
+_URI_RX       = re.compile(r'URI="([^"]*)"')
+_METHOD_RX    = re.compile(r"METHOD=([^,\s]+)")
+
+
+# -- m3u8 parsing -------------------------------------------------------------
+
+def is_hls(url) -> bool:
+    """True if the URL points at an HLS playlist (path ends '.m3u8', query
+    ignored)."""
+    return urllib.parse.urlsplit(url).path.lower().endswith(".m3u8")
+
+
+def is_master(text) -> bool:
+    """True if the playlist lists variant streams (a master playlist)."""
+    return "#EXT-X-STREAM-INF" in text
+
+
+def parse_master(text, base_url) -> list:
+    """Variants of a master playlist as (bandwidth, absolute_uri) in file order."""
+    variants = []
+    bandwidth = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-STREAM-INF"):
+            m = _BANDWIDTH_RX.search(line)
+            bandwidth = int(m.group(1)) if m else 0
+        elif line and not line.startswith("#") and bandwidth is not None:
+            variants.append((bandwidth, urllib.parse.urljoin(base_url, line)))
+            bandwidth = None
+    return variants
+
+
+def parse_media_playlist(text, base_url):
+    """Parse a media playlist: return (init_uri | None, [segment_uris], encrypted).
+    URIs are resolved against base_url; encrypted is True for a real #EXT-X-KEY
+    (METHOD other than NONE)."""
+    init = None
+    segments = []
+    encrypted = False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-MAP"):
+            m = _URI_RX.search(line)
+            if m:
+                init = urllib.parse.urljoin(base_url, m.group(1))
+        elif line.startswith("#EXT-X-KEY"):
+            m = _METHOD_RX.search(line)
+            if m and m.group(1).upper() != "NONE":
+                encrypted = True
+        elif line and not line.startswith("#"):
+            segments.append(urllib.parse.urljoin(base_url, line))
+    return init, segments, encrypted
