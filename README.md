@@ -67,12 +67,18 @@ Konsolen-Skript `theke`.
 
 Vor dem Befehl angegeben, gelten für alle Befehle:
 
-| Option          | Wirkung                                                     |
-| --------------- | ----------------------------------------------------------- |
-| `--config PATH` | Konfigurationsdatei (Standard: `theke.json`).               |
-| `--db PATH`     | DB-Datei; überschreibt `db_path` aus der Konfiguration.     |
-| `--json`        | Maschinenlesbar: genau ein JSON-Objekt auf stdout.          |
-| `-h`, `--help`  | Hilfe (auch je Befehl: `theke <befehl> --help`).            |
+| Option               | Wirkung                                                |
+| -------------------- | ------------------------------------------------------ |
+| `-c`, `--config PATH`| Konfigurationsdatei (Standard: `theke.json`).          |
+| `-d`, `--db PATH`    | DB-Datei; überschreibt `db_path` aus der Konfiguration.|
+| `-j`, `--json`       | Maschinenlesbar: genau ein JSON-Objekt auf stdout.     |
+| `-h`, `--help`       | Hilfe (auch je Befehl: `theke <befehl> --help`).       |
+
+**Kürzel:** Fast jede Option hat ein Ein-Buchstaben-Kürzel (wie `-h` für
+`--help`); Schalter lassen sich bündeln, z. B. `theke queue delete -cdf` für
+`--cancelled --done --failed`. Die jeweiligen Buchstaben stehen in den
+Options-Tabellen der Befehle. (Die Query-Filter `--like/--eq/--null/--not-null`
+von `enrich show` haben bewusst keines.)
 
 **stdout vs. stderr:** stdout trägt nur das Ergebnis (im `--json`-Modus das eine
 JSON-Objekt). Fortschritt und Diagnose laufen als Klartext (`-> ...`) über
@@ -107,9 +113,9 @@ MediathekView-Update-Logik: Server-Listen-ID prüfen -> bei Gleichstand
 laden. Voller Download + Import dauert ca. 30 s. Der Spiegel wächst nur und wird
 aktualisiert, gelöscht wird nie.
 
-| Option    | Wirkung                                             |
-| --------- | --------------------------------------------------- |
-| `--force` | Immer die volle Liste laden (Diff/Skip übergehen).  |
+| Option          | Wirkung                                             |
+| --------------- | --------------------------------------------------- |
+| `-f`, `--force` | Immer die volle Liste laden (Diff/Skip übergehen).  |
 
 ```powershell
 theke --db build/theke.db fetch           # action = full|diff|skip, imported = N
@@ -134,9 +140,9 @@ Serien-/Sendungsnamen; Rubriken landen in `genre` (kuratiertes Set), Dachmarken/
 Sendeplätze in `slot`, reine Format-Topics in `category` (Wert `Events` für
 Festivals/Preise).
 
-| Option    | Wirkung                                          |
-| --------- | ------------------------------------------------ |
-| `--force` | Alle Zeilen neu anreichern, nicht nur neue.      |
+| Option          | Wirkung                                          |
+| --------------- | ------------------------------------------------ |
+| `-f`, `--force` | Alle Zeilen neu anreichern, nicht nur neue.      |
 
 ```powershell
 theke --db build/theke.db enrich run            # enriched = N
@@ -168,9 +174,9 @@ Macht das Anreichern rückgängig: setzt angereicherte/gematchte Zeilen
 die enrich-Spalten **und** die match-Spalten (`tmdb_id`, `match_confidence`).
 Gibt `reset = N` (Anzahl betroffener Zeilen) aus.
 
-| Option          | Wirkung                                                      |
-| --------------- | ----------------------------------------------------------- |
-| `--status-only` | Nur `status` zurücksetzen, alle Spalten unverändert lassen. |
+| Option                | Wirkung                                                      |
+| --------------------- | ----------------------------------------------------------- |
+| `-s`, `--status-only` | Nur `status` zurücksetzen, alle Spalten unverändert lassen. |
 
 ```powershell
 theke --db build/theke.db enrich reset                # reset = N (Spalten geleert)
@@ -182,13 +188,13 @@ theke --db build/theke.db enrich reset --status-only  # nur status 1/2 -> 0
 Per-Sender-Abdeckung der enrich-Felder (% gefüllter Zeilen). Liest standardmäßig
 die gespeicherten Spalten.
 
-| Option            | Wirkung                                                          |
-| ----------------- | ---------------------------------------------------------------- |
-| `--sender X[,Y]`  | Nur diese Sender (kommagetrennt).                                |
-| `--min-rows N`    | Sender mit weniger Zeilen weglassen (Standard 1000; `0` = alle). |
-| `--live`          | `enrich()` live ausführen statt gespeicherte Spalten zu lesen. |
-| `--diff`          | Churn je Feld: gespeicherte Spalten vs. ein Live-Lauf.           |
-| `--by-confidence` | Die `cat`-Spalte in Spalten je Konfidenzstufe aufteilen.         |
+| Option                  | Wirkung                                                          |
+| ----------------------- | ---------------------------------------------------------------- |
+| `-s`, `--sender X[,Y]`  | Nur diese Sender (kommagetrennt).                                |
+| `-m`, `--min-rows N`    | Sender mit weniger Zeilen weglassen (Standard 1000; `0` = alle). |
+| `-l`, `--live`          | `enrich()` live ausführen statt gespeicherte Spalten zu lesen. |
+| `-d`, `--diff`          | Churn je Feld: gespeicherte Spalten vs. ein Live-Lauf.           |
+| `-b`, `--by-confidence` | Die `cat`-Spalte in Spalten je Konfidenzstufe aufteilen.         |
 
 ```powershell
 theke --db build/theke.db enrich report                     # alle Sender (>=1000)
@@ -203,11 +209,11 @@ als gefüllt, aber nicht korrekt). Je Sender/Check `count` + Beispiele. Die Chec
 `country-shape`, `title-credit`, `episodic-unparsed` greifen nur auf bereits
 angereicherten Zeilen.
 
-| Option               | Wirkung                                            |
-| -------------------- | -------------------------------------------------- |
-| `--sender X[,Y]`     | Nur diese Sender.                                  |
-| `--check NAME[,...]` | Nur diese Checks (Standard alle).                  |
-| `--limit N`          | Beispiele je Befund (Standard 5).                  |
+| Option                     | Wirkung                                            |
+| -------------------------- | -------------------------------------------------- |
+| `-s`, `--sender X[,Y]`     | Nur diese Sender.                                  |
+| `-c`, `--check NAME[,...]` | Nur diese Checks (Standard alle).                  |
+| `-l`, `--limit N`          | Beispiele je Befund (Standard 5).                  |
 
 Checks: `bare-topic`, `case-variants`, `topic-pipe`, `topic-marker`,
 `country-shape`, `title-credit`, `episodic-unparsed`.
@@ -225,14 +231,14 @@ nie interpoliert).
 
 | Option                  | Wirkung                                          |
 | ----------------------- | ------------------------------------------------ |
-| `--sender X[,Y]`        | Nur diese Sender.                                |
+| `-s`, `--sender X[,Y]`  | Nur diese Sender.                                |
 | `--like FIELD PATTERN`  | `FIELD LIKE PATTERN` (wiederholbar).             |
 | `--eq FIELD VALUE`      | `FIELD = VALUE` (wiederholbar).                  |
 | `--null FIELD`          | `FIELD IS NULL` (wiederholbar).                  |
 | `--not-null FIELD`      | `FIELD IS NOT NULL` (wiederholbar).              |
-| `--min-conf X`          | `enrich_confidence >= X`.                      |
-| `--max-conf X`          | `enrich_confidence <= X`.                      |
-| `--limit N`             | Maximale Zeilenzahl (Standard 20).               |
+| `-m`, `--min-conf X`    | `enrich_confidence >= X`.                      |
+| `-M`, `--max-conf X`    | `enrich_confidence <= X`.                      |
+| `-l`, `--limit N`       | Maximale Zeilenzahl (Standard 20).               |
 
 ```powershell
 theke --db build/theke.db enrich show --eq category unklar --limit 10
@@ -244,11 +250,11 @@ theke --db build/theke.db enrich show --sender ARTE.DE --not-null season --like 
 Top-N-Häufigkeiten der Werte eines Feldes (absteigend), z. B. zum Sichten der
 Kategorie- oder Länder-Verteilung.
 
-| Option           | Wirkung                                  |
-| ---------------- | ---------------------------------------- |
-| `--field NAME`   | Zu zählende Spalte (Pflicht).            |
-| `--sender X[,Y]` | Nur diese Sender.                        |
-| `--limit N`      | Top-N Werte (Standard 30).               |
+| Option                 | Wirkung                                  |
+| ---------------------- | ---------------------------------------- |
+| `-f`, `--field NAME`   | Zu zählende Spalte (Pflicht).            |
+| `-s`, `--sender X[,Y]` | Nur diese Sender.                        |
+| `-l`, `--limit N`      | Top-N Werte (Standard 30).               |
 
 ```powershell
 theke --db build/theke.db enrich dist --field category
@@ -287,14 +293,14 @@ Ergebnis meldet `arte_linked` (Zahl der so verknüpften Zeilen) -- wie
 Bei `--type series` trägt das Ergebnis den **Episodentitel** in `title` und den
 Serientitel zusätzlich in `series`.
 
-| Option           | Wirkung                                                       |
-| ---------------- | ------------------------------------------------------------- |
-| `--tmdb ID`      | Zu matchende TMDB-ID (Film-ID, bzw. Serien-ID bei `series`).  |
-| `--type T`       | `movie` (Standard) oder `series`.                             |
-| `--season N`     | Staffelnummer (Pflicht bei `--type series`).                  |
-| `--episode N`    | Folgennummer (Pflicht bei `--type series`).                   |
-| `--dry-run`      | Treffer berechnen, nichts schreiben.                          |
-| `--min-conf X`   | Mindest-Confidence zum Markieren (Standard: Config).          |
+| Option               | Wirkung                                                       |
+| -------------------- | ------------------------------------------------------------- |
+| `-t`, `--tmdb ID`    | Zu matchende TMDB-ID (Film-ID, bzw. Serien-ID bei `series`).  |
+| `-T`, `--type T`     | `movie` (Standard) oder `series`.                             |
+| `-s`, `--season N`   | Staffelnummer (Pflicht bei `--type series`).                  |
+| `-e`, `--episode N`  | Folgennummer (Pflicht bei `--type series`).                   |
+| `-d`, `--dry-run`    | Treffer berechnen, nichts schreiben.                          |
+| `-m`, `--min-conf X` | Mindest-Confidence zum Markieren (Standard: Config).          |
 
 ```powershell
 theke --db build/theke.db match run --tmdb 1474601   # candidates/written/arte_linked
@@ -308,14 +314,14 @@ Reines Lese-Werkzeug: listet die Kandidaten-Zeilen mit Score-Aufschlüsselung
 (Titelähnlichkeit, Jahr-/Laufzeit-Differenz), ohne zu schreiben. Standardmäßig
 alles, was nicht verworfen wurde -- zum Justieren der Match-Heuristik.
 
-| Option         | Wirkung                                                     |
-| -------------- | ----------------------------------------------------------- |
-| `--tmdb ID`    | Zu inspizierende TMDB-ID (Film-ID, bzw. Serien-ID).         |
-| `--type T`     | `movie` (Standard) oder `series`.                           |
-| `--season N`   | Staffelnummer (Pflicht bei `--type series`).                |
-| `--episode N`  | Folgennummer (Pflicht bei `--type series`).                 |
-| `--min-conf X` | Mindest-Confidence zum Listen (Standard 0.0).               |
-| `--limit N`    | Maximale Kandidatenzahl (Standard 20).                      |
+| Option               | Wirkung                                                     |
+| -------------------- | ----------------------------------------------------------- |
+| `-t`, `--tmdb ID`    | Zu inspizierende TMDB-ID (Film-ID, bzw. Serien-ID).         |
+| `-T`, `--type T`     | `movie` (Standard) oder `series`.                           |
+| `-s`, `--season N`   | Staffelnummer (Pflicht bei `--type series`).                |
+| `-e`, `--episode N`  | Folgennummer (Pflicht bei `--type series`).                 |
+| `-m`, `--min-conf X` | Mindest-Confidence zum Listen (Standard 0.0).               |
+| `-l`, `--limit N`    | Maximale Kandidatenzahl (Standard 20).                      |
 
 ```powershell
 theke --db build/theke.db match show --tmdb 1474601
@@ -328,9 +334,9 @@ Macht das Matching rückgängig: setzt gematchte Zeilen (`status='2'`) zurück a
 `'1'` (angereichert). Leert dabei `tmdb_id` und `match_confidence`. Reine
 DB-Operation -- kein TMDB-Key nötig. Gibt `reset = N` aus.
 
-| Option          | Wirkung                                                       |
-| --------------- | ------------------------------------------------------------- |
-| `--status-only` | Nur `status` zurücksetzen, `tmdb_id`/`match_confidence` lassen. |
+| Option                | Wirkung                                                       |
+| --------------------- | ------------------------------------------------------------- |
+| `-s`, `--status-only` | Nur `status` zurücksetzen, `tmdb_id`/`match_confidence` lassen. |
 
 ```powershell
 theke --db build/theke.db match reset                # reset = N (IDs geleert)
@@ -376,10 +382,10 @@ gesetzt ist. Eine bereits aktiv (P/A/D) eingereihte `mediathek_id` wird
 nicht. Beide Optionen sind wiederholbar. `deduplicated` meldet die dabei
 zusammengefassten/herausgefilterten Quellzeilen.
 
-| Option            | Wirkung                                                  |
-| ----------------- | -------------------------------------------------------- |
-| `--tmdb ID`       | TMDB-ID einstellen, dedupliziert (wiederholbar).         |
-| `--mediathek-id ID` | `mediathek_id` direkt einstellen (wiederholbar).       |
+| Option                    | Wirkung                                                  |
+| ------------------------- | -------------------------------------------------------- |
+| `-t`, `--tmdb ID`         | TMDB-ID einstellen, dedupliziert (wiederholbar).         |
+| `-m`, `--mediathek-id ID` | `mediathek_id` direkt einstellen (wiederholbar).         |
 
 ```powershell
 theke --db build/theke.db queue add --tmdb 1474601     # queued/skipped/deduplicated
@@ -391,9 +397,9 @@ theke --db build/theke.db queue add --mediathek-id <id>
 Listet Einträge (älteste Erstellung zuerst), optional nach Lebenszyklus-Zustand
 gefiltert. `--json` gibt die Zeilen zurück, sonst eine Tabelle auf stdout.
 
-| Option           | Wirkung                                                                        |
-| ---------------- | ------------------------------------------------------------------------------ |
-| `--status STATE` | Nur diesen Zustand: `proposed`, `approved`, `busy`, `cancelled`, `done`, `failed`. |
+| Option                 | Wirkung                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------ |
+| `-s`, `--status STATE` | Nur diesen Zustand: `proposed`, `approved`, `busy`, `cancelled`, `done`, `failed`. |
 
 ```powershell
 theke --db build/theke.db queue list
@@ -407,11 +413,11 @@ Zustand `proposed` werden berührt -- mit `--force` dagegen aus jedem Zustand
 (z. B. ein `cancelled`- oder `done`-Eintrag zurück auf `approved`). Gibt
 `approved = N` aus.
 
-| Option    | Wirkung                                                      |
-| --------- | ------------------------------------------------------------ |
-| `ID ...`  | Zu genehmigende Eintrags-IDs.                                |
-| `--all`   | Alle (mit `--force`: alle, sonst nur `proposed`) genehmigen. |
-| `--force` | Unabhängig vom aktuellen Zustand zurück auf `approved`.       |
+| Option          | Wirkung                                                      |
+| --------------- | ------------------------------------------------------------ |
+| `ID ...`        | Zu genehmigende Eintrags-IDs.                                |
+| `-a`, `--all`   | Alle (mit `--force`: alle, sonst nur `proposed`) genehmigen. |
+| `-f`, `--force` | Unabhängig vom aktuellen Zustand zurück auf `approved`.       |
 
 ```powershell
 theke --db build/theke.db queue approve 3 4
@@ -425,10 +431,10 @@ Storniert aktive Einträge (`proposed`/`approved`/`busy`) -- eine weiche
 Zustandsänderung, die den Datensatz behält. Abgeschlossene Einträge bleiben
 unberührt. Gibt `cancelled = N` aus.
 
-| Option   | Wirkung                              |
-| -------- | ------------------------------------ |
-| `ID ...` | Zu stornierende Eintrags-IDs.        |
-| `--all`  | Alle aktiven Einträge stornieren.    |
+| Option        | Wirkung                              |
+| ------------- | ------------------------------------ |
+| `ID ...`      | Zu stornierende Eintrags-IDs.        |
+| `-a`, `--all` | Alle aktiven Einträge stornieren.    |
 
 ```powershell
 theke --db build/theke.db queue cancel 3
@@ -442,13 +448,13 @@ Datensatz behält). Genau ein Selektor: IDs, `--all`, oder ein bzw. mehrere
 Endzustands-Schalter (`--cancelled`/`--done`/`--failed`, kombinierbar). Gibt
 `deleted = N` aus.
 
-| Option        | Wirkung                                  |
-| ------------- | ---------------------------------------- |
-| `ID ...`      | Zu löschende Eintrags-IDs.               |
-| `--all`       | Alle Einträge löschen.                   |
-| `--cancelled` | Alle stornierten Einträge löschen.       |
-| `--done`      | Alle fertigen Einträge löschen.          |
-| `--failed`    | Alle fehlgeschlagenen Einträge löschen.  |
+| Option              | Wirkung                                  |
+| ------------------- | ---------------------------------------- |
+| `ID ...`            | Zu löschende Eintrags-IDs.               |
+| `-a`, `--all`       | Alle Einträge löschen.                   |
+| `-c`, `--cancelled` | Alle stornierten Einträge löschen.       |
+| `-d`, `--done`      | Alle fertigen Einträge löschen.          |
+| `-f`, `--failed`    | Alle fehlgeschlagenen Einträge löschen.  |
 
 ```powershell
 theke --db build/theke.db queue delete 3 4
