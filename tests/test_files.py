@@ -1,13 +1,16 @@
 """Tests for the file primitives (phases 6-8): download, remux, move."""
 
+import io
 import json
+import os
 
 import pytest
 
 import theke
 import theke.files as files
 from theke import Config, main
-from theke.files import (is_hls, is_master, parse_master, parse_media_playlist)
+from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
+                         download_file)
 
 
 # -- m3u8 parsing (pure) ------------------------------------------------------
@@ -86,3 +89,107 @@ def test_parse_media_playlist_method_none_not_encrypted():
             '#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n')
     init, segs, enc = parse_media_playlist(text, "https://h/v/media.m3u8")
     assert enc is False
+
+
+# -- direct download (resume + retry) -----------------------------------------
+
+class Opener:
+    """Fake open_url: records offsets; serves data[offset:] when the server
+    honors the Range (resumable), else the whole body (HTTP 200)."""
+
+    def __init__(self, data, resumable=True):
+        self.data = data
+        self.resumable = resumable
+        self.offsets = []
+
+    def __call__(self, url, offset=0):
+        self.offsets.append(offset)
+        resumed = self.resumable and offset > 0
+        body = self.data[offset:] if resumed else self.data
+        return io.BytesIO(body), resumed
+
+
+def test_download_full_writes_bytes_and_removes_part(tmp_path, monkeypatch):
+    data = b"hello world payload"
+    monkeypatch.setattr(files, "open_url", Opener(data))
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=0)
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part").exists()
+
+
+def test_download_resumes_from_part_with_206(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"
+    (tmp_path / "v.mp4.part").write_bytes(data[:6])   # 6 bytes already on disk
+    opener = Opener(data, resumable=True)
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=0)
+    assert opener.offsets == [6]                       # asked to resume at 6
+    assert (tmp_path / "v.mp4").read_bytes() == data
+
+
+def test_download_restarts_when_server_ignores_range(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"
+    (tmp_path / "v.mp4.part").write_bytes(b"STALE")    # leftover partial
+    opener = Opener(data, resumable=False)             # server answers 200
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=0)
+    assert (tmp_path / "v.mp4").read_bytes() == data   # truncated, rewritten
+
+
+def test_download_retries_then_succeeds(tmp_path, monkeypatch):
+    data = b"retry me please"
+    calls = {"n": 0}
+
+    def opener(url, offset=0):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("connection reset")
+        return io.BytesIO(data[offset:] if offset else data), offset > 0
+
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=2)
+    assert calls["n"] == 2
+    assert (tmp_path / "v.mp4").read_bytes() == data
+
+
+def test_download_resumes_across_a_midstream_failure(tmp_path, monkeypatch):
+    data = os.urandom(files.CHUNK + 5000)              # > one chunk
+    calls = {"n": 0}
+
+    class Failing:
+        def __init__(self, body):
+            self.buf = io.BytesIO(body)
+            self.reads = 0
+        def read(self, n):
+            if self.reads >= 1:
+                raise RuntimeError("midstream drop")
+            self.reads += 1
+            return self.buf.read(n)
+        def close(self):
+            pass
+
+    def opener(url, offset=0):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Failing(data), False                # dies after one chunk
+        return io.BytesIO(data[offset:]), offset > 0   # resumes the rest
+
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=2)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+
+
+def test_download_raises_after_exhausting_retries(tmp_path, monkeypatch):
+    def opener(url, offset=0):
+        raise RuntimeError("always down")
+
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    with pytest.raises(RuntimeError, match="always down"):
+        download_file(out=out, url="http://x", retries=2)
