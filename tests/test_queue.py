@@ -146,12 +146,12 @@ def insert_mediathek(conn, mediathek_id, status="2", tmdb_id="100", language="de
 
 def qargs(queue_cmd="add", tmdb=None, mediathek_id=None, status=None,
           ids=None, all=False, force=False, cancelled=False, done=False,
-          failed=False, json=False, name=None, language=None, resolution=None,
+          failed=False, json=False, language=None, resolution=None,
           remux=None, url=None, path=None, url_subtitle=None):
     return SimpleNamespace(queue_cmd=queue_cmd, tmdb=tmdb, mediathek_id=mediathek_id,
                            status=status, ids=ids or [], all=all, force=force,
                            cancelled=cancelled, done=done, failed=failed, json=json,
-                           name=name, language=language, resolution=resolution,
+                           language=language, resolution=resolution,
                            remux=remux, url=url, path=path, url_subtitle=url_subtitle)
 
 
@@ -175,9 +175,9 @@ def test_queue_add_by_tmdb_dedups_and_inserts(tmp_path, monkeypatch):
         assert result == {"queued": 2, "skipped": 0, "deduplicated": 1}
         rows = queue_rows(conn)
         assert [(r["mediathek_id"], r["status"], r["language"], r["resolution"],
-                 r["remux"], r["name"], r["tmdb_id"]) for r in rows] == [
-            ("m_de", "0", "de", "SD", "AV", "Mein Film (2020)", "100"),
-            ("m_fr", "0", "fr", "SD", "A",  "Mein Film (2020)", "100")]
+                 r["remux"], r["tmdb_id"]) for r in rows] == [
+            ("m_de", "0", "de", "SD", "AV", "100"),
+            ("m_fr", "0", "fr", "SD", "A",  "100")]
     finally:
         conn.close()
 
@@ -231,8 +231,8 @@ def test_queue_add_by_mediathek_id_single_av(tmp_path, monkeypatch):
         result = cmd_queue(conn, CFG, qargs(mediathek_id=["m_de"]))
         assert result == {"queued": 1, "skipped": 0, "deduplicated": 0}
         r = queue_rows(conn)[0]
-        assert (r["mediathek_id"], r["resolution"], r["remux"], r["name"]) == \
-               ("m_de", "HD", "AV", "Mein Film (2020)")
+        assert (r["mediathek_id"], r["resolution"], r["remux"], r["path"]) == \
+               ("m_de", "HD", "AV", "movies/Mein Film (2020)/Mein Film (2020).mp4")
     finally:
         conn.close()
 
@@ -245,7 +245,7 @@ def test_queue_add_by_mediathek_id_unmatched_uses_clean_title(tmp_path, monkeypa
                          clean_title="Solo", year=2019)
         cmd_queue(conn, CFG, qargs(mediathek_id=["m_solo"]))
         r = queue_rows(conn)[0]
-        assert r["name"] == "Solo (2019)" and r["remux"] == "AV"
+        assert r["path"] == "movies/Solo (2019)/Solo (2019).mp4" and r["remux"] == "AV"
     finally:
         conn.close()
 
@@ -257,7 +257,8 @@ def test_queue_add_missing_year_does_not_render_none(tmp_path, monkeypatch):
         insert_mediathek(conn, "m_noyear", status="1", tmdb_id="", language="de",
                          clean_title="Doku", year=None)
         cmd_queue(conn, CFG, qargs(mediathek_id=["m_noyear"]))
-        assert queue_rows(conn)[0]["name"] == "Doku ()"   # not "Doku (None)"
+        # not "Doku (None)" -- a None year renders empty in the path
+        assert queue_rows(conn)[0]["path"] == "movies/Doku ()/Doku ().mp4"
     finally:
         conn.close()
 
@@ -442,11 +443,11 @@ def test_queue_add_cli_overrides_columns(tmp_path, monkeypatch):
         insert_mediathek(conn, "m_de", language="de")
         cmd_queue(conn, CFG, qargs(mediathek_id=["m_de"], url="http://o",
                                    path="P/x.mp4", language="xx", resolution="HD",
-                                   remux="V", name="N", url_subtitle="http://o.srt"))
+                                   remux="V", url_subtitle="http://o.srt"))
         r = queue_rows(conn)[0]
         assert (r["url"], r["path"], r["language"], r["resolution"], r["remux"],
-                r["name"], r["url_subtitle"]) == (
-            "http://o", "P/x.mp4", "xx", "HD", "V", "N", "http://o.srt")
+                r["url_subtitle"]) == (
+            "http://o", "P/x.mp4", "xx", "HD", "V", "http://o.srt")
     finally:
         conn.close()
 
@@ -497,6 +498,27 @@ def test_queue_list_cli_default_action(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["--json", "--config", str(cfgpath), "queue"]) == 0   # bare -> list
     assert json.loads(capsys.readouterr().out)["count"] == 1
+
+
+def test_remux_cols_align_a_and_v():
+    # 'A' left column, 'V' right column, so flags align under each other.
+    assert theke._remux_cols("A") == "A "
+    assert theke._remux_cols("V") == " V"
+    assert theke._remux_cols("AV") == "AV"
+
+
+def test_print_queue_aligns_remux_columns(capsys):
+    rows = [{"id": 1, "status": "0", "resolution": "HD", "remux": "AV",
+             "language": "de", "path": "a.mp4"},
+            {"id": 2, "status": "0", "resolution": "SD", "remux": "A",
+             "language": "fr", "path": "b.aac"},
+            {"id": 3, "status": "0", "resolution": "HD", "remux": "V",
+             "language": "en", "path": "c.mp4"}]
+    theke._print_queue(rows)
+    out = capsys.readouterr().out
+    assert "HD AV de" in out
+    assert "SD A  fr" in out
+    assert "HD  V en" in out
 
 
 # -- cmd_queue approve -------------------------------------------------------
@@ -996,6 +1018,63 @@ def test_queue_download_existing_target_needs_force(tmp_path, monkeypatch):
                {"downloaded": 1, "failed": 0}
         with open(target, "rb") as fh:
             assert fh.read() == b"MUX"
+    finally:
+        conn.close()
+
+
+def test_queue_download_uses_descriptive_temp_names(tmp_path, monkeypatch):
+    # Temp files carry a speaking base 'theke_{id}_{path stem}'; the source takes
+    # the url's extension (.src.<ext>), the remux target the path's (.mux.<ext>).
+    seen = {}
+
+    def dl(url, out, retries):
+        seen["src"] = os.path.basename(out)
+        with open(out, "wb") as fh:
+            fh.write(b"SRC")
+        return 3
+
+    def remux(ffmpeg_path, in_path, mode, out_path, language=None):
+        seen["mux"] = os.path.basename(out_path)
+        with open(out_path, "wb") as fh:
+            fh.write(b"MUX")
+        return 3
+
+    monkeypatch.setattr(theke, "download_file", dl)
+    monkeypatch.setattr(theke, "run_remux", remux)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path)
+        insert_local(conn, "m_de", "Solo", url_video="http://h/video.mp4")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        qi = qid(conn, "m_de")
+        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert seen["src"] == f"theke_{qi}_Solo (2020).src.mp4"
+        assert seen["mux"] == f"theke_{qi}_Solo (2020).mux.mp4"
+    finally:
+        conn.close()
+
+
+def test_queue_download_temp_src_omits_ext_when_url_has_none(tmp_path, monkeypatch):
+    seen = {}
+
+    def dl(url, out, retries):
+        seen["src"] = os.path.basename(out)
+        with open(out, "wb") as fh:
+            fh.write(b"SRC")
+        return 3
+
+    monkeypatch.setattr(theke, "download_file", dl)
+    monkeypatch.setattr(theke, "run_remux", _fake_remux)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path)
+        insert_local(conn, "m_de", "Solo", url_video="http://h/stream")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        qi = qid(conn, "m_de")
+        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert seen["src"] == f"theke_{qi}_Solo (2020).src"
     finally:
         conn.close()
 

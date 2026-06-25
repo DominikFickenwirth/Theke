@@ -83,7 +83,9 @@ von `enrich show` haben bewusst keines.)
 **stdout vs. stderr:** stdout trägt nur das Ergebnis (im `--json`-Modus das eine
 JSON-Objekt). Fortschritt und Diagnose laufen als Klartext (`-> ...`) über
 stderr -- eine lange Stufe bleibt sichtbar, ohne das parsebare Ergebnis zu
-verschmutzen.
+verschmutzen. Lange Übertragungen melden Fortschritt: Downloads (HTTP wie HLS)
+je 100 MiB eine Zeile (mit Prozent, wenn die Größe bekannt ist), ffmpeg-Läufe
+(remux, HLS-Fallback) alle 10 % der Mediendauer (`HH:MM:SS / HH:MM:SS (P%)`).
 
 **Präzedenz der Konfiguration:** CLI-Parameter > Konfigurationsdatei > Defaults.
 
@@ -356,7 +358,7 @@ Ablaufreihenfolge, damit eine einfache Sortierung dem Fortschritt folgt):
 `proposed` (`0`) -> `approved` (`A`) -> `busy`/downloading (`B`) -> `done` (`D`),
 daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile ist **selbsttragend**:
 sie enthält alles, was `download` braucht, ohne erneut in die `mediathek`-Tabelle
-oder die Konfiguration zu schauen -- `name` (Anzeige-Stamm), `language`,
+oder die Konfiguration zu schauen -- `language`,
 `resolution` (`HD`/`SD`/`LQ`), `remux` (`A` = nur Audio, `V` = nur Video,
 `AV` = beides), `url` (Quell-Medien-URL), `url_subtitle` (optional) und `path`
 (vollständiges Zielverzeichnis in der Bibliothek). Alle drei werden beim `add`
@@ -368,7 +370,6 @@ aufgelöst und sind dort per CLI überschreibbar.
 | --------------------- | ----------------------------------------------------------------- |
 | `queue_auto_approve`  | `true` stellt direkt auf `approved` statt `proposed` (Std. `false`). |
 | `languages`           | Sprach-Whitelist **und** Präferenzreihenfolge (Std. `["de"]`).    |
-| `name_template`       | Vorlage für `name`, gefüllt mit TMDB-Titel + -Jahr (Std. `"{title} ({year})"`). |
 | `library_path`        | Vorlage für `path` (Std. `"movies/{Title} ({Year})/{Title} ({Year}).mp4"`). |
 | `video_ext`           | Endung der Videodatei (Std. `"mp4"`).                             |
 | `audio_ext`           | Endung der Audiodatei (Std. `"aac"`).                             |
@@ -407,7 +408,6 @@ manueller Zielpfad).
 | ------------------------- | -------------------------------------------------------- |
 | `-t`, `--tmdb ID`         | TMDB-ID einstellen, dedupliziert (wiederholbar).         |
 | `-m`, `--mediathek-id ID` | `mediathek_id` direkt einstellen (wiederholbar).         |
-| `--name NAME`             | `name` überschreiben (Anzeige-Stamm).                    |
 | `--language CODE`         | `language` überschreiben.                                |
 | `--resolution {HD,SD,LQ}` | `resolution` überschreiben.                              |
 | `--remux {AV,A,V}`        | `remux`-Modus überschreiben.                             |

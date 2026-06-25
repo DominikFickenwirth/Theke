@@ -19,6 +19,47 @@ import theke   # for http_get, resolved at call time (avoids an import cycle)
 log = logging.getLogger("theke")
 
 CHUNK = 1 << 16   # 64 KiB streaming buffer
+PROGRESS_BYTES = 100 << 20   # emit a transfer-progress line every 100 MiB
+
+
+def _ensure_parent(path) -> None:
+    """Create the parent directory of an output path if it does not exist yet."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+# -- transfer progress --------------------------------------------------------
+
+def _content_length(reader):
+    """Total byte length advertised by a urllib response, or None when absent
+    (chunked stream, or a test BytesIO with no getheader)."""
+    try:
+        return int(reader.getheader("Content-Length"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+class _Progress:
+    """Throttled byte-transfer reporter: logs a '-> label: ...' line each time the
+    running byte count crosses a PROGRESS_BYTES milestone (with a percent when the
+    total is known). Read PROGRESS_BYTES off the module so tests can shrink it."""
+
+    def __init__(self, label, total):
+        self.label = label
+        self.total = total                  # bytes, or None when unknown
+        self.next = PROGRESS_BYTES          # next milestone to announce
+
+    def update(self, done):
+        if done < self.next:
+            return
+        mib = done / (1 << 20)
+        if self.total:
+            log.info("%s: %.0f MiB / %.0f MiB (%d%%)", self.label, mib,
+                     self.total / (1 << 20), 100 * done // self.total)
+        else:
+            log.info("%s: %.0f MiB", self.label, mib)
+        self.next = (done // PROGRESS_BYTES + 1) * PROGRESS_BYTES
+
 
 _BANDWIDTH_RX = re.compile(r"BANDWIDTH=(\d+)")
 _URI_RX       = re.compile(r'URI="([^"]*)"')
@@ -104,6 +145,7 @@ def download_file(url, out, retries) -> int:
 
 def _download_once(url, out) -> int:
     part = out + ".part"
+    _ensure_parent(out)
     offset = os.path.getsize(part) if os.path.exists(part) else 0
     reader, resumed = open_url(url, offset)
     if offset and not resumed:
@@ -111,6 +153,11 @@ def _download_once(url, out) -> int:
         log.info("range not honored; restarting")
     elif offset:
         log.info("resuming at %d bytes", offset)
+    total = _content_length(reader)
+    if total is not None and resumed:
+        total += offset                  # 206 Content-Length covers only the remainder
+    progress = _Progress(os.path.basename(out), total)
+    done = offset
     try:
         with open(part, "ab" if offset else "wb") as fh:   # wb truncates a stale part
             while True:
@@ -118,6 +165,8 @@ def _download_once(url, out) -> int:
                 if not buf:
                     break
                 fh.write(buf)
+                done += len(buf)
+                progress.update(done)
     finally:
         reader.close()
     os.replace(part, out)
@@ -126,17 +175,82 @@ def _download_once(url, out) -> int:
 
 # -- ffmpeg seam --------------------------------------------------------------
 
+_DURATION_RX = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+_TIME_RX     = re.compile(r"\btime=\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+
+
+def _hms(h, m, s) -> float:
+    """Seconds from an ffmpeg HH:MM:SS(.ss) timestamp split into its parts."""
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def _fmt_hms(seconds) -> str:
+    """Whole-second HH:MM:SS rendering of a duration in seconds."""
+    s = int(seconds)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+class _FfmpegProgress:
+    """Throttled time-based reporter for an ffmpeg run of known duration: logs a
+    line each time the elapsed media time crosses the next 10% milestone."""
+
+    def __init__(self, label, duration):
+        self.label = label
+        self.duration = duration            # seconds, > 0
+        self.step = duration / 10
+        self.next = self.step
+
+    def update(self, t):
+        if t < self.next:
+            return
+        pct = min(100, int(100 * t / self.duration))
+        log.info("%s: %s / %s (%d%%)", self.label, _fmt_hms(t),
+                 _fmt_hms(self.duration), pct)
+        while self.next <= t:
+            self.next += self.step
+
+
+def _iter_ffmpeg_lines(stream):
+    """Yield ffmpeg's stderr as logical lines, splitting on both newline and the
+    carriage returns it uses for its live stat updates."""
+    buf = ""
+    while True:
+        chunk = stream.read(256)
+        if not chunk:
+            break
+        buf = (buf + chunk).replace("\r", "\n")
+        *lines, buf = buf.split("\n")
+        for line in lines:
+            if line:
+                yield line
+    if buf:
+        yield buf
+
+
 def run_ffmpeg(args) -> None:
-    """Run ffmpeg (args[0] is the binary); raise on a missing binary or non-zero
-    exit, surfacing the stderr tail. The subprocess seam -- monkeypatched in tests."""
+    """Run ffmpeg (args[0] is the binary), streaming its progress to the log;
+    raise on a missing binary or non-zero exit, surfacing the stderr tail. The
+    subprocess seam -- monkeypatched in tests."""
     try:
-        proc = subprocess.run(args, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, text=True)
     except FileNotFoundError:
         raise RuntimeError(f"ffmpeg not found: {args[0]} (set ffmpeg_path)") from None
-    if proc.returncode != 0:
-        tail = "; ".join(collections.deque((proc.stderr or "").splitlines(), 3))
-        raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}): {tail}")
+    label = os.path.basename(args[-1])
+    tail = collections.deque(maxlen=3)
+    progress = None
+    for line in _iter_ffmpeg_lines(proc.stderr):
+        tail.append(line)
+        if progress is None:
+            m = _DURATION_RX.search(line)
+            if m:
+                progress = _FfmpegProgress(label, _hms(*m.groups()))
+        m = _TIME_RX.search(line)
+        if m and progress:
+            progress.update(_hms(*m.groups()))
+    code = proc.wait()
+    if code != 0:
+        raise RuntimeError(f"ffmpeg failed (exit {code}): {'; '.join(tail)}")
 
 
 # -- move ---------------------------------------------------------------------
@@ -148,9 +262,7 @@ def move_file(src, dst, force=False) -> str:
         if not force:
             raise RuntimeError(f"destination exists: {dst}")
         os.remove(dst)
-    parent = os.path.dirname(dst)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
+    _ensure_parent(dst)
     shutil.move(src, dst)
     log.info("moved %s -> %s", os.path.basename(src), dst)
     return dst
@@ -177,7 +289,13 @@ def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
     size in bytes."""
     log.info("remuxing %s -> %s (%s)", os.path.basename(in_path),
              os.path.basename(out_path), mode)
-    run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
+    _ensure_parent(out_path)
+    try:
+        run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
+    except Exception:
+        if os.path.exists(out_path):   # drop the partial/faulty target ffmpeg left
+            os.remove(out_path)
+        raise
     return os.path.getsize(out_path)
 
 
@@ -188,6 +306,7 @@ def download_hls(url, out, retries, ffmpeg_path):
     bandwidth), assemble the media playlist's segments natively, and hand off to
     ffmpeg when the stream is encrypted or native assembly fails after retries.
     Return (action, bytes, segments) with action 'hls' or 'hls-ffmpeg'."""
+    _ensure_parent(out)
     text = theke.http_get(url).decode("utf-8")
     media_url = url
     if is_master(text):
@@ -209,7 +328,12 @@ def download_hls(url, out, retries, ffmpeg_path):
 
 
 def _hls_ffmpeg(url, out, ffmpeg_path) -> int:
-    run_ffmpeg([ffmpeg_path, "-y", "-i", url, "-c", "copy", out])
+    try:
+        run_ffmpeg([ffmpeg_path, "-y", "-i", url, "-c", "copy", out])
+    except Exception:
+        if os.path.exists(out):   # drop the partial/faulty target ffmpeg left
+            os.remove(out)
+        raise
     return os.path.getsize(out)
 
 
@@ -221,10 +345,15 @@ def _download_segments(out, init, segments, retries) -> int:
     parts = ([("seg_init", init)] if init else []) + \
             [(f"seg_{i:05d}.ts", u) for i, u in enumerate(segments)]
     log.info("downloading %d HLS segments", len(segments))
+    progress = _Progress(os.path.basename(out), None)
     for attempt in range(retries + 1):
         try:
+            done = 0
             for name, seg_url in parts:
-                _fetch_segment(os.path.join(segdir, name), seg_url)
+                path = os.path.join(segdir, name)
+                _fetch_segment(path, seg_url)
+                done += os.path.getsize(path)
+                progress.update(done)
             break
         except Exception as exc:
             if attempt == retries:

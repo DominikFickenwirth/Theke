@@ -2,6 +2,7 @@
 
 import io
 import json
+import logging
 import os
 
 import pytest
@@ -133,6 +134,15 @@ def test_download_full_writes_bytes_and_removes_part(tmp_path, monkeypatch):
     assert not (tmp_path / "v.mp4.part").exists()
 
 
+def test_download_creates_missing_parent_dirs(tmp_path, monkeypatch):
+    data = b"hello world payload"
+    monkeypatch.setattr(files, "open_url", Opener(data))
+    out = str(tmp_path / "new" / "sub" / "v.mp4")      # parents do not exist yet
+    n = download_file(out=out, url="http://x", retries=0)
+    assert n == len(data)
+    assert (tmp_path / "new" / "sub" / "v.mp4").read_bytes() == data
+
+
 def test_download_resumes_from_part_with_206(tmp_path, monkeypatch):
     data = b"0123456789abcdef"
     (tmp_path / "v.mp4.part").write_bytes(data[:6])   # 6 bytes already on disk
@@ -209,6 +219,54 @@ def test_download_raises_after_exhausting_retries(tmp_path, monkeypatch):
         download_file(out=out, url="http://x", retries=2)
 
 
+# -- byte progress (downloads) ------------------------------------------------
+
+def test_content_length_from_header_and_missing():
+    class R:
+        def getheader(self, name): return "1234"
+    assert files._content_length(R()) == 1234
+    assert files._content_length(io.BytesIO(b"x")) is None     # no getheader -> None
+
+
+def test_progress_known_total_formats_mib_and_percent(caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    p = files._Progress("v.mp4", total=300 << 20)              # default step is 100 MiB
+    for done in (100 << 20, 200 << 20, 300 << 20):
+        p.update(done)
+    # percents: 100*100//300=33, 100*200//300=66, 100*300//300=100 (integer division)
+    assert [r.getMessage() for r in caplog.records] == [
+        "v.mp4: 100 MiB / 300 MiB (33%)",
+        "v.mp4: 200 MiB / 300 MiB (66%)",
+        "v.mp4: 300 MiB / 300 MiB (100%)"]
+
+
+def test_progress_unknown_total_formats_mib_only(caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    p = files._Progress("v.mp4", total=None)
+    p.update(100 << 20)
+    p.update(200 << 20)
+    assert [r.getMessage() for r in caplog.records] == [
+        "v.mp4: 100 MiB", "v.mp4: 200 MiB"]
+
+
+def test_progress_skips_steps_below_threshold(caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    p = files._Progress("v.mp4", total=None)
+    p.update(50 << 20)                                          # below 100 MiB -> silent
+    assert caplog.records == []
+
+
+def test_download_logs_a_progress_line_per_threshold(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(files, "CHUNK", 4)                      # 4-byte reads
+    monkeypatch.setattr(files, "PROGRESS_BYTES", 4)            # milestone every 4 bytes
+    data = b"0123456789AB"                                      # 12 bytes -> 3 chunks
+    monkeypatch.setattr(files, "open_url", Opener(data))
+    caplog.set_level(logging.INFO, logger="theke")
+    download_file(out=str(tmp_path / "v.mp4"), url="http://x/v.mp4", retries=0)
+    progress = [r.getMessage() for r in caplog.records if "MiB" in r.getMessage()]
+    assert len(progress) == 3                                   # at 4, 8, 12 bytes
+
+
 # -- HLS download + ffmpeg fallback -------------------------------------------
 
 MASTER_URL = "https://h/v/master.m3u8"
@@ -229,6 +287,23 @@ def test_hls_native_concatenates_segments_in_order(tmp_path, monkeypatch):
     assert (tmp_path / "v.ts").read_bytes() == b"AAABBB"
     assert nbytes == 6
     assert not (tmp_path / "v.ts.segments").exists()   # segdir cleaned up
+
+
+def test_hls_creates_missing_parent_dirs(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n'
+             b'#EXTINF:6,\nseg0.ts\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media})
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FROM-FFMPEG")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = str(tmp_path / "new" / "sub" / "v.ts")       # parents do not exist yet
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert (tmp_path / "new" / "sub" / "v.ts").read_bytes() == b"FROM-FFMPEG"
 
 
 def test_hls_native_prepends_init_segment(tmp_path, monkeypatch):
@@ -278,6 +353,23 @@ def test_hls_encrypted_falls_back_to_ffmpeg(tmp_path, monkeypatch):
     assert MEDIA_URL in seen["args"] and "ffmpeg" in seen["args"]
 
 
+def test_hls_ffmpeg_removes_faulty_output_on_failure(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n'
+             b'#EXTINF:6,\nseg0.ts\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media})
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:        # ffmpeg writes a partial file...
+            fh.write(b"partial garbage")
+        raise RuntimeError("ffmpeg failed (exit 1): boom")   # ...then dies
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = tmp_path / "v.ts"
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        download_hls(url=MEDIA_URL, out=str(out), retries=0, ffmpeg_path="ffmpeg")
+    assert not out.exists()                     # faulty target cleaned up
+
+
 def test_hls_native_failure_falls_back_to_ffmpeg(tmp_path, monkeypatch):
     install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
                                "https://h/v/seg1.ts": RuntimeError("seg gone")})
@@ -292,6 +384,18 @@ def test_hls_native_failure_falls_back_to_ffmpeg(tmp_path, monkeypatch):
                                          ffmpeg_path="ffmpeg")
     assert action == "hls-ffmpeg"
     assert (tmp_path / "v.ts").read_bytes() == b"FALLBACK"
+
+
+def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(files, "PROGRESS_BYTES", 2)            # milestone every 2 bytes
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT,
+                               "https://h/v/seg0.ts": b"AAA",  # 3 bytes -> done 3
+                               "https://h/v/seg1.ts": b"BBB"}) # 3 bytes -> done 6
+    caplog.set_level(logging.INFO, logger="theke")
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg")
+    progress = [r.getMessage() for r in caplog.records if "MiB" in r.getMessage()]
+    assert len(progress) == 2                                  # after 3 bytes and 6 bytes
 
 
 # -- file download CLI --------------------------------------------------------
@@ -365,19 +469,103 @@ def test_run_remux_invokes_ffmpeg_with_built_args(tmp_path, monkeypatch):
                             "-metadata:s:a:0", "language=fra", out]
 
 
+def test_run_remux_creates_missing_parent_dirs(tmp_path, monkeypatch):
+    out = str(tmp_path / "new" / "sub" / "out.mp4")    # parents do not exist yet
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"muxed")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    n = run_remux("ffmpeg", "in.ts", "AV", out)
+    assert (tmp_path / "new" / "sub" / "out.mp4").read_bytes() == b"muxed"
+    assert n == len(b"muxed")
+
+
+def test_run_remux_removes_faulty_output_on_failure(tmp_path, monkeypatch):
+    out = tmp_path / "out.mp4"
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:        # ffmpeg writes a partial file...
+            fh.write(b"partial garbage")
+        raise RuntimeError("ffmpeg failed (exit 1): boom")   # ...then dies
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        run_remux("ffmpeg", "in.ts", "AV", str(out))
+    assert not out.exists()                     # faulty target cleaned up
+
+
+def test_run_remux_failure_without_output_is_fine(tmp_path, monkeypatch):
+    out = tmp_path / "out.mp4"
+
+    def fake_ffmpeg(args):
+        raise RuntimeError("ffmpeg failed (exit 1): no output written")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        run_remux("ffmpeg", "in.ts", "AV", str(out))
+    assert not out.exists()
+
+
 def test_run_ffmpeg_missing_binary_raises(tmp_path):
     with pytest.raises(RuntimeError, match="not found"):
         run_ffmpeg(["this-ffmpeg-does-not-exist", "-version"])
 
 
-def test_run_ffmpeg_nonzero_exit_raises(monkeypatch):
-    class Proc:
-        returncode = 1
-        stderr = "boom line 1\nboom line 2\n"
+class FakePopen:
+    """Fake subprocess.Popen for run_ffmpeg: serves stderr_text as the process
+    stderr stream and returns returncode from wait()."""
 
-    monkeypatch.setattr(files.subprocess, "run", lambda *a, **k: Proc())
+    def __init__(self, stderr_text, returncode):
+        self.stderr = io.StringIO(stderr_text)
+        self._rc = returncode
+
+    def wait(self):
+        return self._rc
+
+
+def test_run_ffmpeg_nonzero_exit_raises(monkeypatch):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen("boom line 1\nboom line 2\n", 1))
     with pytest.raises(RuntimeError, match="ffmpeg failed"):
         run_ffmpeg(["ffmpeg", "-i", "x"])
+
+
+# ffmpeg writes its live stat lines with a carriage return (no newline) until the
+# run ends; the Duration line comes once up front. 40 s total, time= every 4 s.
+FFMPEG_STDERR = (
+    "ffmpeg version 6.0\n"
+    "  Duration: 00:00:40.00, start: 0.000000, bitrate: 1000 kb/s\n"
+    "frame=  100 q=-1.0 size=    1kB time=00:00:04.00 bitrate=2.0kbits/s\r"
+    "frame=  200 q=-1.0 size=    2kB time=00:00:08.00 bitrate=2.0kbits/s\r"
+    "frame=  300 q=-1.0 size=    3kB time=00:00:12.00 bitrate=2.0kbits/s\r"
+    "frame= 1000 q=-1.0 size=   10kB time=00:00:40.00 bitrate=2.0kbits/s\r"
+    "\n")
+
+
+def test_run_ffmpeg_logs_progress_from_duration_and_time(monkeypatch, caplog):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(FFMPEG_STDERR, 0))
+    caplog.set_level(logging.INFO, logger="theke")
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])           # label = out.mp4
+    # 40 s total -> 10% step is 4 s; times 4/8/12/40 s -> 10/20/30/100 percent
+    msgs = [r.getMessage() for r in caplog.records if "%" in r.getMessage()]
+    assert msgs == [
+        "out.mp4: 00:00:04 / 00:00:40 (10%)",
+        "out.mp4: 00:00:08 / 00:00:40 (20%)",
+        "out.mp4: 00:00:12 / 00:00:40 (30%)",
+        "out.mp4: 00:00:40 / 00:00:40 (100%)"]
+
+
+def test_run_ffmpeg_without_duration_logs_no_progress(monkeypatch, caplog):
+    stderr = ("frame=  100 time=00:00:04.00 bitrate=2.0kbits/s\r"
+              "frame=  200 time=00:00:08.00 bitrate=2.0kbits/s\r\n")
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(stderr, 0))
+    caplog.set_level(logging.INFO, logger="theke")
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])
+    assert [r.getMessage() for r in caplog.records if "%" in r.getMessage()] == []
 
 
 def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):

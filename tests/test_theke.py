@@ -49,11 +49,15 @@ def test_config_empty_object_keeps_defaults(tmp_path):
     assert load_config(str(path)) == Config()
 
 
-def test_config_unknown_key_is_error(tmp_path):
+def test_config_unknown_key_is_ignored_with_warning(tmp_path, capsys):
     path = tmp_path / "typo.json"
-    write_config(path, {"db_pathh": "x.db"})
-    with pytest.raises(ConfigError, match="db_pathh"):
-        load_config(str(path))
+    write_config(path, {"db_pathh": "x.db", "db_path": "real.db"})
+    cfg = load_config(str(path))
+    assert cfg.db_path == "real.db"
+    assert not hasattr(cfg, "db_pathh")
+    err = capsys.readouterr().err
+    assert "db_pathh" in err
+    assert str(path) in err
 
 
 def test_config_wrong_type_is_error(tmp_path):
@@ -103,17 +107,14 @@ def test_config_queue_defaults(tmp_path, monkeypatch):
     cfg = load_config(None)
     assert cfg.queue_auto_approve is False
     assert cfg.languages == ["de"]
-    assert cfg.name_template == "{title} ({year})"
 
 
 def test_config_queue_keys_from_file(tmp_path):
     path = tmp_path / "q.json"
-    write_config(path, {"queue_auto_approve": True, "languages": ["de", "en"],
-                        "name_template": "{title} [{year}]"})
+    write_config(path, {"queue_auto_approve": True, "languages": ["de", "en"]})
     cfg = load_config(str(path))
     assert cfg.queue_auto_approve is True
     assert cfg.languages == ["de", "en"]
-    assert cfg.name_template == "{title} [{year}]"
 
 
 def test_config_fiction_topics_default_empty(tmp_path, monkeypatch):
@@ -727,13 +728,13 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 6   # +phase 6-8 queue url/path/subtitle cols
+        assert user_version(conn) == 7   # +drop redundant queue.name column
     finally:
         conn.close()
 
 
 QUEUE_COLS = {
-    "id", "status", "mediathek_id", "tmdb_id", "name", "language",
+    "id", "status", "mediathek_id", "tmdb_id", "language",
     "resolution", "remux", "error", "created_at", "updated_at",
     "url", "url_subtitle", "path",
 }
