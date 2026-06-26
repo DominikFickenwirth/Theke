@@ -255,3 +255,57 @@ def parse_ttml(text):
         walk(body, None, None, Style(), None, CueStyle())
     cues.sort(key=lambda c: (c.start, c.end))
     return Document(cues, regions)
+
+
+# -- SRT export ---------------------------------------------------------------
+# index, "HH:MM:SS,mmm --> ...", then runs wrapped in <b>/<i>/<u>/<font color>.
+# Tags open/close only at style boundaries between runs.
+def _srt_ts(sec):
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _open(s):
+    t = ""
+    if s.bold:      t += "<b>"
+    if s.italic:    t += "<i>"
+    if s.underline: t += "<u>"
+    if s.color:     t += f'<font color="{s.color}">'
+    return t
+
+
+def _close(s):
+    t = ""
+    if s.color:     t += "</font>"
+    if s.underline: t += "</u>"
+    if s.italic:    t += "</i>"
+    if s.bold:      t += "</b>"
+    return t
+
+
+def _esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def export_srt(doc):
+    """Serialise a Document to SubRip (.srt) text."""
+    out = []
+    for i, cue in enumerate(doc.cues, 1):
+        out.append(str(i))
+        out.append(f"{_srt_ts(cue.start)} --> {_srt_ts(cue.end)}")
+        line, prev = "", None
+        for run in cue.runs:
+            if prev is not None and prev != run.style:
+                line += _close(prev)
+            if prev is None or prev != run.style:
+                line += _open(run.style)
+            line += _esc(run.text)
+            prev = run.style
+        if prev is not None:
+            line += _close(prev)
+        out.append(line)
+        out.append("")
+    return "\n".join(out)
