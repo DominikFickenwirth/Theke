@@ -583,6 +583,34 @@ def test_cli_file_remux_bad_mode_is_usage_error():
                  "--out", "o.mp4"]) == 2
 
 
+# -- remux-subtitle (ffmpeg-free TTML/VTT -> SRT/ASS/TTML) ---------------------
+
+_TTML_IN = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+            '<p begin="00:00:01.000" end="00:00:02.000">Hallo</p>'
+            '</div></body></tt>')
+
+
+def test_cli_file_remux_subtitle_single_format_json(tmp_path, capsys):
+    src = tmp_path / "Mobbing.xml"
+    src.write_text(_TTML_IN, encoding="utf-8")
+    dest = str(tmp_path / "Mobbing.de.srt")
+    rc = main(["--json", "file", "remux-subtitle", "--in", str(src),
+               "--language", "de", "--format", "srt"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"subtitle": [dest]}
+    with open(dest, encoding="utf-8") as fh:
+        assert "Hallo" in fh.read()
+
+
+def test_cli_file_remux_subtitle_defaults_to_configured_formats(tmp_path):
+    src = tmp_path / "Mobbing.xml"
+    src.write_text(_TTML_IN, encoding="utf-8")
+    rc = main(["file", "remux-subtitle", "--in", str(src)])   # default: srt, ass, ttml
+    assert rc == 0
+    for ext in (".de.srt", ".de.ass", ".de.ttml"):
+        assert os.path.exists(str(tmp_path / ("Mobbing" + ext))), ext
+
+
 # -- move ---------------------------------------------------------------------
 
 def test_move_creates_parent_dirs_and_moves(tmp_path):
