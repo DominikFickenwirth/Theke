@@ -5,15 +5,22 @@
 # normalised up to TTML -> one TTML parse -> per-format export); the load-bearing
 # subset is prototyped in analysis/subtitle_pipeline.py. Pure text in, text out.
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+
+log = logging.getLogger("theke")
 
 # -- TTML namespaces ----------------------------------------------------------
 TT = "http://www.w3.org/ns/ttml"
 TTS = "http://www.w3.org/ns/ttml#styling"
 TTP = "http://www.w3.org/ns/ttml#parameter"
 XML = "http://www.w3.org/XML/1998/namespace"
+
+# Output format -> (file extension, exporter). Input is always TTML or
+# WebVTT-normalised-to-TTML; WebVTT as an *output* is not offered yet.
+SUBTITLE_EXT = {"srt": ".srt", "ass": ".ass", "ttml": ".ttml"}
 
 
 # -- format detection ---------------------------------------------------------
@@ -604,3 +611,29 @@ def export_ttml(doc):
         body.append(f'    <p begin="{_vtt_fmt(cue.start)}" end="{_vtt_fmt(cue.end)}">'
                     f'{content}</p>\n')
     return head + "".join(body) + "  </div></body>\n</tt>\n"
+
+
+# -- orchestrator -------------------------------------------------------------
+_EXPORTERS = {"srt": export_srt, "ass": export_ass, "ttml": export_ttml}
+
+
+def convert(text, formats):
+    """Convert subtitle text into the requested formats.
+
+    Returns {format: serialised text}; an unknown input format yields an empty
+    dict (the caller skips it), unknown output formats warn and are skipped.
+    """
+    kind = detect_format(text)
+    if kind == "unknown":
+        return {}
+    if kind == "webvtt":
+        text = vtt_to_ttml2(text)
+    doc = parse_ttml(text)
+    result = {}
+    for fmt in formats:
+        exporter = _EXPORTERS.get(fmt)
+        if exporter is None:
+            log.warning("unknown subtitle output format, skipping: %s", fmt)
+            continue
+        result[fmt] = exporter(doc)
+    return result
