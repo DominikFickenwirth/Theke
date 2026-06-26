@@ -267,3 +267,28 @@ def test_export_ttml_round_trips_cues():
     original = [(c.start, c.end, c.runs) for c in doc.cues]
     again = [(c.start, c.end, c.runs) for c in reparsed.cues]
     assert again == original
+
+
+# -- convert (orchestrator) ---------------------------------------------------
+
+def test_convert_ttml_to_all_formats():
+    result = subtitle.convert(TTML_DOC, ["srt", "ass", "ttml"])
+    assert set(result) == {"srt", "ass", "ttml"}
+    assert result["srt"] == EXPECTED_SRT
+    assert "Dialogue" in result["ass"]
+    assert result["ttml"].startswith('<?xml')
+
+
+def test_convert_accepts_webvtt_input():
+    result = subtitle.convert(VTT_SAMPLE, ["srt"])
+    assert "srt" in result
+    assert "Guten" in result["srt"]
+
+
+def test_convert_unknown_input_is_empty():
+    assert subtitle.convert(HTML_PAGE, ["srt", "ass"]) == {}
+
+
+def test_convert_skips_unknown_format():
+    result = subtitle.convert(TTML_DOC, ["srt", "bogus"])
+    assert set(result) == {"srt"}
