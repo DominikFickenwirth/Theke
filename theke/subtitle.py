@@ -455,3 +455,114 @@ def vtt_to_ttml2(text):
         body.append(f'    <p begin="{_vtt_fmt(begin)}" end="{_vtt_fmt(end)}"{a}>'
                     f'{convert_inline(payload)}</p>\n')
     return head + "".join(body) + "  </div></body>\n</tt>\n"
+
+
+# -- ASS export ---------------------------------------------------------------
+# A Dialogue line per cue, placed on screen via {\pos(x,y)\an<n>} derived from
+# the cue's region rect + text/displayAlign. Style transitions are inline
+# override tags (\b1 \i1 \u1, \1c colour in BGR).
+_ASS_HEADER = """[Script Info]
+ScriptType: v4.00+
+Collisions: Normal
+PlayResX: {x}
+PlayResY: {y}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,2,20,20,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _ass_ts(sec):
+    ms = max(0, int(round(sec * 1000)))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:d}:{m:02d}:{s:02d}.{ms // 10:02d}"   # centiseconds
+
+
+def _ass_escape(s):
+    # Neutralise ASS override braces with fullwidth look-alikes (U+FF5B/U+FF5D);
+    # written as chr() so this source stays CP-1252-safe.
+    return s.replace("{", chr(0xFF5B)).replace("}", chr(0xFF5D))
+
+
+def _resolve_len(length, ref):
+    value, unit = length
+    return value if unit == "px" else ref * value / 100.0
+
+
+def _resolve_rect(region, play_x, play_y):
+    x, y, w, h = 0, 0, play_x, play_y
+    if region and region.origin:
+        x = round(_resolve_len(region.origin[0], play_x))
+        y = round(_resolve_len(region.origin[1], play_y))
+    if region and region.extent:
+        w = round(_resolve_len(region.extent[0], play_x))
+        h = round(_resolve_len(region.extent[1], play_y))
+    return x, y, w, h
+
+
+def _anchor(rect, text_align, display_align):
+    """Map rect + align hints to an ASS \\pos point + \\an numpad anchor."""
+    rx, ry, w, h = rect
+    ta = (text_align or "center").lower()
+    if "end" in ta or "right" in ta:
+        x, col = rx + w, 3
+    elif "start" in ta or "left" in ta:
+        x, col = rx, 1
+    else:
+        x, col = rx + w // 2, 2
+    da = (display_align or "after").lower()
+    if "before" in da or "top" in da:
+        y, rowbase = ry, 6
+    elif "center" in da or "middle" in da:
+        y, rowbase = ry + h // 2, 3
+    else:
+        y, rowbase = ry + h, 0
+    return x, y, rowbase + col
+
+
+def _ass_delta(prev, cur):
+    """Override tags for the change from one run's style to the next."""
+    s = ""
+    if prev.bold != cur.bold:
+        s += "\\b1" if cur.bold else "\\b0"
+    if prev.italic != cur.italic:
+        s += "\\i1" if cur.italic else "\\i0"
+    if prev.underline != cur.underline:
+        s += "\\u1" if cur.underline else "\\u0"
+    if prev.color != cur.color:
+        if cur.color:
+            h = cur.color.lstrip("#")
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            s += f"\\1c&H{b:02X}{g:02X}{r:02X}&\\1a&H00&"   # ASS colour is BGR, opaque
+        else:
+            s += "\\1a&H00&"
+    return s
+
+
+def export_ass(doc, play_x=384, play_y=288):
+    """Serialise a Document to Advanced SubStation Alpha (.ass) text."""
+    out = [_ASS_HEADER.format(x=play_x, y=play_y)]
+    for cue in doc.cues:
+        region = doc.regions.get(cue.region_id)
+        rect = _resolve_rect(region, play_x, play_y)
+        text_align = cue.cue_style.text_align or (region.text_align if region else None)
+        display_align = cue.cue_style.display_align or (region.display_align if region else None)
+        x, y, an = _anchor(rect, text_align, display_align)
+        parts = [f"{{\\pos({x},{y})\\an{an}}}"]
+        prev = Style()
+        for run in cue.runs:
+            if run.style != prev:
+                parts.append("{" + _ass_delta(prev, run.style) + "}")
+                prev = run.style
+            parts.append(_ass_escape(run.text).replace("\n", "\\N"))
+        out.append(f"Dialogue: 0,{_ass_ts(cue.start)},{_ass_ts(cue.end)},"
+                   f"Default,,0,0,0,,{''.join(parts)}")
+    return "\n".join(out) + "\n"
