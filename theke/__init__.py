@@ -28,6 +28,7 @@ from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, move_file
+from theke import subtitle
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -1467,9 +1468,11 @@ def _url_ext(url) -> str:
     return os.path.splitext(urllib.parse.urlsplit(url).path)[1]
 
 
-def _subtitle_ext(url) -> str:
-    """Sidecar extension from a subtitle URL (default '.srt' when it carries none)."""
-    return _url_ext(url) or ".srt"
+def _subtitle_lang(row) -> str:
+    """Sidecar language tag (Jellyfin convention): the queue language when it is a
+    2-letter code, else 'de' (covers '', 'ov' and original-language fallbacks)."""
+    lang = (row["language"] or "").strip()
+    return lang if len(lang) == 2 and lang.isalpha() else "de"
 
 
 def _temp_base(tmpdir, row) -> str:
@@ -1538,11 +1541,24 @@ def _fetch(cfg, url, out):
 
 
 def _download_subtitle(cfg, row, base, force):
-    """Fetch the subtitle to a sidecar next to the film (same stem as its path)."""
-    ext = _subtitle_ext(row["url_subtitle"])
-    tmp = base + ".sub" + ext
+    """Fetch the subtitle and write converted sidecars next to the film: one
+    '<stem>.<lang>.<ext>' per configured format. ffmpeg-free (TTML/EBU-TT and
+    WebVTT in, SRT/ASS/TTML out). Unrecognised input (e.g. an HTML page) is
+    skipped without writing a sidecar."""
+    tmp = base + ".sub" + _url_ext(row["url_subtitle"])
     download_file(row["url_subtitle"], tmp, cfg.download_retries)
-    move_file(tmp, os.path.splitext(row["path"])[0] + ext, force)
+    with open(tmp, encoding="utf-8-sig") as fh:
+        outputs = subtitle.convert(fh.read(), cfg.subtitle_formats)
+    if not outputs:
+        log.warning("queue %s subtitle: unrecognised format, no sidecar", row["id"])
+        return
+    stem = os.path.splitext(row["path"])[0]
+    lang = _subtitle_lang(row)
+    for fmt, data in outputs.items():
+        out_tmp = base + ".out" + subtitle.SUBTITLE_EXT[fmt]
+        with open(out_tmp, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        move_file(out_tmp, f"{stem}.{lang}{subtitle.SUBTITLE_EXT[fmt]}", force)
 
 
 def _cleanup(base):
