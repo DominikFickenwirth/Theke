@@ -309,3 +309,149 @@ def export_srt(doc):
         out.append(line)
         out.append("")
     return "\n".join(out)
+
+
+# -- WebVTT -> TTML2 ----------------------------------------------------------
+# WebVTT does NOT export to SRT directly; it is rewritten into a TTML string
+# (with a fixed <head> style table for the broadcaster colour classes) and
+# re-enters the same parser/exporters path. Broadcaster VTT is well-formed, so
+# the block-splitter and plain span stack below are enough in practice.
+VTT_CLASS_STYLE = {  # WebVTT <c.class> -> <style xml:id> emitted in the head
+    "textWhite":  "cTextWhite",
+    "textYellow": "cTextYellow",
+    "textCyan":   "cTextCyan",
+}
+VTT_ALIGN = {  # cue setting align:* -> tts:textAlign
+    "start": "start", "left": "start",
+    "middle": "center", "center": "center",
+    "end": "end", "right": "end",
+}
+_TAG = re.compile(r"<[^>]*>")
+
+
+def _vtt_ts(ts):
+    """MM:SS.mmm or HH:MM:SS.mmm -> seconds."""
+    hms, dot, ms = ts.strip().partition(".")
+    if not dot or len(ms) != 3 or not ms.isdigit():
+        raise ValueError(f"Invalid VTT timestamp: {ts!r}")
+    parts = hms.split(":")
+    if len(parts) == 3:
+        h, m, s = parts
+    elif len(parts) == 2:
+        h, m, s = "0", parts[0], parts[1]
+    else:
+        raise ValueError(f"Invalid VTT timestamp: {ts!r}")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+
+def _vtt_fmt(sec):
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def parse_vtt(text):
+    """Split into cues: (begin, end, settings, payload). Mini block-splitter."""
+    cues = []
+    for bi, block in enumerate(re.split(r"\r?\n\r?\n", text.strip())):
+        lines = block.splitlines()
+        if not lines:
+            continue
+        if bi == 0 and lines[0].startswith("WEBVTT"):
+            continue
+        if lines[0].startswith(("NOTE", "STYLE", "REGION")):
+            continue
+        if "-->" not in lines[0]:
+            lines = lines[1:]   # drop the optional cue-identifier line
+        left, _, rest = lines[0].partition("-->")
+        rest = rest.split(None, 1)
+        begin, end = _vtt_ts(left), _vtt_ts(rest[0])
+        settings = {}
+        for tok in (rest[1].split() if len(rest) > 1 else []):
+            k, _, v = tok.partition(":")
+            if k and v:
+                settings[k] = v
+        cues.append((begin, end, settings, "\n".join(lines[1:])))
+    return cues
+
+
+def _is_vtt_ts_tag(raw):
+    """Cue-internal timestamp tag like <00:00:01.000> -- stripped on convert."""
+    t = raw.strip()
+    if not t or " " in t or t.startswith("/") or "." not in t:
+        return False
+    left, _, right = t.partition(".")
+    return (right.isdigit() and len(right) == 3
+            and all(p.isdigit() for p in left.split(":")) and len(left.split(":")) in (2, 3))
+
+
+def _vtt_text(s):
+    """Escape text and map newlines to <br/>."""
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;").replace("'", "&apos;").replace("\n", "<br/>"))
+
+
+def convert_inline(text):
+    """VTT inline markup -> TTML spans (simplified stack)."""
+    out, stack, pos = [], [], 0
+    for m in _TAG.finditer(text):
+        out.append(_vtt_text(text[pos:m.start()]))
+        pos = m.end()
+        raw = m.group()[1:-1].strip()
+        if _is_vtt_ts_tag(raw):
+            continue
+        closing = raw.startswith("/")
+        inner = raw[1:].strip() if closing else raw
+        name = re.split(r"[ .]", inner, maxsplit=1)[0]
+        if name == "br":
+            out.append("<br/>")
+        elif name in ("b", "i", "u"):
+            attr = {"b": 'tts:fontWeight="bold"', "i": 'tts:fontStyle="italic"',
+                    "u": 'tts:textDecoration="underline"'}[name]
+            if closing:
+                if stack: out.append(stack.pop())
+            else:
+                out.append(f"<span {attr}>"); stack.append("</span>")
+        elif name == "c":
+            if closing:
+                if stack: out.append(stack.pop())
+            else:
+                sid = next((VTT_CLASS_STYLE[c] for c in inner.split(".")[1:]
+                            if c in VTT_CLASS_STYLE), None)
+                if sid:
+                    out.append(f'<span style="{sid}">'); stack.append("</span>")
+                else:
+                    stack.append("")   # unknown class: keep <c> balance, emit no span
+        # unknown tags (e.g. <v Fred>, <lang en>) stripped, content kept
+    out.append(_vtt_text(text[pos:]))
+    while stack:
+        out.append(stack.pop())
+    return "".join(out)
+
+
+def vtt_to_ttml2(text):
+    """Rewrite a WebVTT string into an equivalent TTML2 string."""
+    if not text.lstrip("﻿").startswith("WEBVTT"):
+        raise ValueError("Not a WebVTT file (missing WEBVTT header)")
+    head = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<tt xmlns="http://www.w3.org/ns/ttml"'
+        ' xmlns:tts="http://www.w3.org/ns/ttml#styling"'
+        ' xmlns:ttp="http://www.w3.org/ns/ttml#parameter"'
+        ' ttp:timeBase="media" ttp:frameRate="30">\n'
+        '  <head><styling>\n'
+        '    <style xml:id="cTextWhite" tts:color="#FFFFFF"/>\n'
+        '    <style xml:id="cTextYellow" tts:color="#FFFF00"/>\n'
+        '    <style xml:id="cTextCyan" tts:color="#00FFFF"/>\n'
+        '  </styling></head>\n'
+        '  <body><div>\n'
+    )
+    body = []
+    for begin, end, settings, payload in parse_vtt(text):
+        align = VTT_ALIGN.get(settings.get("align"))
+        a = f' tts:textAlign="{align}"' if align else ""
+        body.append(f'    <p begin="{_vtt_fmt(begin)}" end="{_vtt_fmt(end)}"{a}>'
+                    f'{convert_inline(payload)}</p>\n')
+    return head + "".join(body) + "  </div></body>\n</tt>\n"
