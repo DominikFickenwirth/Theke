@@ -197,3 +197,38 @@ def test_vtt_flows_through_ttml_parser():
         subtitle.Run("kursive", subtitle.Style(italic=True)),
         subtitle.Run(" Stelle.", subtitle.Style()),
     ]
+
+
+# -- export_ass ---------------------------------------------------------------
+# Placement derived by hand at PlayRes 384x288:
+#   region "top": origin 0%/0% -> (0,0); extent 100%/20% -> (384, round(57.6)=58);
+#     textAlign center + displayAlign before -> \pos(0+384/2, 0) = \pos(192,0), \an8.
+#   no region: rect (0,0,384,288); default center/after -> \pos(192,288), \an2.
+#   colour #FF0000 -> ASS BGR opaque -> \1c&H0000FF&\1a&H00&. Times in centiseconds.
+TTML_ASS = (
+    '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling">'
+    '<head><layout>'
+    '<region xml:id="top" tts:origin="0% 0%" tts:extent="100% 20%"'
+    ' tts:displayAlign="before" tts:textAlign="center"/>'
+    '</layout></head>'
+    '<body><div>'
+    '<p begin="00:00:01.000" end="00:00:02.000" region="top">Oben</p>'
+    '<p begin="00:00:03.000" end="00:00:04.000"><span tts:color="#FF0000">Rot</span></p>'
+    '</div></body></tt>'
+)
+
+
+def test_export_ass_dialogue_lines():
+    doc = subtitle.parse_ttml(TTML_ASS)
+    dialogues = [l for l in subtitle.export_ass(doc).splitlines()
+                 if l.startswith("Dialogue")]
+    assert dialogues == [
+        r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\pos(192,0)\an8}Oben",
+        r"Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\pos(192,288)\an2}{\1c&H0000FF&\1a&H00&}Rot",
+    ]
+
+
+def test_export_ass_header_carries_playres():
+    doc = subtitle.parse_ttml(TTML_ASS)
+    head = subtitle.export_ass(doc)
+    assert "PlayResX: 384" in head and "PlayResY: 288" in head
