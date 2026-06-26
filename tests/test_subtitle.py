@@ -134,3 +134,28 @@ def test_parse_ttml_referenced_style_colour():
     assert doc.cues[2].runs == [
         subtitle.Run("Gelb", subtitle.Style(color="#FFFF00")),
     ]
+
+
+# -- export_srt ---------------------------------------------------------------
+# Derived by hand from TTML_DOC: 1-based index, "HH:MM:SS,mmm --> ...", then the
+# run text with <i>/<font> tags opened/closed at style boundaries, blank line
+# between blocks. 8.5s -> 00:00:08,500.
+EXPECTED_SRT = (
+    "1\n"
+    "00:00:01,000 --> 00:00:03,000\n"
+    "Erste Zeile\n"
+    "Zweite Zeile\n"
+    "\n"
+    "2\n"
+    "00:00:04,000 --> 00:00:06,000\n"
+    "Normal <i>kursiv</i> Ende\n"
+    "\n"
+    "3\n"
+    "00:00:05,000 --> 00:00:08,500\n"
+    '<font color="#FFFF00">Gelb</font>\n'
+)
+
+
+def test_export_srt_matches_expected():
+    doc = subtitle.parse_ttml(TTML_DOC)
+    assert subtitle.export_srt(doc) == EXPECTED_SRT
