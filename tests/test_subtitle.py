@@ -232,3 +232,38 @@ def test_export_ass_header_carries_playres():
     doc = subtitle.parse_ttml(TTML_ASS)
     head = subtitle.export_ass(doc)
     assert "PlayResX: 384" in head and "PlayResY: 288" in head
+
+
+# -- export_ttml --------------------------------------------------------------
+# Inline-styled TTML, media-time clock HH:MM:SS.mmm. Default-style runs are bare
+# text; styled runs become tts:* spans; "\n" runs become <br/>.
+TINY_TTML = (
+    '<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+    '<p begin="00:00:01.000" end="00:00:02.000">Hallo</p>'
+    '</div></body></tt>'
+)
+
+EXPECTED_TTML = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<tt xmlns="http://www.w3.org/ns/ttml"'
+    ' xmlns:tts="http://www.w3.org/ns/ttml#styling"'
+    ' xmlns:ttp="http://www.w3.org/ns/ttml#parameter"'
+    ' ttp:timeBase="media">\n'
+    '  <body><div>\n'
+    '    <p begin="00:00:01.000" end="00:00:02.000">Hallo</p>\n'
+    '  </div></body>\n'
+    '</tt>\n'
+)
+
+
+def test_export_ttml_matches_expected():
+    doc = subtitle.parse_ttml(TINY_TTML)
+    assert subtitle.export_ttml(doc) == EXPECTED_TTML
+
+
+def test_export_ttml_round_trips_cues():
+    doc = subtitle.parse_ttml(TTML_DOC)
+    reparsed = subtitle.parse_ttml(subtitle.export_ttml(doc))
+    original = [(c.start, c.end, c.runs) for c in doc.cues]
+    again = [(c.start, c.end, c.runs) for c in reparsed.cues]
+    assert again == original
