@@ -159,3 +159,41 @@ EXPECTED_SRT = (
 def test_export_srt_matches_expected():
     doc = subtitle.parse_ttml(TTML_DOC)
     assert subtitle.export_srt(doc) == EXPECTED_SRT
+
+
+# -- vtt_to_ttml2 -------------------------------------------------------------
+# WebVTT is normalised "up" to TTML so it flows through the same parser. A
+# <c.textYellow> class maps to the cTextYellow head style (tts:color #FFFF00);
+# <i> to italic; cue newlines to <br/>.
+VTT_SAMPLE = (
+    "WEBVTT\n\n"
+    "1\n"
+    "00:00:01.000 --> 00:00:04.000 align:center\n"
+    "Guten <c.textYellow>Abend</c>.\n"
+    "Willkommen.\n\n"
+    "2\n"
+    "00:00:05.000 --> 00:00:08.500\n"
+    "Eine <i>kursive</i> Stelle.\n"
+)
+
+
+def test_vtt_to_ttml2_is_detected_as_ttml():
+    assert subtitle.detect_format(subtitle.vtt_to_ttml2(VTT_SAMPLE)) == "ttml"
+
+
+def test_vtt_flows_through_ttml_parser():
+    doc = subtitle.parse_ttml(subtitle.vtt_to_ttml2(VTT_SAMPLE))
+    assert len(doc.cues) == 2
+    assert (doc.cues[0].start, doc.cues[0].end) == (1.0, 4.0)
+    assert doc.cues[0].runs == [
+        subtitle.Run("Guten ", subtitle.Style()),
+        subtitle.Run("Abend", subtitle.Style(color="#FFFF00")),
+        subtitle.Run(".", subtitle.Style()),
+        subtitle.Run("\n", subtitle.Style()),
+        subtitle.Run("Willkommen.", subtitle.Style()),
+    ]
+    assert doc.cues[1].runs == [
+        subtitle.Run("Eine ", subtitle.Style()),
+        subtitle.Run("kursive", subtitle.Style(italic=True)),
+        subtitle.Run(" Stelle.", subtitle.Style()),
+    ]
