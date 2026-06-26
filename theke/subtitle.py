@@ -566,3 +566,41 @@ def export_ass(doc, play_x=384, play_y=288):
         out.append(f"Dialogue: 0,{_ass_ts(cue.start)},{_ass_ts(cue.end)},"
                    f"Default,,0,0,0,,{''.join(parts)}")
     return "\n".join(out) + "\n"
+
+
+# -- TTML export --------------------------------------------------------------
+# Re-serialise the model to inline-styled TTML (media-time clock); styled runs
+# become tts:* spans, "\n" runs become <br/>. Positioning/regions are dropped.
+def _ttml_style_attrs(style):
+    a = []
+    if style.bold:      a.append('tts:fontWeight="bold"')
+    if style.italic:    a.append('tts:fontStyle="italic"')
+    if style.underline: a.append('tts:textDecoration="underline"')
+    if style.color:     a.append(f'tts:color="{style.color}"')
+    return " ".join(a)
+
+
+def _ttml_run(run):
+    if run.text == "\n":
+        return "<br/>"
+    text = _esc(run.text)
+    attrs = _ttml_style_attrs(run.style)
+    return f"<span {attrs}>{text}</span>" if attrs else text
+
+
+def export_ttml(doc):
+    """Serialise a Document to inline-styled TTML text."""
+    head = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<tt xmlns="http://www.w3.org/ns/ttml"'
+        ' xmlns:tts="http://www.w3.org/ns/ttml#styling"'
+        ' xmlns:ttp="http://www.w3.org/ns/ttml#parameter"'
+        ' ttp:timeBase="media">\n'
+        '  <body><div>\n'
+    )
+    body = []
+    for cue in doc.cues:
+        content = "".join(_ttml_run(r) for r in cue.runs)
+        body.append(f'    <p begin="{_vtt_fmt(cue.start)}" end="{_vtt_fmt(cue.end)}">'
+                    f'{content}</p>\n')
+    return head + "".join(body) + "  </div></body>\n</tt>\n"
