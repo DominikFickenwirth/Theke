@@ -135,6 +135,24 @@ def test_config_languages_wrong_type_is_error(tmp_path):
         load_config(str(path))
 
 
+def test_config_subtitle_formats_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert load_config(None).subtitle_formats == ["srt", "ass", "ttml"]
+
+
+def test_config_subtitle_formats_from_file(tmp_path):
+    path = tmp_path / "sf.json"
+    write_config(path, {"subtitle_formats": ["srt"]})
+    assert load_config(str(path)).subtitle_formats == ["srt"]
+
+
+def test_config_subtitle_formats_wrong_type_is_error(tmp_path):
+    path = tmp_path / "sf.json"
+    write_config(path, {"subtitle_formats": "srt"})   # must be a list
+    with pytest.raises(ConfigError, match="subtitle_formats"):
+        load_config(str(path))
+
+
 def test_config_file_defaults(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = load_config(None)

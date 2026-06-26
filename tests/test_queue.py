@@ -968,9 +968,45 @@ def test_queue_download_routes_hls(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_queue_download_writes_subtitle_sidecar(tmp_path, monkeypatch):
+# A minimal WebVTT subtitle the converter turns into srt/ass/ttml sidecars.
+_VTT_SUB = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHallo Welt\n"
+
+
+def test_queue_download_writes_converted_subtitle_sidecars(tmp_path, monkeypatch):
     def dl(url, out, retries):
-        data = b"SUB" if url.endswith(".vtt") else b"SRC"
+        data = _VTT_SUB if url.endswith(".vtt") else b"SRC"
+        with open(out, "wb") as fh:
+            fh.write(data)
+        return len(data)
+
+    monkeypatch.setattr(theke, "download_file", dl)
+    monkeypatch.setattr(theke, "run_remux", _fake_remux)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path)   # default subtitle_formats: srt, ass, ttml
+        insert_local(conn, "m_de", "Solo", url_video="http://de",
+                     url_subtitle="http://h/sub.vtt")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        stem = os.path.splitext(queue_rows(conn)[0]["path"])[0]
+        # converted sidecars carry the language tag; no raw .vtt is kept.
+        assert not os.path.exists(stem + ".vtt")
+        for ext in (".de.srt", ".de.ass", ".de.ttml"):
+            assert os.path.exists(stem + ext), ext
+        with open(stem + ".de.srt", encoding="utf-8") as fh:
+            srt = fh.read()
+        assert "00:00:01,000 --> 00:00:02,000" in srt
+        assert "Hallo Welt" in srt
+        assert os.listdir(str(tmp_path / "scratch")) == []
+    finally:
+        conn.close()
+
+
+def test_queue_download_skips_unrecognised_subtitle(tmp_path, monkeypatch):
+    # NDR serves an HTML page at the subtitle URL: no sidecar, film still done.
+    def dl(url, out, retries):
+        data = b"<!DOCTYPE html><html></html>" if url.endswith(".html") else b"SRC"
         with open(out, "wb") as fh:
             fh.write(data)
         return len(data)
@@ -981,14 +1017,14 @@ def test_queue_download_writes_subtitle_sidecar(tmp_path, monkeypatch):
     try:
         cfg = download_cfg(tmp_path)
         insert_local(conn, "m_de", "Solo", url_video="http://de",
-                     url_subtitle="http://h/sub.vtt")
+                     url_subtitle="http://h/ut.html")
         cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
         conn.execute("UPDATE queue SET status='A'")
-        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
-        target = queue_rows(conn)[0]["path"]
-        sidecar = os.path.splitext(target)[0] + ".vtt"
-        with open(sidecar, "rb") as fh:
-            assert fh.read() == b"SUB"
+        result = cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert result == {"downloaded": 1, "failed": 0}
+        assert status_of(conn, "m_de") == "D"
+        stem = os.path.splitext(queue_rows(conn)[0]["path"])[0]
+        assert not os.path.exists(stem + ".de.srt")
         assert os.listdir(str(tmp_path / "scratch")) == []
     finally:
         conn.close()

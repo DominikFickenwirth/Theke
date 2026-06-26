@@ -373,6 +373,7 @@ aufgelöst und sind dort per CLI überschreibbar.
 | `library_path`        | Vorlage für `path` (Std. `"movies/{Title} ({Year})/{Title} ({Year}).mp4"`). |
 | `video_ext`           | Endung der Videodatei (Std. `"mp4"`).                             |
 | `audio_ext`           | Endung der Audiodatei (Std. `"aac"`).                             |
+| `subtitle_formats`    | Sidecar-Formate je Untertitel (Liste, Std. `["srt","ass","ttml"]`). |
 | `temp_path`           | Scratch-Verzeichnis für Download/Remux (Std. `""` = System-Temp). |
 
 Die `library_path`-Platzhalter sind **case-insensitiv**: `{Title}`, `{Year}` (für
@@ -498,8 +499,11 @@ Tor: die einzige Queue-Aktion, die Dateien schreibt). Quelle ist allein die
 Queue-Zeile: `url` wird nach `temp_path` geladen (HLS-Playlist oder direkter
 HTTP-Download), gemäß `remux` mit dem Sprach-Tag aus `language` remuxt (beides
 unter einem eindeutigen Temp-Präfix, damit parallele Downloads nicht
-kollidieren), nach `path` verschoben und ein etwaiger `url_subtitle` als Sidecar
-neben den Film gelegt. Nach erfolgreichem Move werden alle Temp-Dateien des
+kollidieren), nach `path` verschoben und ein etwaiger `url_subtitle` in die
+konfigurierten Formate (`subtitle_formats`) konvertiert und als
+`<stem>.<lang>.<ext>`-Sidecar(s) neben den Film gelegt (TTML/EBU-TT oder WebVTT
+rein, SRT/ASS/TTML raus, ffmpeg-frei; ein nicht erkanntes Format wird
+übersprungen). Nach erfolgreichem Move werden alle Temp-Dateien des
 Eintrags gelöscht. Nur `approved`-Zeilen sind berechtigt; eine fehlgeschlagene
 Zeile wird `failed` (mit Fehlertext) markiert und bricht den Lauf nicht ab --
 zum Wiederholen erneut `approve` (`--force`). Gibt `downloaded`/`failed` aus.
@@ -570,6 +574,29 @@ Video). `--language` setzt den Sprach-Tag der ersten Audiospur.
 ```powershell
 theke file remux --in build/film.ts --mode AV --out build/film.mp4
 theke file remux --in build/film.ts --mode A --language fra --out build/film.aac
+```
+
+### `file remux-subtitle`
+
+Konvertiert eine Untertiteldatei (`--in`: TTML/EBU-TT(-D)-XML oder WebVTT) in je
+ein `<base>.<lang>.<ext>`-Sidecar pro Format. **ffmpeg-frei** -- ffmpeg kann TTML
+nicht decodieren und verliert beim WebVTT-Decode Farbe und Position; daher ein
+eigener Parser (TTML als Kanon, WebVTT wird hochnormalisiert) mit eigenen SRT-
+(`<font>`-Farbe), ASS- (`\pos`-Platzierung + Farbe) und TTML-Exportern. `--format`
+überschreibt die konfigurierten `subtitle_formats`; ohne `--out` ist die Basis der
+Eingabepfad ohne Endung. Ein nicht erkanntes Eingabeformat schreibt nichts.
+
+| Option                 | Wirkung                                                       |
+| ---------------------- | ------------------------------------------------------------- |
+| `-i`, `--in PATH`      | Eingabe-Untertitel (`.ttml`/`.xml`/`.vtt`).                   |
+| `-o`, `--out BASE`     | Ausgabe-Basispfad (Std.: Eingabepfad ohne Endung).            |
+| `-l`, `--language CODE`| Sprach-Tag im Sidecar-Namen (Std. `de`).                      |
+| `--format LIST`        | Komma-Liste der Formate (Std.: `subtitle_formats`).           |
+| `-f`, `--force`        | Vorhandene Sidecars überschreiben.                            |
+
+```powershell
+theke file remux-subtitle --in build/movies/Mobbing.xml --language de
+theke file remux-subtitle --in sub.vtt --format srt --out "M:/Filme/Film (2020)/Film (2020)"
 ```
 
 ### `file move`

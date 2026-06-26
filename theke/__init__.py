@@ -28,6 +28,7 @@ from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, move_file
+from theke import subtitle
 
 CONFIG_DEFAULT_PATH = "theke.json"
 
@@ -57,6 +58,7 @@ class Config:
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     fiction_topics:       list  = dataclasses.field(default_factory=list)
+    subtitle_formats:     list  = dataclasses.field(default_factory=lambda: ["srt", "ass", "ttml"])
     ffmpeg_path:          str   = "ffmpeg"
     download_retries:     int   = 3
     temp_path:            str   = ""
@@ -1466,9 +1468,11 @@ def _url_ext(url) -> str:
     return os.path.splitext(urllib.parse.urlsplit(url).path)[1]
 
 
-def _subtitle_ext(url) -> str:
-    """Sidecar extension from a subtitle URL (default '.srt' when it carries none)."""
-    return _url_ext(url) or ".srt"
+def _subtitle_lang(row) -> str:
+    """Sidecar language tag (Jellyfin convention): the queue language when it is a
+    2-letter code, else 'de' (covers '', 'ov' and original-language fallbacks)."""
+    lang = (row["language"] or "").strip()
+    return lang if len(lang) == 2 and lang.isalpha() else "de"
 
 
 def _temp_base(tmpdir, row) -> str:
@@ -1537,11 +1541,24 @@ def _fetch(cfg, url, out):
 
 
 def _download_subtitle(cfg, row, base, force):
-    """Fetch the subtitle to a sidecar next to the film (same stem as its path)."""
-    ext = _subtitle_ext(row["url_subtitle"])
-    tmp = base + ".sub" + ext
+    """Fetch the subtitle and write converted sidecars next to the film: one
+    '<stem>.<lang>.<ext>' per configured format. ffmpeg-free (TTML/EBU-TT and
+    WebVTT in, SRT/ASS/TTML out). Unrecognised input (e.g. an HTML page) is
+    skipped without writing a sidecar."""
+    tmp = base + ".sub" + _url_ext(row["url_subtitle"])
     download_file(row["url_subtitle"], tmp, cfg.download_retries)
-    move_file(tmp, os.path.splitext(row["path"])[0] + ext, force)
+    with open(tmp, encoding="utf-8-sig") as fh:
+        outputs = subtitle.convert(fh.read(), cfg.subtitle_formats)
+    if not outputs:
+        log.warning("queue %s subtitle: unrecognised format, no sidecar", row["id"])
+        return
+    stem = os.path.splitext(row["path"])[0]
+    lang = _subtitle_lang(row)
+    for fmt, data in outputs.items():
+        out_tmp = base + ".out" + subtitle.SUBTITLE_EXT[fmt]
+        with open(out_tmp, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        move_file(out_tmp, f"{stem}.{lang}{subtitle.SUBTITLE_EXT[fmt]}", force)
 
 
 def _cleanup(base):
@@ -1606,9 +1623,10 @@ def cmd_config(cfg) -> dict:
 def cmd_file(cfg, args: argparse.Namespace) -> dict:
     """Dispatch a file action: download / remux / move (each on explicit paths)."""
     match args.file_cmd:
-        case "download": return _file_download(cfg, args)
-        case "remux":    return _file_remux(cfg, args)
-        case "move":     return _file_move(cfg, args)
+        case "download":       return _file_download(cfg, args)
+        case "remux":          return _file_remux(cfg, args)
+        case "remux-subtitle": return _file_remux_subtitle(cfg, args)
+        case "move":           return _file_move(cfg, args)
         case _: raise DbError(f"unhandled file action: {args.file_cmd}")
 
 
@@ -1627,6 +1645,26 @@ def _file_download(cfg, args) -> dict:
 def _file_remux(cfg, args) -> dict:
     run_remux(cfg.ffmpeg_path, args.in_path, args.mode, args.out, args.language)
     return {"remux": args.mode, "out": args.out}
+
+
+def _file_remux_subtitle(cfg, args) -> dict:
+    """Convert a subtitle file (TTML/EBU-TT or WebVTT) into '<base>.<lang>.<ext>'
+    sidecars, one per requested format (--format, else config subtitle_formats).
+    ffmpeg-free; an unrecognised input writes nothing."""
+    formats = args.format.split(",") if args.format else cfg.subtitle_formats
+    with open(args.in_path, encoding="utf-8-sig") as fh:
+        outputs = subtitle.convert(fh.read(), formats)
+    base = args.out or os.path.splitext(args.in_path)[0]
+    written = []
+    for fmt, data in outputs.items():
+        dest = f"{base}.{args.language}{subtitle.SUBTITLE_EXT[fmt]}"
+        if os.path.exists(dest) and not args.force:
+            raise FileExistsError(f"destination exists (use --force): {dest}")
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        written.append(dest)
+    return {"subtitle": written}
 
 
 def _file_move(cfg, args) -> dict:
@@ -1737,6 +1775,12 @@ def build_parser() -> argparse.ArgumentParser:
     frx.add_argument("-m", "--mode",     required=True, choices=["AV", "A", "V"],            help="what to keep: AV (audio+video), A (audio), V (video)")
     frx.add_argument("-o", "--out",      required=True, metavar="PATH",                      help="output file path")
     frx.add_argument("-l", "--language", metavar="CODE",                                     help="set the audio track language tag (e.g. deu)")
+    frxs = fsub.add_parser("remux-subtitle", help="convert a subtitle file to player-ready sidecars", description="Convert --in (TTML/EBU-TT(-D) XML or WebVTT) into one '<base>.<lang>.<ext>' sidecar per format. ffmpeg-free (ffmpeg cannot decode TTML and drops colour/position). --format overrides the configured subtitle_formats; --out sets the base path (default: --in without its extension).")
+    frxs.add_argument("-i", "--in",       dest="in_path", required=True, metavar="PATH",     help="input subtitle file (.ttml/.xml/.vtt)")
+    frxs.add_argument("-o", "--out",      metavar="BASE",                                     help="output base path (default: input path without extension)")
+    frxs.add_argument("-l", "--language", default="de", metavar="CODE",                       help="sidecar language tag (default: de)")
+    frxs.add_argument(      "--format",   metavar="LIST",                                     help="comma-separated formats to write (default: config subtitle_formats)")
+    frxs.add_argument("-f", "--force",    action="store_true",                                help="overwrite existing sidecars")
     fmv = fsub.add_parser("move", help="move a file into the library", description="Move --in to --out, creating parent directories. An existing destination is an error unless --force.")
     fmv.add_argument("-i", "--in",    dest="in_path", required=True, metavar="PATH", help="source file path")
     fmv.add_argument("-o", "--out",   required=True, metavar="PATH",                 help="destination file path")
