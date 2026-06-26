@@ -57,6 +57,7 @@ class Config:
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     fiction_topics:       list  = dataclasses.field(default_factory=list)
+    subtitle_formats:     list  = dataclasses.field(default_factory=lambda: ["srt", "ass", "ttml"])
     ffmpeg_path:          str   = "ffmpeg"
     download_retries:     int   = 3
     temp_path:            str   = ""
