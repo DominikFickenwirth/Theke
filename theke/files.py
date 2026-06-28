@@ -118,17 +118,39 @@ def parse_media_playlist(text, base_url):
 
 # -- direct download ----------------------------------------------------------
 
-def open_url(url, offset=0, timeout=None):
+def open_url(url, offset=0, timeout=None, validator=None):
     """Open a URL for streaming; return (reader, resumed). With offset>0 a Range
     request is sent and resumed is True only when the server honors it (HTTP 206).
-    `timeout` (seconds) bounds each socket operation (None = no timeout). The
-    network seam for the direct downloader -- monkeypatched in tests."""
+    With `validator` set (a stored ETag/Last-Modified), an If-Range header makes the
+    server answer 200 (full body) instead of 206 when the resource has changed, so
+    a resume never splices two versions. `timeout` (seconds) bounds each socket
+    operation (None = no timeout). The network seam -- monkeypatched in tests."""
     headers = {"User-Agent": theke.USER_AGENT}
     if offset:
         headers["Range"] = f"bytes={offset}-"
+        if validator:
+            headers["If-Range"] = validator
     response = urllib.request.urlopen(
         urllib.request.Request(url, headers=headers), timeout=timeout)
     return response, response.status == 206
+
+
+def _validator(reader):
+    """A cache validator for an If-Range resume: the response ETag, else its
+    Last-Modified, else None (a test BytesIO without getheader, or neither header)."""
+    try:
+        return reader.getheader("ETag") or reader.getheader("Last-Modified")
+    except (AttributeError, TypeError):
+        return None
+
+
+def _read_validator(meta):
+    """The validator stored beside a leftover '.part', or None when absent."""
+    try:
+        with open(meta, encoding="utf-8") as fh:
+            return fh.read() or None
+    except OSError:
+        return None
 
 
 def download_file(url, out, retries, timeout=None) -> int:
@@ -148,14 +170,18 @@ def download_file(url, out, retries, timeout=None) -> int:
 
 def _download_once(url, out, timeout=None) -> int:
     part = out + ".part"
+    meta = part + ".meta"
     _ensure_parent(out)
     offset = os.path.getsize(part) if os.path.exists(part) else 0
-    reader, resumed = open_url(url, offset, timeout)
+    validator = _read_validator(meta) if offset else None
+    extra = {"validator": validator} if validator else {}   # keep old seam intact
+    reader, resumed = open_url(url, offset, timeout, **extra)
     if offset and not resumed:
-        offset = 0   # server ignored the Range -> rewrite from scratch
-        log.info("range not honored; restarting")
+        offset = 0   # range ignored or resource changed (If-Range) -> rewrite
+        log.info("range not honored or resource changed; restarting")
     elif offset:
         log.info("resuming at %d bytes", offset)
+    _store_validator(meta, _validator(reader))   # remember it for a later resume
     total = _content_length(reader)
     if total is not None and resumed:
         total += offset                  # 206 Content-Length covers only the remainder
@@ -180,7 +206,23 @@ def _download_once(url, out, timeout=None) -> int:
         raise RuntimeError(                  # attempt (incl. a no-progress resume of an
             f"empty download: no bytes received ({os.path.basename(out)})")  # always-
     os.replace(part, out)                    # incomplete leftover .part) is never done
+    _discard(meta)                           # validator only matters while a .part lives
     return os.path.getsize(out)
+
+
+def _store_validator(meta, validator) -> None:
+    """Persist a resume validator beside the '.part' (skipped when none is known)."""
+    if validator:
+        with open(meta, "w", encoding="utf-8") as fh:
+            fh.write(validator)
+
+
+def _discard(path) -> None:
+    """Remove a path if present (best-effort sidecar cleanup)."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 # -- ffmpeg seam --------------------------------------------------------------
