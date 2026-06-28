@@ -135,7 +135,8 @@ that downloads or writes/deletes files in the library sits behind the gate.
 **Download (phase 6):** plain HTTP GET for mp4/mp3/m4v/flv/m4a directly streamed
 to disk; m3u8-playlists are parsed, and the segments then streamed to disk.
 Subtitles are downloaded when present. Downloads resume automatically, failed
-downloads retry (a few times), status in DB, no silent loss.
+downloads retry (a few times), status in DB, no silent loss. A partial,
+unfinishable download counts as a failure.
 
 **Scheduler (in-app, phase 10):** `theke run` loops the stages at configured
 intervals in pipeline order (fetch -> enrich -> match -> wishlist check -> ...).
