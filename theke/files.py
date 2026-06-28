@@ -424,14 +424,44 @@ def ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language=None) -> list:
     return [ffmpeg_path, "-y", "-i", in_path] + _REMUX_CODEC[mode] + meta + [out_path]
 
 
+_REMUX_DURATION_TOLERANCE = 1.0   # seconds the output may legitimately fall short
+
+
+def probe_duration(ffmpeg_path, path) -> float | None:
+    """The container duration (seconds) ffmpeg reports for `path`, or None when it
+    cannot be determined (unparseable, or ffmpeg missing). Reads the header only
+    (ffmpeg -i, whose non-zero 'no output' exit is expected and ignored)."""
+    try:
+        proc = subprocess.run([ffmpeg_path, "-i", path], capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    m = _DURATION_RX.search(proc.stderr or "")
+    return _hms(*m.groups()) if m else None
+
+
+def _verify_not_truncated(ffmpeg_path, in_path, out_path) -> None:
+    """Guard against a silently-truncated source ffmpeg copied without error: if
+    the output falls materially short of the source duration the input was
+    incomplete -- raise. Skipped when either duration is unknown, so it never fails
+    a healthy remux on a probe that cannot read a stub (or absent ffmpeg)."""
+    src = probe_duration(ffmpeg_path, in_path)
+    out = probe_duration(ffmpeg_path, out_path)
+    if src and out and out < src - _REMUX_DURATION_TOLERANCE:
+        raise RuntimeError(
+            f"truncated source: remux {out:.0f}s < source {src:.0f}s "
+            f"({os.path.basename(in_path)})")
+
+
 def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
     """Remux in_path into out_path (stream copy, no transcode); return the output
-    size in bytes."""
+    size in bytes. A source whose duration the output falls short of (a truncation
+    ffmpeg copied silently) is rejected."""
     log.info("remuxing %s -> %s (%s)", os.path.basename(in_path),
              os.path.basename(out_path), mode)
     _ensure_parent(out_path)
     try:
         run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
+        _verify_not_truncated(ffmpeg_path, in_path, out_path)
     except Exception:
         if os.path.exists(out_path):   # drop the partial/faulty target ffmpeg left
             os.remove(out_path)
