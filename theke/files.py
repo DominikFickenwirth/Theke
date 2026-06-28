@@ -6,6 +6,7 @@
 # through run_ffmpeg. CLI wiring + result emission live in __init__.py.
 
 import collections
+import errno
 import logging
 import os
 import re
@@ -166,6 +167,11 @@ def _is_fatal_http(exc) -> bool:
             and exc.code not in _TRANSIENT_HTTP and exc.code != 416)
 
 
+def _is_disk_full(exc) -> bool:
+    """True for a write that ran out of space; retrying it cannot free any."""
+    return isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+
+
 class _Stall:
     """Throughput floor for a transfer: aborts once a sliding window of `window`
     seconds delivers less than one CHUNK, catching a trickle the per-read socket
@@ -204,7 +210,7 @@ def download_file(url, out, retries, timeout=None, stall_timeout=0) -> int:
             return _download_once(url, out, timeout, stall_timeout)
         except Exception as exc:
             _classify_download_error(exc, out)   # fatal -> reraise; 416 -> reset .part
-            if attempt == retries:
+            if _is_disk_full(exc) or attempt == retries:   # no space -> stop retrying
                 raise
             log.info("download error (%s); retry %d/%d", exc, attempt + 1, retries)
 
