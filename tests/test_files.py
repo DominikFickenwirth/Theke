@@ -1081,6 +1081,37 @@ def test_move_force_overwrites(tmp_path):
     assert dst.read_bytes() == b"new"
 
 
+# -- atomic move into the library (item 5) ------------------------------------
+# A cross-device move is copy-then-delete; interrupted mid-copy it can leave a
+# partial file under the final library name -- and with force the prior good file
+# was already deleted. The fix lands the payload on a temp name on the destination
+# filesystem and swaps it in with one atomic os.replace, so a failed copy never
+# touches the final name and the prior file survives until the swap.
+
+def test_move_failure_keeps_prior_file_and_no_partial(tmp_path, monkeypatch):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"NEWDATA")
+    dst = tmp_path / "lib" / "movie.mp4"
+    dst.parent.mkdir()
+    dst.write_bytes(b"OLD-GOOD")                 # prior library file
+
+    def boom(s, d):
+        raise OSError("disk full mid-copy")
+    monkeypatch.setattr(files.shutil, "move", boom)
+    with pytest.raises(OSError):
+        move_file(str(src), str(dst), force=True)
+    assert dst.read_bytes() == b"OLD-GOOD"       # prior file intact, not pre-deleted
+
+
+def test_move_success_leaves_no_temp(tmp_path):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"film")
+    dst = tmp_path / "lib" / "movie.mp4"
+    move_file(str(src), str(dst), force=False)
+    assert dst.read_bytes() == b"film"
+    assert not (tmp_path / "lib" / "movie.mp4.part").exists()   # temp swapped away
+
+
 def test_cli_file_move_json(tmp_path, capsys):
     src = tmp_path / "src.mp4"
     src.write_bytes(b"x")
