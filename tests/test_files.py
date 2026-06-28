@@ -492,6 +492,67 @@ def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
     assert len(progress) == 2                                  # after 3 bytes and 6 bytes
 
 
+# -- HLS segment length guard (item 1) ----------------------------------------
+# theke.http_get exposes no Content-Length to the caller: a short read *with* a
+# Content-Length already raises IncompleteRead inside http_get (-> retry loop), so
+# the only residual, otherwise-undetectable case is a no-Content-Length stream
+# that ends early, which reads back as an empty body. Consistent with item 2 ("an
+# empty result must not be accepted as a complete download"), an empty segment is
+# rejected and never finalized.
+
+def test_fetch_segment_rejects_empty_body_not_written(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"https://h/v/seg0.ts": b""})
+    path = str(tmp_path / "seg_00000.ts")
+    with pytest.raises(RuntimeError, match="empty segment"):
+        files._fetch_segment(path, "https://h/v/seg0.ts")
+    assert not os.path.exists(path)              # never finalized
+    assert not os.path.exists(path + ".part")    # no stale temp left behind
+
+
+def test_fetch_segment_writes_nonempty_body(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"https://h/v/seg0.ts": b"DATA"})
+    path = str(tmp_path / "seg_00000.ts")
+    files._fetch_segment(path, "https://h/v/seg0.ts")
+    assert (tmp_path / "seg_00000.ts").read_bytes() == b"DATA"   # exact length -> ok
+
+
+def test_hls_empty_segment_retries_then_succeeds(tmp_path, monkeypatch):
+    # seg1 arrives empty (silent truncation) on the first try, full on the retry;
+    # the empty body is never kept, so the assembled output is whole.
+    calls = {"n": 0}
+
+    def fake_get(url, timeout=None):
+        if url == "https://h/v/seg1.ts":
+            calls["n"] += 1
+            return b"" if calls["n"] == 1 else b"BBB"
+        return {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA"}[url]
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(files, "run_ffmpeg",
+                        lambda args: pytest.fail("should not fall back"))
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=1,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls"
+    assert (tmp_path / "v.ts").read_bytes() == b"AAABBB"
+
+
+def test_hls_empty_segment_without_retries_falls_back_to_ffmpeg(tmp_path, monkeypatch):
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                               "https://h/v/seg1.ts": b""})   # silent truncation
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FALLBACK")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert (tmp_path / "v.ts").read_bytes() == b"FALLBACK"
+
+
 # -- file download CLI --------------------------------------------------------
 
 def test_cli_file_download_direct_json(tmp_path, capsys, monkeypatch):
