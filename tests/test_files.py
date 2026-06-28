@@ -1098,6 +1098,60 @@ def test_run_ffmpeg_missing_binary_raises(tmp_path):
         run_ffmpeg(["this-ffmpeg-does-not-exist", "-version"])
 
 
+# -- remux truncation guard (item 6) ------------------------------------------
+# A silently-truncated source (one that slipped past the download guards because
+# no Content-Length/ETag was available) is often copied by ffmpeg without error,
+# yielding a short output. run_remux compares source vs output duration and fails
+# so a truncated film never reaches the library. The check is skipped when either
+# duration is unknown, so it never breaks a healthy remux whose probe can't read a
+# test stub (or when ffmpeg is absent).
+
+def test_remux_rejects_truncated_source(tmp_path, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"short")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    durations = {"in.ts": 3600.0, out: 12.0}      # output far shorter than source
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    with pytest.raises(RuntimeError, match="truncated"):
+        run_remux("ffmpeg", "in.ts", "AV", out)
+    assert not os.path.exists(out)                 # short output dropped, not kept
+
+
+def test_remux_accepts_matching_duration(tmp_path, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"full")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    durations = {"in.ts": 3600.0, out: 3600.0}
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    n = run_remux("ffmpeg", "in.ts", "AV", out)
+    assert n == 4                                  # accepted (len b"full")
+
+
+def test_remux_skips_check_when_duration_unknown(tmp_path, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"x")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: None)
+    n = run_remux("ffmpeg", "in.ts", "AV", out)    # unknown duration -> no guard
+    assert n == 1
+
+
+def test_probe_duration_parses_ffmpeg_stderr(monkeypatch):
+    class Proc:
+        stderr = "  Duration: 01:02:03.50, start: 0.0\n"
+    monkeypatch.setattr(files.subprocess, "run", lambda *a, **k: Proc())
+    assert files.probe_duration("ffmpeg", "x.mp4") == 3723.5   # 3600 + 120 + 3.5
+
+
 class FakePopen:
     """Fake subprocess.Popen for run_ffmpeg: serves stderr_text as the process
     stderr stream and returns returncode from wait()."""
