@@ -628,6 +628,55 @@ def test_hls_native_failure_falls_back_to_ffmpeg(tmp_path, monkeypatch):
     assert (tmp_path / "v.ts").read_bytes() == b"FALLBACK"
 
 
+# -- ffmpeg HLS-fallback timeout (item 4) -------------------------------------
+# When ffmpeg fetches the HLS stream itself (encrypted stream, or native assembly
+# failed) it must get the configured network timeout, else a dropped connection
+# hangs the process forever -- the same failure the direct downloader already
+# guards. -rw_timeout bounds each network read/write and is in microseconds.
+
+def test_hls_ffmpeg_args_includes_rw_timeout():
+    args = files._hls_ffmpeg_args("http://x/v.m3u8", "out.ts", "ffmpeg", timeout=60)
+    assert "-rw_timeout" in args
+    assert args[args.index("-rw_timeout") + 1] == "60000000"   # 60 s in microseconds
+    assert args.index("-rw_timeout") < args.index("-i")        # input option
+
+
+def test_hls_ffmpeg_args_omits_timeout_when_none():
+    args = files._hls_ffmpeg_args("http://x/v.m3u8", "out.ts", "ffmpeg", timeout=None)
+    assert "-rw_timeout" not in args
+
+
+def test_hls_encrypted_handoff_passes_timeout_to_ffmpeg(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n'
+             b'#EXTINF:6,\nseg0.ts\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media})
+    seen = {}
+
+    def fake_ffmpeg(args):
+        seen["args"] = args
+        with open(args[-1], "wb") as fh:
+            fh.write(b"X")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg", timeout=30)
+    assert seen["args"][seen["args"].index("-rw_timeout") + 1] == "30000000"
+
+
+def test_hls_native_failure_handoff_passes_timeout_to_ffmpeg(tmp_path, monkeypatch):
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                               "https://h/v/seg1.ts": RuntimeError("seg gone")})
+    seen = {}
+
+    def fake_ffmpeg(args):
+        seen["args"] = args
+        with open(args[-1], "wb") as fh:
+            fh.write(b"X")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg", timeout=45)
+    assert seen["args"][seen["args"].index("-rw_timeout") + 1] == "45000000"
+
+
 def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(files, "PROGRESS_BYTES", 2)            # milestone every 2 bytes
     install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT,
