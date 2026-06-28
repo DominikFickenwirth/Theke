@@ -1,5 +1,6 @@
 """Tests for the download queue (phase 5): dedup selection + cmd_queue."""
 
+import io
 import json
 import os
 
@@ -157,7 +158,7 @@ def qargs(queue_cmd="add", tmdb=None, mediathek_id=None, status=None,
 
 def stub_tmdb(monkeypatch):
     monkeypatch.setattr(theke, "http_get",
-                        lambda url: json.dumps(TMDB).encode("utf-8"))
+                        lambda url, timeout=None: json.dumps(TMDB).encode("utf-8"))
 
 
 def queue_rows(conn):
@@ -418,6 +419,42 @@ def test_render_template_unknown_placeholder_raises():
     from theke import _render_template
     with pytest.raises(KeyError, match="bogus"):
         _render_template("{bogus}", {"Title": "X"})
+
+
+# Library filename sanitization (item 9): a title carrying FS-reserved characters
+# would otherwise only blow up at the final move, after the whole download+remux.
+# Sanitizing is opt-in (sanitize=True) and applies per substituted value, so the
+# template's own path separators survive.
+
+def test_render_template_sanitizes_reserved_chars():
+    from theke import _render_template
+    fields = {"Title": "A: B? C", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    out = _render_template("{Title} ({Year}).mp4", fields, sanitize=True)
+    assert out == "A- B- C (2020).mp4"          # ':' '?' reserved -> '-'
+
+
+def test_render_template_strips_trailing_dot_and_space():
+    from theke import _render_template
+    fields = {"Title": "Trailing. ", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    out = _render_template("{Title}.mp4", fields, sanitize=True)
+    assert out == "Trailing.mp4"                 # trailing '. ' stripped from value
+
+
+def test_render_template_keeps_path_separators_when_sanitizing():
+    from theke import _render_template
+    fields = {"Title": "X/Y", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    out = _render_template("movies/{Title}/{Title}.mp4", fields, sanitize=True)
+    assert out == "movies/X-Y/X-Y.mp4"          # value '/' replaced, template kept
+
+
+def test_render_template_no_sanitize_by_default():
+    from theke import _render_template
+    fields = {"Title": "A:B", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    assert _render_template("{Title}.mp4", fields) == "A:B.mp4"
 
 
 def test_queue_add_custom_extensions(tmp_path, monkeypatch):
@@ -804,7 +841,7 @@ def test_queue_delete_cli(tmp_path, monkeypatch, capsys):
 # The file primitives (download/remux/move) are stubbed; we test the chaining,
 # status transitions, cleanup and error handling -- not ffmpeg/HTTP themselves.
 
-def _fake_dl(url, out, retries):
+def _fake_dl(url, out, retries, timeout=None, stall_timeout=0):
     with open(out, "wb") as fh:
         fh.write(b"SRC")
     return 3
@@ -846,6 +883,29 @@ def test_queue_download_runs_pipeline_to_target(tmp_path, monkeypatch):
             assert fh.read() == b"MUX"
         assert status_of(conn, "m_de") == "D"
         assert os.listdir(str(tmp_path / "scratch")) == []   # temp files cleaned up
+    finally:
+        conn.close()
+
+
+def test_queue_download_passes_configured_timeout(tmp_path, monkeypatch):
+    seen = {}
+
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
+        seen["timeout"] = timeout
+        with open(out, "wb") as fh:
+            fh.write(b"SRC")
+        return 3
+
+    monkeypatch.setattr(theke, "download_file", dl)
+    monkeypatch.setattr(theke, "run_remux", _fake_remux)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, download_timeout=22)
+        insert_local(conn, "m_de", "Solo", url_video="http://de")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert seen["timeout"] == 22
     finally:
         conn.close()
 
@@ -917,7 +977,7 @@ def test_queue_download_by_id(tmp_path, monkeypatch):
 
 
 def test_queue_download_failure_marks_failed_and_continues(tmp_path, monkeypatch):
-    def dl(url, out, retries):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         if "bad" in url:
             raise RuntimeError("net down")
         with open(out, "wb") as fh:
@@ -945,8 +1005,54 @@ def test_queue_download_failure_marks_failed_and_continues(tmp_path, monkeypatch
         conn.close()
 
 
+def test_queue_download_truncated_source_fails_without_remux(tmp_path, monkeypatch):
+    # a mid-download drop (real download_file over a truncating open_url) must mark
+    # the row failed -- never remux the half file. Reproduces the silent-truncation
+    # bug: a clean EOF below Content-Length used to be taken as a finished download.
+    import theke.files as files
+
+    def opener(url, offset=0, timeout=None):
+        return Sized(b"012345", length=16), False        # 6 of 16 bytes, clean EOF
+    monkeypatch.setattr(files, "open_url", opener)
+    monkeypatch.setattr(theke, "run_remux",
+                        lambda *a, **k: pytest.fail("must not remux a truncated download"))
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, download_retries=1)
+        insert_local(conn, "m_de", "Solo", url_video="http://de/v.mp4")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        result = cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert result == {"downloaded": 0, "failed": 1}
+        assert status_of(conn, "m_de") == "F"
+        bad = queue_rows(conn)[0]
+        assert "incomplete" in bad["error"]
+        assert os.listdir(str(tmp_path / "scratch")) == []   # half file cleaned up
+        assert not (tmp_path / "lib").exists()               # nothing reached library
+    finally:
+        conn.close()
+
+
+class Sized:
+    """Fake response advertising Content-Length, serving `body` then a clean EOF;
+    a short body models a connection drop that ends in EOF, not an exception."""
+
+    def __init__(self, body, length):
+        self.buf = io.BytesIO(body)
+        self.length = length
+
+    def getheader(self, name, default=None):
+        return str(self.length) if name == "Content-Length" else default
+
+    def read(self, n=-1):
+        return self.buf.read(n)
+
+    def close(self):
+        pass
+
+
 def test_queue_download_routes_hls(tmp_path, monkeypatch):
-    def hls(url, out, retries, ffmpeg_path):
+    def hls(url, out, retries, ffmpeg_path, timeout=None):
         with open(out, "wb") as fh:
             fh.write(b"SRC")
         return "hls", 3, 1
@@ -973,7 +1079,7 @@ _VTT_SUB = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHallo Welt\n"
 
 
 def test_queue_download_writes_converted_subtitle_sidecars(tmp_path, monkeypatch):
-    def dl(url, out, retries):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         data = _VTT_SUB if url.endswith(".vtt") else b"SRC"
         with open(out, "wb") as fh:
             fh.write(data)
@@ -1005,7 +1111,7 @@ def test_queue_download_writes_converted_subtitle_sidecars(tmp_path, monkeypatch
 
 def test_queue_download_skips_unrecognised_subtitle(tmp_path, monkeypatch):
     # NDR serves an HTML page at the subtitle URL: no sidecar, film still done.
-    def dl(url, out, retries):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         data = b"<!DOCTYPE html><html></html>" if url.endswith(".html") else b"SRC"
         with open(out, "wb") as fh:
             fh.write(data)
@@ -1063,7 +1169,7 @@ def test_queue_download_uses_descriptive_temp_names(tmp_path, monkeypatch):
     # the url's extension (.src.<ext>), the remux target the path's (.mux.<ext>).
     seen = {}
 
-    def dl(url, out, retries):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         seen["src"] = os.path.basename(out)
         with open(out, "wb") as fh:
             fh.write(b"SRC")
@@ -1094,7 +1200,7 @@ def test_queue_download_uses_descriptive_temp_names(tmp_path, monkeypatch):
 def test_queue_download_temp_src_omits_ext_when_url_has_none(tmp_path, monkeypatch):
     seen = {}
 
-    def dl(url, out, retries):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         seen["src"] = os.path.basename(out)
         with open(out, "wb") as fh:
             fh.write(b"SRC")

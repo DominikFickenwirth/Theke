@@ -1,9 +1,11 @@
 """Tests for the file primitives (phases 6-8): download, remux, move."""
 
+import errno
 import io
 import json
 import logging
 import os
+import urllib.error
 
 import pytest
 
@@ -18,7 +20,7 @@ from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
 def install_http(monkeypatch, mapping):
     """Monkeypatch theke.http_get to serve URL-mapped bytes (or raise an
     Exception value); an unmapped URL is an error."""
-    def fake_get(url):
+    def fake_get(url, timeout=None):
         value = mapping.get(url)
         if value is None:
             raise RuntimeError(f"unexpected url: {url}")
@@ -106,6 +108,50 @@ def test_parse_media_playlist_method_none_not_encrypted():
     assert enc is False
 
 
+# -- network timeout ----------------------------------------------------------
+
+def test_open_url_passes_timeout_to_urlopen(monkeypatch):
+    seen = {}
+
+    class Resp:
+        status = 200
+
+    def fake_urlopen(request, timeout=None):
+        seen["timeout"] = timeout
+        return Resp()
+
+    monkeypatch.setattr(files.urllib.request, "urlopen", fake_urlopen)
+    reader, resumed = files.open_url("http://x", timeout=7)
+    assert seen["timeout"] == 7
+    assert resumed is False
+
+
+def test_download_file_threads_timeout_to_open_url(tmp_path, monkeypatch):
+    seen = {}
+
+    def opener(url, offset=0, timeout=None):
+        seen["timeout"] = timeout
+        return io.BytesIO(b"data"), False
+
+    monkeypatch.setattr(files, "open_url", opener)
+    download_file(url="http://x", out=str(tmp_path / "v.mp4"), retries=0, timeout=9)
+    assert seen["timeout"] == 9
+
+
+def test_download_hls_threads_timeout_to_http_get(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_get(url, timeout=None):
+        seen.append(timeout)
+        return {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                "https://h/v/seg1.ts": b"BBB"}[url]
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg", timeout=11)
+    assert seen == [11, 11, 11]   # playlist + both segments
+
+
 # -- direct download (resume + retry) -----------------------------------------
 
 class Opener:
@@ -117,7 +163,7 @@ class Opener:
         self.resumable = resumable
         self.offsets = []
 
-    def __call__(self, url, offset=0):
+    def __call__(self, url, offset=0, timeout=None):
         self.offsets.append(offset)
         resumed = self.resumable and offset > 0
         body = self.data[offset:] if resumed else self.data
@@ -168,7 +214,7 @@ def test_download_retries_then_succeeds(tmp_path, monkeypatch):
     data = b"retry me please"
     calls = {"n": 0}
 
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("connection reset")
@@ -197,7 +243,7 @@ def test_download_resumes_across_a_midstream_failure(tmp_path, monkeypatch):
         def close(self):
             pass
 
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return Failing(data), False                # dies after one chunk
@@ -210,13 +256,375 @@ def test_download_resumes_across_a_midstream_failure(tmp_path, monkeypatch):
 
 
 def test_download_raises_after_exhausting_retries(tmp_path, monkeypatch):
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         raise RuntimeError("always down")
 
     monkeypatch.setattr(files, "open_url", opener)
     out = str(tmp_path / "v.mp4")
     with pytest.raises(RuntimeError, match="always down"):
         download_file(out=out, url="http://x", retries=2)
+
+
+class Sized:
+    """Fake response advertising a Content-Length header, serving `body` then a
+    clean EOF. A body shorter than `length` models a dropped connection that ends
+    in EOF instead of raising (the silent-truncation case)."""
+
+    def __init__(self, body, length):
+        self.buf = io.BytesIO(body)
+        self.length = length
+
+    def getheader(self, name, default=None):
+        return str(self.length) if name == "Content-Length" else default
+
+    def read(self, n=-1):
+        return self.buf.read(n)
+
+    def close(self):
+        pass
+
+
+def test_download_truncated_stream_raises_not_silently_completes(tmp_path, monkeypatch):
+    # server promises 16 bytes but delivers 6, then a clean EOF: must NOT be taken
+    # as a finished download (no final file, the half stays a .part).
+    def opener(url, offset=0, timeout=None):
+        return Sized(b"012345", length=16), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    with pytest.raises(RuntimeError, match="incomplete"):
+        download_file(out=out, url="http://x", retries=0)
+    assert not (tmp_path / "v.mp4").exists()           # half file never the result
+    assert (tmp_path / "v.mp4.part").read_bytes() == b"012345"   # kept for resume
+
+
+def test_download_truncated_then_resumes_to_completion(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"                          # 16 bytes
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Sized(data[:6], length=16), False    # drops at 6 bytes (EOF)
+        return Sized(data[offset:], length=len(data) - offset), offset > 0
+
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=2)
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part").exists()
+
+
+# -- direct download length guard (item 2) ------------------------------------
+# Without a Content-Length the truncation check cannot fire, so a connection that
+# drops at EOF reads back as a clean empty buffer and looks complete. Consistent
+# with item 1 ("empty = reject"), the minimum guard is: a no-Content-Length
+# stream that delivers zero bytes (nothing received this attempt) is never
+# accepted as a finished download. The Content-Length path stays unchanged.
+
+def test_download_no_content_length_nonempty_completes(tmp_path, monkeypatch):
+    # no Content-Length (BytesIO has no getheader) + non-empty stream -> ok.
+    data = b"streamed body without length"
+    def opener(url, offset=0, timeout=None):
+        return io.BytesIO(data), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=0)
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part").exists()
+
+
+def test_download_no_content_length_empty_stream_raises(tmp_path, monkeypatch):
+    # no Content-Length + empty stream (dropped at EOF) -> failure, never the result.
+    def opener(url, offset=0, timeout=None):
+        return io.BytesIO(b""), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    with pytest.raises(RuntimeError, match="empty download"):
+        download_file(out=out, url="http://x", retries=0)
+    assert not (tmp_path / "v.mp4").exists()           # empty buffer never finalized
+
+
+def test_download_content_length_zero_path_unchanged(tmp_path, monkeypatch):
+    # The empty-result guard is scoped to the no-Content-Length case: a server that
+    # explicitly advertises Content-Length: 0 stays authoritative and is accepted,
+    # so the Content-Length path is unchanged.
+    def opener(url, offset=0, timeout=None):
+        return Sized(b"", length=0), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=0)
+    assert n == 0
+    assert (tmp_path / "v.mp4").read_bytes() == b""
+
+
+# -- resume validation via If-Range (item 3) ----------------------------------
+# A byte-offset resume that does not validate the resource can splice two
+# different remote versions into one corrupt file (and the length check still
+# passes when the sizes line up). The fix sends If-Range with the stored ETag/
+# Last-Modified, so a changed resource yields a full 200 (restart) instead of a
+# 206 (append); the validator is persisted in a '<part>.meta' sidecar so it
+# survives process restarts, and is dropped once the download completes.
+
+class SizedTagged(Sized):
+    """A Sized response that also advertises an ETag (for validator storage)."""
+
+    def __init__(self, body, length, etag):
+        super().__init__(body, length)
+        self.etag = etag
+
+    def getheader(self, name, default=None):
+        if name == "ETag":
+            return self.etag
+        return super().getheader(name, default)
+
+
+def test_open_url_sends_if_range_with_validator(monkeypatch):
+    seen = {}
+
+    class Resp:
+        status = 206
+
+    def fake_urlopen(request, timeout=None):
+        seen["range"] = request.get_header("Range")
+        seen["if_range"] = request.get_header("If-range")   # urllib capitalizes keys
+        return Resp()
+
+    monkeypatch.setattr(files.urllib.request, "urlopen", fake_urlopen)
+    reader, resumed = files.open_url("http://x", offset=6, validator='"etag-1"')
+    assert seen["range"] == "bytes=6-"
+    assert seen["if_range"] == '"etag-1"'
+    assert resumed is True
+
+
+def test_open_url_no_if_range_without_validator(monkeypatch):
+    seen = {}
+
+    class Resp:
+        status = 206
+
+    def fake_urlopen(request, timeout=None):
+        seen["if_range"] = request.get_header("If-range")
+        return Resp()
+
+    monkeypatch.setattr(files.urllib.request, "urlopen", fake_urlopen)
+    files.open_url("http://x", offset=6)
+    assert seen["if_range"] is None                          # current behaviour
+
+
+def test_download_resume_sends_stored_validator(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"
+    (tmp_path / "v.mp4.part").write_bytes(data[:6])
+    (tmp_path / "v.mp4.part.meta").write_text('"etag-1"', encoding="utf-8")
+    seen = {}
+
+    def opener(url, offset=0, timeout=None, validator=None):
+        seen["offset"], seen["validator"] = offset, validator
+        return io.BytesIO(data[offset:]), True
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=0)
+    assert seen["offset"] == 6
+    assert seen["validator"] == '"etag-1"'                   # sidecar -> If-Range
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part.meta").exists()       # cleared on success
+
+
+def test_download_changed_resource_restarts_without_splicing(tmp_path, monkeypatch):
+    new = b"BRANDNEWDATA1234"                                # 16 bytes
+    (tmp_path / "v.mp4.part").write_bytes(b"OLDOLD")         # stale 6-byte partial
+    (tmp_path / "v.mp4.part.meta").write_text('"etag-old"', encoding="utf-8")
+
+    def opener(url, offset=0, timeout=None, validator=None):
+        return io.BytesIO(new), False                        # changed -> full 200
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=0)
+    assert (tmp_path / "v.mp4").read_bytes() == new          # not b"OLDOLD" + new
+
+
+def test_download_truncated_stores_response_validator_for_resume(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"                               # 16 bytes
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, validator=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SizedTagged(data[:6], length=16, etag='"etag-9"'), False
+        assert validator == '"etag-9"'                       # response ETag was stored
+        return SizedTagged(data[offset:], length=16 - offset, etag='"etag-9"'), True
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=1)
+    assert calls["n"] == 2
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part.meta").exists()
+
+
+# -- download error classification (item 7) -----------------------------------
+# Not every failure is transient: a 4xx the request can't fix by repeating (404,
+# 403, 410) must fail fast instead of burning all retries; a 416 (range not
+# satisfiable, caused by a stale oversized .part) must discard the leftover and
+# restart once, which it could never self-heal before. 5xx and network errors
+# still retry.
+
+def test_download_fatal_http_status_fails_without_retrying(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(files, "open_url", opener)
+    with pytest.raises(urllib.error.HTTPError):
+        download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=3)
+    assert calls["n"] == 1                       # no retry spin on a permanent 404
+
+
+def test_download_416_discards_stale_part_and_restarts(tmp_path, monkeypatch):
+    data = b"fresh complete data"
+    (tmp_path / "v.mp4.part").write_bytes(b"STALE OVERSIZED PART, LONGER THAN REMOTE")
+    (tmp_path / "v.mp4.part.meta").write_text('"etag"', encoding="utf-8")
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert offset > 0                    # first tried to resume the stale part
+            raise urllib.error.HTTPError(url, 416, "Range Not Satisfiable", {}, None)
+        assert offset == 0                       # reset -> restarted from scratch
+        return io.BytesIO(data), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=2)
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part.meta").exists()
+
+
+def test_download_server_error_still_retries(tmp_path, monkeypatch):
+    data = b"ok now"
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+        return io.BytesIO(data), False
+    monkeypatch.setattr(files, "open_url", opener)
+    n = download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=2)
+    assert calls["n"] == 2                        # 5xx is transient -> retried
+    assert n == len(data)
+
+
+# -- disk-full is non-retryable (item 9) --------------------------------------
+# A write that fails with ENOSPC will never succeed by retrying; spinning the
+# retry loop just wastes time and leaves a .part. It must fail fast.
+
+def test_download_disk_full_fails_without_retrying(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        return io.BytesIO(b"payload"), False
+    monkeypatch.setattr(files, "open_url", opener)
+    real_open = open
+
+    class FullFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def write(self, b):
+            err = OSError("no space left on device")
+            err.errno = errno.ENOSPC
+            raise err
+
+    def fake_open(path, mode="r", *a, **k):
+        if str(path).endswith(".part"):
+            return FullFile()
+        return real_open(path, mode, *a, **k)
+    monkeypatch.setattr("builtins.open", fake_open)
+    with pytest.raises(OSError):
+        download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=3)
+    assert calls["n"] == 1                        # disk full -> no retry spin
+
+
+# -- download stall guard (item 8) --------------------------------------------
+# The socket timeout bounds a single read, not the whole transfer, so a server
+# that trickles a little data per interval never trips it and the download hangs
+# effectively forever. download_stall_timeout (config, default 120 s; 0 = off)
+# adds a throughput floor: a transfer delivering less than one CHUNK per window is
+# aborted into the retry loop. The clock is injected via time.monotonic.
+
+def test_download_stall_aborts_on_low_throughput(tmp_path, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(files.time, "monotonic", lambda: clock["t"])
+
+    class Trickle:
+        def __init__(self, n):
+            self.left = n
+
+        def read(self, size):
+            clock["t"] += 1.0                 # each read takes ~1 s
+            if self.left <= 0:
+                return b""
+            self.left -= 1
+            return b"x"                        # one byte per read -> far below floor
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(files, "open_url", lambda *a, **k: (Trickle(1000), False))
+    with pytest.raises(RuntimeError, match="stall"):
+        download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=0,
+                      stall_timeout=5)
+
+
+def test_download_stall_disabled_with_zero(tmp_path, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(files.time, "monotonic", lambda: clock["t"])
+
+    class Trickle:
+        def __init__(self, body):
+            self.buf = io.BytesIO(body)
+
+        def read(self, size):
+            clock["t"] += 100.0               # huge gaps, but the guard is off
+            return self.buf.read(1)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(files, "open_url", lambda *a, **k: (Trickle(b"abc"), False))
+    n = download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=0,
+                      stall_timeout=0)
+    assert n == 3                              # 0 disables the floor -> completes
+
+
+def test_download_stall_allows_steady_throughput(tmp_path, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(files.time, "monotonic", lambda: clock["t"])
+    data = b"y" * (files.CHUNK + 100)
+
+    class Clocked:
+        def __init__(self, body):
+            self.buf = io.BytesIO(body)
+
+        def read(self, size):
+            clock["t"] += 1.0                 # 1 s per read, window is 5 -> never low
+            return self.buf.read(size)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(files, "open_url", lambda *a, **k: (Clocked(data), False))
+    n = download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=0,
+                      stall_timeout=5)
+    assert n == len(data)
 
 
 # -- byte progress (downloads) ------------------------------------------------
@@ -386,6 +794,76 @@ def test_hls_native_failure_falls_back_to_ffmpeg(tmp_path, monkeypatch):
     assert (tmp_path / "v.ts").read_bytes() == b"FALLBACK"
 
 
+# -- ffmpeg HLS-fallback timeout (item 4) -------------------------------------
+# When ffmpeg fetches the HLS stream itself (encrypted stream, or native assembly
+# failed) it must get the configured network timeout, else a dropped connection
+# hangs the process forever -- the same failure the direct downloader already
+# guards. -rw_timeout bounds each network read/write and is in microseconds.
+
+def test_hls_ffmpeg_args_includes_rw_timeout():
+    args = files._hls_ffmpeg_args("http://x/v.m3u8", "out.ts", "ffmpeg", timeout=60)
+    assert "-rw_timeout" in args
+    assert args[args.index("-rw_timeout") + 1] == "60000000"   # 60 s in microseconds
+    assert args.index("-rw_timeout") < args.index("-i")        # input option
+
+
+def test_hls_ffmpeg_args_omits_timeout_when_none():
+    args = files._hls_ffmpeg_args("http://x/v.m3u8", "out.ts", "ffmpeg", timeout=None)
+    assert "-rw_timeout" not in args
+
+
+def test_hls_encrypted_handoff_passes_timeout_to_ffmpeg(tmp_path, monkeypatch):
+    media = (b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n'
+             b'#EXTINF:6,\nseg0.ts\n#EXT-X-ENDLIST\n')
+    install_http(monkeypatch, {MEDIA_URL: media})
+    seen = {}
+
+    def fake_ffmpeg(args):
+        seen["args"] = args
+        with open(args[-1], "wb") as fh:
+            fh.write(b"X")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg", timeout=30)
+    assert seen["args"][seen["args"].index("-rw_timeout") + 1] == "30000000"
+
+
+def test_hls_native_failure_handoff_passes_timeout_to_ffmpeg(tmp_path, monkeypatch):
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                               "https://h/v/seg1.ts": RuntimeError("seg gone")})
+    seen = {}
+
+    def fake_ffmpeg(args):
+        seen["args"] = args
+        with open(args[-1], "wb") as fh:
+            fh.write(b"X")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg", timeout=45)
+    assert seen["args"][seen["args"].index("-rw_timeout") + 1] == "45000000"
+
+
+def test_hls_segment_fatal_http_skips_retries_to_ffmpeg(tmp_path, monkeypatch):
+    # a 404 segment is permanent: don't spin segment retries, hand off to ffmpeg.
+    seg_calls = {"n": 0}
+
+    def fake_get(url, timeout=None):
+        if url == MEDIA_URL:
+            return MEDIA_TXT
+        seg_calls["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(theke, "http_get", fake_get)
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FF")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"),
+                                         retries=3, ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert seg_calls["n"] == 1                    # first 404 -> ffmpeg, no retry spin
+
+
 def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(files, "PROGRESS_BYTES", 2)            # milestone every 2 bytes
     install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT,
@@ -396,6 +874,67 @@ def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
                  ffmpeg_path="ffmpeg")
     progress = [r.getMessage() for r in caplog.records if "MiB" in r.getMessage()]
     assert len(progress) == 2                                  # after 3 bytes and 6 bytes
+
+
+# -- HLS segment length guard (item 1) ----------------------------------------
+# theke.http_get exposes no Content-Length to the caller: a short read *with* a
+# Content-Length already raises IncompleteRead inside http_get (-> retry loop), so
+# the only residual, otherwise-undetectable case is a no-Content-Length stream
+# that ends early, which reads back as an empty body. Consistent with item 2 ("an
+# empty result must not be accepted as a complete download"), an empty segment is
+# rejected and never finalized.
+
+def test_fetch_segment_rejects_empty_body_not_written(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"https://h/v/seg0.ts": b""})
+    path = str(tmp_path / "seg_00000.ts")
+    with pytest.raises(RuntimeError, match="empty segment"):
+        files._fetch_segment(path, "https://h/v/seg0.ts")
+    assert not os.path.exists(path)              # never finalized
+    assert not os.path.exists(path + ".part")    # no stale temp left behind
+
+
+def test_fetch_segment_writes_nonempty_body(tmp_path, monkeypatch):
+    install_http(monkeypatch, {"https://h/v/seg0.ts": b"DATA"})
+    path = str(tmp_path / "seg_00000.ts")
+    files._fetch_segment(path, "https://h/v/seg0.ts")
+    assert (tmp_path / "seg_00000.ts").read_bytes() == b"DATA"   # exact length -> ok
+
+
+def test_hls_empty_segment_retries_then_succeeds(tmp_path, monkeypatch):
+    # seg1 arrives empty (silent truncation) on the first try, full on the retry;
+    # the empty body is never kept, so the assembled output is whole.
+    calls = {"n": 0}
+
+    def fake_get(url, timeout=None):
+        if url == "https://h/v/seg1.ts":
+            calls["n"] += 1
+            return b"" if calls["n"] == 1 else b"BBB"
+        return {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA"}[url]
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(files, "run_ffmpeg",
+                        lambda args: pytest.fail("should not fall back"))
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=1,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls"
+    assert (tmp_path / "v.ts").read_bytes() == b"AAABBB"
+
+
+def test_hls_empty_segment_without_retries_falls_back_to_ffmpeg(tmp_path, monkeypatch):
+    install_http(monkeypatch, {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                               "https://h/v/seg1.ts": b""})   # silent truncation
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FALLBACK")
+
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    out = str(tmp_path / "v.ts")
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=out, retries=0,
+                                         ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert (tmp_path / "v.ts").read_bytes() == b"FALLBACK"
 
 
 # -- file download CLI --------------------------------------------------------
@@ -424,6 +963,52 @@ def test_cli_file_download_hls_routes_to_segments(tmp_path, capsys, monkeypatch)
 
 def test_cli_file_download_missing_args_is_usage_error(capsys):
     assert main(["file", "download"]) == 2
+
+
+def test_cli_file_download_timeout_overrides_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def opener(url, offset=0, timeout=None):
+        seen["timeout"] = timeout
+        return io.BytesIO(b"data"), False
+
+    monkeypatch.setattr(files, "open_url", opener)
+    rc = main(["file", "download", "--url", "http://x/v.mp4",
+               "--out", str(tmp_path / "v.mp4"), "--timeout", "5"])
+    assert rc == 0
+    assert seen["timeout"] == 5
+
+
+def test_cli_file_download_timeout_defaults_to_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)          # no theke.json -> config defaults
+    seen = {}
+
+    def opener(url, offset=0, timeout=None):
+        seen["timeout"] = timeout
+        return io.BytesIO(b"data"), False
+
+    monkeypatch.setattr(files, "open_url", opener)
+    rc = main(["file", "download", "--url", "http://x/v.mp4",
+               "--out", str(tmp_path / "v.mp4")])
+    assert rc == 0
+    assert seen["timeout"] == 60         # Config().download_timeout
+
+
+def test_cli_file_download_passes_stall_timeout_from_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)          # no theke.json -> config defaults
+    seen = {}
+
+    def fake_download(url, out, retries, timeout=None, stall_timeout=0):
+        seen["stall"] = stall_timeout
+        with open(out, "wb") as fh:
+            fh.write(b"x")
+        return 1
+    monkeypatch.setattr(theke, "download_file", fake_download)
+    rc = main(["file", "download", "--url", "http://x/v.mp4",
+               "--out", str(tmp_path / "v.mp4")])
+    assert rc == 0
+    assert seen["stall"] == 120          # Config().download_stall_timeout
 
 
 # -- remux (ffmpeg stream copy) -----------------------------------------------
@@ -511,6 +1096,60 @@ def test_run_remux_failure_without_output_is_fine(tmp_path, monkeypatch):
 def test_run_ffmpeg_missing_binary_raises(tmp_path):
     with pytest.raises(RuntimeError, match="not found"):
         run_ffmpeg(["this-ffmpeg-does-not-exist", "-version"])
+
+
+# -- remux truncation guard (item 6) ------------------------------------------
+# A silently-truncated source (one that slipped past the download guards because
+# no Content-Length/ETag was available) is often copied by ffmpeg without error,
+# yielding a short output. run_remux compares source vs output duration and fails
+# so a truncated film never reaches the library. The check is skipped when either
+# duration is unknown, so it never breaks a healthy remux whose probe can't read a
+# test stub (or when ffmpeg is absent).
+
+def test_remux_rejects_truncated_source(tmp_path, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"short")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    durations = {"in.ts": 3600.0, out: 12.0}      # output far shorter than source
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    with pytest.raises(RuntimeError, match="truncated"):
+        run_remux("ffmpeg", "in.ts", "AV", out)
+    assert not os.path.exists(out)                 # short output dropped, not kept
+
+
+def test_remux_accepts_matching_duration(tmp_path, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"full")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    durations = {"in.ts": 3600.0, out: 3600.0}
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    n = run_remux("ffmpeg", "in.ts", "AV", out)
+    assert n == 4                                  # accepted (len b"full")
+
+
+def test_remux_skips_check_when_duration_unknown(tmp_path, monkeypatch):
+    out = str(tmp_path / "out.mp4")
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"x")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: None)
+    n = run_remux("ffmpeg", "in.ts", "AV", out)    # unknown duration -> no guard
+    assert n == 1
+
+
+def test_probe_duration_parses_ffmpeg_stderr(monkeypatch):
+    class Proc:
+        stderr = "  Duration: 01:02:03.50, start: 0.0\n"
+    monkeypatch.setattr(files.subprocess, "run", lambda *a, **k: Proc())
+    assert files.probe_duration("ffmpeg", "x.mp4") == 3723.5   # 3600 + 120 + 3.5
 
 
 class FakePopen:
@@ -697,6 +1336,37 @@ def test_move_force_overwrites(tmp_path):
     dst.write_bytes(b"old")
     move_file(str(src), str(dst), force=True)
     assert dst.read_bytes() == b"new"
+
+
+# -- atomic move into the library (item 5) ------------------------------------
+# A cross-device move is copy-then-delete; interrupted mid-copy it can leave a
+# partial file under the final library name -- and with force the prior good file
+# was already deleted. The fix lands the payload on a temp name on the destination
+# filesystem and swaps it in with one atomic os.replace, so a failed copy never
+# touches the final name and the prior file survives until the swap.
+
+def test_move_failure_keeps_prior_file_and_no_partial(tmp_path, monkeypatch):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"NEWDATA")
+    dst = tmp_path / "lib" / "movie.mp4"
+    dst.parent.mkdir()
+    dst.write_bytes(b"OLD-GOOD")                 # prior library file
+
+    def boom(s, d):
+        raise OSError("disk full mid-copy")
+    monkeypatch.setattr(files.shutil, "move", boom)
+    with pytest.raises(OSError):
+        move_file(str(src), str(dst), force=True)
+    assert dst.read_bytes() == b"OLD-GOOD"       # prior file intact, not pre-deleted
+
+
+def test_move_success_leaves_no_temp(tmp_path):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"film")
+    dst = tmp_path / "lib" / "movie.mp4"
+    move_file(str(src), str(dst), force=False)
+    assert dst.read_bytes() == b"film"
+    assert not (tmp_path / "lib" / "movie.mp4.part").exists()   # temp swapped away
 
 
 def test_cli_file_move_json(tmp_path, capsys):

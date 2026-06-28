@@ -195,6 +195,50 @@ def test_config_pipeline_keys_from_file(tmp_path):
     assert cfg.library_path == "L/{title}.mp4"
 
 
+def test_config_download_timeout_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.download_timeout == 60
+
+
+def test_config_download_stall_timeout_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.download_stall_timeout == 120
+
+
+def test_config_download_timeout_from_file(tmp_path):
+    path = tmp_path / "t.json"
+    write_config(path, {"download_timeout": 15})
+    cfg = load_config(str(path))
+    assert cfg.download_timeout == 15
+
+
+def test_config_download_timeout_wrong_type_is_error(tmp_path):
+    path = tmp_path / "tt.json"
+    write_config(path, {"download_timeout": "15"})   # must be an int
+    with pytest.raises(ConfigError, match="download_timeout"):
+        load_config(str(path))
+
+
+def test_http_get_passes_timeout_to_urlopen(monkeypatch):
+    import theke
+    seen = {}
+
+    class Resp:
+        def __enter__(self):     return self
+        def __exit__(self, *a):  return False
+        def read(self):          return b"body"
+
+    def fake_urlopen(request, timeout=None):
+        seen["timeout"] = timeout
+        return Resp()
+
+    monkeypatch.setattr(theke.urllib.request, "urlopen", fake_urlopen)
+    assert http_get("http://x", 42) == b"body"   # timeout (seconds) is the 2nd arg
+    assert seen["timeout"] == 42
+
+
 # -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [
@@ -989,7 +1033,7 @@ def test_diff_import_preserves_phase3_ids(tmp_path):
 # -- fetch: cmd_fetch decision (mocked network) ----------------------------
 
 CFG = SimpleNamespace(filmliste_url="FULL", filmliste_diff_url="DIFF",
-                      filmliste_id_url="ID")
+                      filmliste_id_url="ID", download_timeout=60)
 
 
 def xz_list(rows, list_id="id", created="01.01.2020, 00:00"):
@@ -1000,7 +1044,7 @@ def xz_list(rows, list_id="id", created="01.01.2020, 00:00"):
 def install_http(monkeypatch, mapping):
     import theke
 
-    def fake_get(url):
+    def fake_get(url, timeout=None):
         value = mapping.get(url)
         if value is None:
             raise RuntimeError(f"unexpected url: {url}")
@@ -1017,6 +1061,26 @@ def recent_created():
 
 def args(force=False):
     return SimpleNamespace(force=force)
+
+
+def test_cmd_fetch_passes_configured_timeout(tmp_path, monkeypatch):
+    import theke
+    seen = {}
+    body = xz_list([make_x(sender="ARD", titel="A", url="a")], "id1")
+
+    def fake_get(url, timeout=None):
+        seen["timeout"] = timeout
+        return body
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+    conn = open_db(tmp_path)
+    try:
+        cfg = SimpleNamespace(filmliste_url="FULL", filmliste_diff_url="DIFF",
+                              filmliste_id_url="ID", download_timeout=33)
+        cmd_fetch(conn, cfg, args())
+        assert seen["timeout"] == 33
+    finally:
+        conn.close()
 
 
 def test_cmd_fetch_full_on_empty_db(tmp_path, monkeypatch):

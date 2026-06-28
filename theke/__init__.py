@@ -61,6 +61,8 @@ class Config:
     subtitle_formats:     list  = dataclasses.field(default_factory=lambda: ["srt", "ass", "ttml"])
     ffmpeg_path:          str   = "ffmpeg"
     download_retries:     int   = 3
+    download_timeout:     int   = 60
+    download_stall_timeout: int = 120
     temp_path:            str   = ""
     video_ext:            str   = "mp4"
     audio_ext:            str   = "aac"
@@ -520,10 +522,12 @@ def import_films(conn, films, meta) -> dict:
 USER_AGENT = "theke"
 
 
-def http_get(url: str) -> bytes:
-    """Fetch a URL and return the raw response bytes."""
+def http_get(url: str, timeout=None) -> bytes:
+    """Fetch a URL and return the raw response bytes. `timeout` (seconds) bounds
+    each blocking socket operation, so a dropped connection fails instead of
+    hanging forever (None = no timeout)."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -544,15 +548,15 @@ def fetch_list_id(cfg):
     """Server's filmliste.id (hash of the current server list), or None if the
     small request fails (then we re-download to be safe)."""
     try:
-        return http_get(cfg.filmliste_id_url).decode("utf-8").strip()
+        return http_get(cfg.filmliste_id_url, cfg.download_timeout).decode("utf-8").strip()
     except Exception:
         return None
 
 
-def _load_list(url):
+def _load_list(url, timeout=None):
     """Download, stream-decompress and parse a list; return (meta, films)."""
     log.info("downloading %s", url.rsplit("/", 1)[-1])
-    raw = http_get(url)
+    raw = http_get(url, timeout)
     log.info("download done (%.1f MB), unpacking", len(raw) / (1 << 20))
     stream = lzma.open(io.BytesIO(raw), "rt", encoding="utf-8")
     films = parse_filmliste(stream)
@@ -560,13 +564,13 @@ def _load_list(url):
 
 
 def _do_full(conn, cfg):
-    meta, films = _load_list(cfg.filmliste_url)
+    meta, films = _load_list(cfg.filmliste_url, cfg.download_timeout)
     return {"action": "full", **import_films(conn, films, meta)}
 
 
 def _do_diff(conn, cfg):
     try:
-        meta, films = _load_list(cfg.filmliste_diff_url)
+        meta, films = _load_list(cfg.filmliste_diff_url, cfg.download_timeout)
     except Exception:
         return None  # download/parse failed -> caller falls back to full
     return {"action": "diff", **import_films(conn, films, meta)}
@@ -1328,10 +1332,22 @@ def _path_fields(title, year, series=None, season=None, episode=None) -> dict:
             "Season": season, "Episode": episode}
 
 
-def _render_template(template, fields) -> str:
+_RESERVED_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_component(value) -> str:
+    """Make a rendered template value safe as a path component on the target FS:
+    replace reserved characters (Windows + POSIX) with '-' and strip trailing dots
+    and spaces (illegal/awkward on Windows)."""
+    return _RESERVED_PATH_CHARS.sub("-", value).rstrip(". ")
+
+
+def _render_template(template, fields, sanitize=False) -> str:
     """Substitute {Placeholder} (case-insensitive) from `fields`. An optional
     ':N' zero-pads an integer to N digits ({Season:2} -> '03'). None/empty values
-    render empty (never 'None'); an unknown placeholder is an error (typo guard)."""
+    render empty (never 'None'); an unknown placeholder is an error (typo guard).
+    With sanitize, each substituted value is made path-safe (the template's own
+    separators are untouched)."""
     lookup = {k.casefold(): v for k, v in fields.items()}
 
     def repl(match):
@@ -1341,7 +1357,8 @@ def _render_template(template, fields) -> str:
         value = lookup[key]
         if value is None or value == "":
             return ""
-        return f"{int(value):0{int(width)}d}" if width else str(value)
+        rendered = f"{int(value):0{int(width)}d}" if width else str(value)
+        return _sanitize_component(rendered) if sanitize else rendered
 
     return re.sub(r"\{([A-Za-z_]+)(?::(\d+))?\}", repl, template)
 
@@ -1351,7 +1368,7 @@ def _library_path(cfg, fields, language, remux, primary) -> str:
     configured template, drop its extension and re-apply video_ext (or audio_ext
     for audio-only rows). Non-anchor picks get a '.<language>' infix so several
     language variants of one film coexist in the same folder."""
-    stem = os.path.splitext(_render_template(cfg.library_path, fields))[0]
+    stem = os.path.splitext(_render_template(cfg.library_path, fields, sanitize=True))[0]
     ext = cfg.audio_ext if remux == "A" else cfg.video_ext
     infix = "" if primary else f".{language}"
     return f"{stem}{infix}.{ext}"
@@ -1535,9 +1552,10 @@ def _download_entry(conn, cfg, row, force, totals):
 def _fetch(cfg, url, out):
     """Download a media URL to `out`, routing HLS playlists to the segment path."""
     if is_hls(url):
-        download_hls(url, out, cfg.download_retries, cfg.ffmpeg_path)
+        download_hls(url, out, cfg.download_retries, cfg.ffmpeg_path, cfg.download_timeout)
     else:
-        download_file(url, out, cfg.download_retries)
+        download_file(url, out, cfg.download_retries, cfg.download_timeout,
+                      cfg.download_stall_timeout)
 
 
 def _download_subtitle(cfg, row, base, force):
@@ -1546,7 +1564,7 @@ def _download_subtitle(cfg, row, base, force):
     WebVTT in, SRT/ASS/TTML out). Unrecognised input (e.g. an HTML page) is
     skipped without writing a sidecar."""
     tmp = base + ".sub" + _url_ext(row["url_subtitle"])
-    download_file(row["url_subtitle"], tmp, cfg.download_retries)
+    download_file(row["url_subtitle"], tmp, cfg.download_retries, cfg.download_timeout)
     with open(tmp, encoding="utf-8-sig") as fh:
         outputs = subtitle.convert(fh.read(), cfg.subtitle_formats)
     if not outputs:
@@ -1632,13 +1650,15 @@ def cmd_file(cfg, args: argparse.Namespace) -> dict:
 
 def _file_download(cfg, args) -> dict:
     retries = cfg.download_retries if args.retries is None else args.retries
+    timeout = cfg.download_timeout if args.timeout is None else args.timeout
     if is_hls(args.url):
-        action, nbytes, nsegs = download_hls(args.url, args.out, retries, cfg.ffmpeg_path)
+        action, nbytes, nsegs = download_hls(args.url, args.out, retries, cfg.ffmpeg_path, timeout)
         result = {"action": action, "out": args.out, "bytes": nbytes}
         if action == "hls":
             result["segments"] = nsegs
         return result
-    nbytes = download_file(args.url, args.out, retries)
+    nbytes = download_file(args.url, args.out, retries, timeout,
+                           cfg.download_stall_timeout)
     return {"action": "download", "out": args.out, "bytes": nbytes}
 
 
@@ -1775,6 +1795,7 @@ def build_parser() -> argparse.ArgumentParser:
     fdl.add_argument("-u", "--url",     required=True, metavar="URL",  help="media URL to download")
     fdl.add_argument("-o", "--out",     required=True, metavar="PATH", help="output file path")
     fdl.add_argument("-r", "--retries", type=int, metavar="N",         help="retry attempts on error (default: config download_retries)")
+    fdl.add_argument("-t", "--timeout", type=int, metavar="SEC",       help="network timeout in seconds (default: config download_timeout)")
     frx = fsub.add_parser("remux", help="remux a file via ffmpeg (stream copy)", description="Stream-copy --in into --out with ffmpeg (no transcoding). --mode picks what to keep: AV (audio+video), A (audio only), V (video only). --language tags the first audio track. --check-ffmpeg only probes the configured ffmpeg binary and exits.")
     frx.add_argument("-i", "--in",          dest="in_path", metavar="PATH",                  help="input file path")
     frx.add_argument("-m", "--mode",        choices=["AV", "A", "V"],                         help="what to keep: AV (audio+video), A (audio), V (video)")

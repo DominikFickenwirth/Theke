@@ -6,11 +6,14 @@
 # through run_ffmpeg. CLI wiring + result emission live in __init__.py.
 
 import collections
+import errno
 import logging
 import os
 import re
 import shutil
 import subprocess
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -118,45 +121,133 @@ def parse_media_playlist(text, base_url):
 
 # -- direct download ----------------------------------------------------------
 
-def open_url(url, offset=0):
+def open_url(url, offset=0, timeout=None, validator=None):
     """Open a URL for streaming; return (reader, resumed). With offset>0 a Range
     request is sent and resumed is True only when the server honors it (HTTP 206).
-    The network seam for the direct downloader -- monkeypatched in tests."""
+    With `validator` set (a stored ETag/Last-Modified), an If-Range header makes the
+    server answer 200 (full body) instead of 206 when the resource has changed, so
+    a resume never splices two versions. `timeout` (seconds) bounds each socket
+    operation (None = no timeout). The network seam -- monkeypatched in tests."""
     headers = {"User-Agent": theke.USER_AGENT}
     if offset:
         headers["Range"] = f"bytes={offset}-"
-    response = urllib.request.urlopen(urllib.request.Request(url, headers=headers))
+        if validator:
+            headers["If-Range"] = validator
+    response = urllib.request.urlopen(
+        urllib.request.Request(url, headers=headers), timeout=timeout)
     return response, response.status == 206
 
 
-def download_file(url, out, retries) -> int:
+def _validator(reader):
+    """A cache validator for an If-Range resume: the response ETag, else its
+    Last-Modified, else None (a test BytesIO without getheader, or neither header)."""
+    try:
+        return reader.getheader("ETag") or reader.getheader("Last-Modified")
+    except (AttributeError, TypeError):
+        return None
+
+
+def _read_validator(meta):
+    """The validator stored beside a leftover '.part', or None when absent."""
+    try:
+        with open(meta, encoding="utf-8") as fh:
+            return fh.read() or None
+    except OSError:
+        return None
+
+
+_TRANSIENT_HTTP = {408, 429}   # client errors still worth retrying
+
+
+def _is_fatal_http(exc) -> bool:
+    """True for an HTTP status a retry cannot fix: a 4xx other than the transient
+    ones and 416 (which is handled by resetting the '.part')."""
+    return (isinstance(exc, urllib.error.HTTPError)
+            and 400 <= exc.code < 500
+            and exc.code not in _TRANSIENT_HTTP and exc.code != 416)
+
+
+def _is_disk_full(exc) -> bool:
+    """True for a write that ran out of space; retrying it cannot free any."""
+    return isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+
+
+class _Stall:
+    """Throughput floor for a transfer: aborts once a sliding window of `window`
+    seconds delivers less than one CHUNK, catching a trickle the per-read socket
+    timeout never trips. window<=0 disables it. The clock is time.monotonic
+    (patched in tests)."""
+
+    def __init__(self, window, label):
+        self.window = window
+        self.label = label
+        self.start = time.monotonic() if window else 0.0
+        self.bytes = 0
+
+    def feed(self, n):
+        if not self.window:
+            return
+        self.bytes += n
+        now = time.monotonic()
+        if now - self.start < self.window:
+            return
+        if self.bytes < CHUNK:
+            raise RuntimeError(
+                f"stalled: <{CHUNK} bytes in {self.window}s ({self.label})")
+        self.start, self.bytes = now, 0          # window met -> slide it forward
+
+
+def download_file(url, out, retries, timeout=None, stall_timeout=0) -> int:
     """Stream url to out, resuming a leftover '.part' via Range when possible.
-    On error retry up to `retries` times (each retry resumes from the current
-    '.part' size). Return the byte count. The seam is open_url."""
+    On a transient error retry up to `retries` times (each retry resumes from the
+    current '.part' size); a fatal HTTP status (404/403/410/...) fails fast and a
+    416 discards the stale '.part' and restarts. `timeout` (seconds) bounds each
+    socket read; `stall_timeout` (seconds, 0 = off) aborts a transfer that trickles
+    below one CHUNK per window. Return the byte count. Seam: open_url."""
     log.info("downloading %s", url.rsplit("/", 1)[-1])
     for attempt in range(retries + 1):
         try:
-            return _download_once(url, out)
+            return _download_once(url, out, timeout, stall_timeout)
         except Exception as exc:
-            if attempt == retries:
+            _classify_download_error(exc, out)   # fatal -> reraise; 416 -> reset .part
+            if _is_disk_full(exc) or attempt == retries:   # no space -> stop retrying
                 raise
             log.info("download error (%s); retry %d/%d", exc, attempt + 1, retries)
 
 
-def _download_once(url, out) -> int:
+def _classify_download_error(exc, out) -> None:
+    """Triage a download failure: re-raise a fatal HTTP status so the retry loop
+    does not spin, or discard a stale oversized '.part' on 416 so the next attempt
+    restarts from scratch. Anything else is left to retry."""
+    if not isinstance(exc, urllib.error.HTTPError):
+        return
+    if exc.code == 416:
+        _discard(out + ".part")
+        _discard(out + ".part.meta")
+        log.info("range unsatisfiable; discarded stale .part, restarting")
+    elif _is_fatal_http(exc):
+        raise exc
+
+
+def _download_once(url, out, timeout=None, stall_timeout=0) -> int:
     part = out + ".part"
+    meta = part + ".meta"
     _ensure_parent(out)
     offset = os.path.getsize(part) if os.path.exists(part) else 0
-    reader, resumed = open_url(url, offset)
+    validator = _read_validator(meta) if offset else None
+    extra = {"validator": validator} if validator else {}   # keep old seam intact
+    reader, resumed = open_url(url, offset, timeout, **extra)
     if offset and not resumed:
-        offset = 0   # server ignored the Range -> rewrite from scratch
-        log.info("range not honored; restarting")
+        offset = 0   # range ignored or resource changed (If-Range) -> rewrite
+        log.info("range not honored or resource changed; restarting")
     elif offset:
         log.info("resuming at %d bytes", offset)
+    _store_validator(meta, _validator(reader))   # remember it for a later resume
     total = _content_length(reader)
     if total is not None and resumed:
         total += offset                  # 206 Content-Length covers only the remainder
     progress = _Progress(os.path.basename(out), total)
+    stall = _Stall(stall_timeout, os.path.basename(out))
     done = offset
     try:
         with open(part, "ab" if offset else "wb") as fh:   # wb truncates a stale part
@@ -167,10 +258,34 @@ def _download_once(url, out) -> int:
                 fh.write(buf)
                 done += len(buf)
                 progress.update(done)
+                stall.feed(len(buf))
     finally:
         reader.close()
-    os.replace(part, out)
+    if total is not None:
+        if done < total:                     # EOF below Content-Length == dropped
+            raise RuntimeError(              # connection; keep .part so a retry resumes
+                f"incomplete download: {done}/{total} bytes ({os.path.basename(out)})")
+    elif done == offset:                      # no Content-Length: nothing received this
+        raise RuntimeError(                  # attempt (incl. a no-progress resume of an
+            f"empty download: no bytes received ({os.path.basename(out)})")  # always-
+    os.replace(part, out)                    # incomplete leftover .part) is never done
+    _discard(meta)                           # validator only matters while a .part lives
     return os.path.getsize(out)
+
+
+def _store_validator(meta, validator) -> None:
+    """Persist a resume validator beside the '.part' (skipped when none is known)."""
+    if validator:
+        with open(meta, "w", encoding="utf-8") as fh:
+            fh.write(validator)
+
+
+def _discard(path) -> None:
+    """Remove a path if present (best-effort sidecar cleanup)."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 # -- ffmpeg seam --------------------------------------------------------------
@@ -278,13 +393,17 @@ def check_ffmpeg(ffmpeg_path) -> str:
 
 def move_file(src, dst, force=False) -> str:
     """Move src to dst, creating parent dirs. An existing dst is an error unless
-    force (then it is replaced). Return dst."""
-    if os.path.exists(dst):
-        if not force:
-            raise RuntimeError(f"destination exists: {dst}")
-        os.remove(dst)
+    force. The payload first lands on a temp name on the destination filesystem and
+    is swapped in with a single atomic os.replace, so an interrupted cross-device
+    move never leaves a partial file under the final name and the prior file (with
+    force) survives until the swap succeeds. Return dst."""
+    if os.path.exists(dst) and not force:
+        raise RuntimeError(f"destination exists: {dst}")
     _ensure_parent(dst)
-    shutil.move(src, dst)
+    tmp = dst + ".part"
+    _discard(tmp)                # clear a leftover from an earlier aborted move
+    shutil.move(src, tmp)        # copy/rename onto the destination filesystem
+    os.replace(tmp, dst)         # atomic swap into the final name
     log.info("moved %s -> %s", os.path.basename(src), dst)
     return dst
 
@@ -305,14 +424,44 @@ def ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language=None) -> list:
     return [ffmpeg_path, "-y", "-i", in_path] + _REMUX_CODEC[mode] + meta + [out_path]
 
 
+_REMUX_DURATION_TOLERANCE = 1.0   # seconds the output may legitimately fall short
+
+
+def probe_duration(ffmpeg_path, path) -> float | None:
+    """The container duration (seconds) ffmpeg reports for `path`, or None when it
+    cannot be determined (unparseable, or ffmpeg missing). Reads the header only
+    (ffmpeg -i, whose non-zero 'no output' exit is expected and ignored)."""
+    try:
+        proc = subprocess.run([ffmpeg_path, "-i", path], capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    m = _DURATION_RX.search(proc.stderr or "")
+    return _hms(*m.groups()) if m else None
+
+
+def _verify_not_truncated(ffmpeg_path, in_path, out_path) -> None:
+    """Guard against a silently-truncated source ffmpeg copied without error: if
+    the output falls materially short of the source duration the input was
+    incomplete -- raise. Skipped when either duration is unknown, so it never fails
+    a healthy remux on a probe that cannot read a stub (or absent ffmpeg)."""
+    src = probe_duration(ffmpeg_path, in_path)
+    out = probe_duration(ffmpeg_path, out_path)
+    if src and out and out < src - _REMUX_DURATION_TOLERANCE:
+        raise RuntimeError(
+            f"truncated source: remux {out:.0f}s < source {src:.0f}s "
+            f"({os.path.basename(in_path)})")
+
+
 def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
     """Remux in_path into out_path (stream copy, no transcode); return the output
-    size in bytes."""
+    size in bytes. A source whose duration the output falls short of (a truncation
+    ffmpeg copied silently) is rejected."""
     log.info("remuxing %s -> %s (%s)", os.path.basename(in_path),
              os.path.basename(out_path), mode)
     _ensure_parent(out_path)
     try:
         run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
+        _verify_not_truncated(ffmpeg_path, in_path, out_path)
     except Exception:
         if os.path.exists(out_path):   # drop the partial/faulty target ffmpeg left
             os.remove(out_path)
@@ -322,35 +471,44 @@ def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
 
 # -- HLS download -------------------------------------------------------------
 
-def download_hls(url, out, retries, ffmpeg_path):
+def download_hls(url, out, retries, ffmpeg_path, timeout=None):
     """Download an HLS stream to out: resolve the master playlist (highest
     bandwidth), assemble the media playlist's segments natively, and hand off to
     ffmpeg when the stream is encrypted or native assembly fails after retries.
+    `timeout` (seconds) bounds each playlist/segment fetch (None = no timeout).
     Return (action, bytes, segments) with action 'hls' or 'hls-ffmpeg'."""
     _ensure_parent(out)
-    text = theke.http_get(url).decode("utf-8")
+    text = theke.http_get(url, timeout).decode("utf-8")
     media_url = url
     if is_master(text):
         variants = parse_master(text, url)
         if not variants:
             raise RuntimeError("empty HLS master playlist")
         media_url = max(variants, key=lambda v: v[0])[1]
-        text = theke.http_get(media_url).decode("utf-8")
+        text = theke.http_get(media_url, timeout).decode("utf-8")
     init, segments, encrypted = parse_media_playlist(text, media_url)
     if encrypted:
         log.info("encrypted HLS; handing off to ffmpeg")
-        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path), len(segments)
+        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path, timeout), len(segments)
     try:
-        nbytes = _download_segments(out, init, segments, retries)
+        nbytes = _download_segments(out, init, segments, retries, timeout)
         return "hls", nbytes, len(segments)
     except Exception as exc:
         log.info("native HLS failed (%s); handing off to ffmpeg", exc)
-        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path), len(segments)
+        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path, timeout), len(segments)
 
 
-def _hls_ffmpeg(url, out, ffmpeg_path) -> int:
+def _hls_ffmpeg_args(url, out, ffmpeg_path, timeout=None) -> list:
+    """ffmpeg command to fetch an HLS stream straight to out (stream copy). With
+    timeout set, -rw_timeout (microseconds) bounds each network read/write so a
+    dropped connection fails instead of hanging forever."""
+    rw = ["-rw_timeout", str(int(timeout * 1_000_000))] if timeout else []
+    return [ffmpeg_path, "-y"] + rw + ["-i", url, "-c", "copy", out]
+
+
+def _hls_ffmpeg(url, out, ffmpeg_path, timeout=None) -> int:
     try:
-        run_ffmpeg([ffmpeg_path, "-y", "-i", url, "-c", "copy", out])
+        run_ffmpeg(_hls_ffmpeg_args(url, out, ffmpeg_path, timeout))
     except Exception:
         if os.path.exists(out):   # drop the partial/faulty target ffmpeg left
             os.remove(out)
@@ -358,7 +516,7 @@ def _hls_ffmpeg(url, out, ffmpeg_path) -> int:
     return os.path.getsize(out)
 
 
-def _download_segments(out, init, segments, retries) -> int:
+def _download_segments(out, init, segments, retries, timeout=None) -> int:
     """Fetch each segment into out.segments/ (skipping ones already on disk), then
     concatenate init + segments into out and drop the segment dir."""
     segdir = out + ".segments"
@@ -372,12 +530,12 @@ def _download_segments(out, init, segments, retries) -> int:
             done = 0
             for name, seg_url in parts:
                 path = os.path.join(segdir, name)
-                _fetch_segment(path, seg_url)
+                _fetch_segment(path, seg_url, timeout)
                 done += os.path.getsize(path)
                 progress.update(done)
             break
         except Exception as exc:
-            if attempt == retries:
+            if _is_fatal_http(exc) or attempt == retries:   # permanent -> stop spinning
                 raise
             log.info("segment error (%s); retry %d/%d", exc, attempt + 1, retries)
     with open(out, "wb") as dst:
@@ -388,10 +546,13 @@ def _download_segments(out, init, segments, retries) -> int:
     return os.path.getsize(out)
 
 
-def _fetch_segment(path, url) -> None:
+def _fetch_segment(path, url, timeout=None) -> None:
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return   # already downloaded (resume)
+    body = theke.http_get(url, timeout)
+    if not body:   # no Content-Length + early EOF reads empty: never accept as final
+        raise RuntimeError(f"empty segment: {os.path.basename(path)}")
     tmp = path + ".part"
     with open(tmp, "wb") as fh:
-        fh.write(theke.http_get(url))
+        fh.write(body)
     os.replace(tmp, path)

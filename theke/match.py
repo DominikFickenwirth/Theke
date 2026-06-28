@@ -162,7 +162,7 @@ def tmdb_movie(cfg, tmdb_id) -> dict:
     params = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
                         "append_to_response": "alternative_titles"})
     url = f"{cfg.tmdb_api_url}/movie/{tmdb_id}?{params}"
-    data = json.loads(theke.http_get(url).decode("utf-8"))
+    data = json.loads(theke.http_get(url, cfg.download_timeout).decode("utf-8"))
 
     titles = []
     for t in (data.get("title"), data.get("original_title")):
@@ -186,7 +186,8 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
     TV alternative_titles live under 'results' (movies use 'titles')."""
     sp = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
                     "append_to_response": "alternative_titles"})
-    s = json.loads(theke.http_get(f"{cfg.tmdb_api_url}/tv/{tmdb_id}?{sp}").decode("utf-8"))
+    s = json.loads(theke.http_get(
+        f"{cfg.tmdb_api_url}/tv/{tmdb_id}?{sp}", cfg.download_timeout).decode("utf-8"))
     series_titles = []
     for t in (s.get("name"), s.get("original_name")):
         if t and t not in series_titles:
@@ -198,7 +199,7 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
     ep = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
                     "append_to_response": "translations"})
     url = f"{cfg.tmdb_api_url}/tv/{tmdb_id}/season/{season}/episode/{episode}?{ep}"
-    e = json.loads(theke.http_get(url).decode("utf-8"))
+    e = json.loads(theke.http_get(url, cfg.download_timeout).decode("utf-8"))
     episode_name = e.get("name") or None
     episode_titles = []
     for t in [episode_name] + [tr.get("data", {}).get("name") for tr in
