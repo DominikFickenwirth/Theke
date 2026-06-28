@@ -330,13 +330,17 @@ def check_ffmpeg(ffmpeg_path) -> str:
 
 def move_file(src, dst, force=False) -> str:
     """Move src to dst, creating parent dirs. An existing dst is an error unless
-    force (then it is replaced). Return dst."""
-    if os.path.exists(dst):
-        if not force:
-            raise RuntimeError(f"destination exists: {dst}")
-        os.remove(dst)
+    force. The payload first lands on a temp name on the destination filesystem and
+    is swapped in with a single atomic os.replace, so an interrupted cross-device
+    move never leaves a partial file under the final name and the prior file (with
+    force) survives until the swap succeeds. Return dst."""
+    if os.path.exists(dst) and not force:
+        raise RuntimeError(f"destination exists: {dst}")
     _ensure_parent(dst)
-    shutil.move(src, dst)
+    tmp = dst + ".part"
+    _discard(tmp)                # clear a leftover from an earlier aborted move
+    shutil.move(src, tmp)        # copy/rename onto the destination filesystem
+    os.replace(tmp, dst)         # atomic swap into the final name
     log.info("moved %s -> %s", os.path.basename(src), dst)
     return dst
 
