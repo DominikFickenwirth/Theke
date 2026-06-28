@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import urllib.error
 
 import pytest
 
@@ -461,6 +462,61 @@ def test_download_truncated_stores_response_validator_for_resume(tmp_path, monke
     assert not (tmp_path / "v.mp4.part.meta").exists()
 
 
+# -- download error classification (item 7) -----------------------------------
+# Not every failure is transient: a 4xx the request can't fix by repeating (404,
+# 403, 410) must fail fast instead of burning all retries; a 416 (range not
+# satisfiable, caused by a stale oversized .part) must discard the leftover and
+# restart once, which it could never self-heal before. 5xx and network errors
+# still retry.
+
+def test_download_fatal_http_status_fails_without_retrying(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(files, "open_url", opener)
+    with pytest.raises(urllib.error.HTTPError):
+        download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=3)
+    assert calls["n"] == 1                       # no retry spin on a permanent 404
+
+
+def test_download_416_discards_stale_part_and_restarts(tmp_path, monkeypatch):
+    data = b"fresh complete data"
+    (tmp_path / "v.mp4.part").write_bytes(b"STALE OVERSIZED PART, LONGER THAN REMOTE")
+    (tmp_path / "v.mp4.part.meta").write_text('"etag"', encoding="utf-8")
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert offset > 0                    # first tried to resume the stale part
+            raise urllib.error.HTTPError(url, 416, "Range Not Satisfiable", {}, None)
+        assert offset == 0                       # reset -> restarted from scratch
+        return io.BytesIO(data), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=2)
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part.meta").exists()
+
+
+def test_download_server_error_still_retries(tmp_path, monkeypatch):
+    data = b"ok now"
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+        return io.BytesIO(data), False
+    monkeypatch.setattr(files, "open_url", opener)
+    n = download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=2)
+    assert calls["n"] == 2                        # 5xx is transient -> retried
+    assert n == len(data)
+
+
 # -- byte progress (downloads) ------------------------------------------------
 
 def test_content_length_from_header_and_missing():
@@ -675,6 +731,27 @@ def test_hls_native_failure_handoff_passes_timeout_to_ffmpeg(tmp_path, monkeypat
     download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
                  ffmpeg_path="ffmpeg", timeout=45)
     assert seen["args"][seen["args"].index("-rw_timeout") + 1] == "45000000"
+
+
+def test_hls_segment_fatal_http_skips_retries_to_ffmpeg(tmp_path, monkeypatch):
+    # a 404 segment is permanent: don't spin segment retries, hand off to ffmpeg.
+    seg_calls = {"n": 0}
+
+    def fake_get(url, timeout=None):
+        if url == MEDIA_URL:
+            return MEDIA_TXT
+        seg_calls["n"] += 1
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(theke, "http_get", fake_get)
+
+    def fake_ffmpeg(args):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"FF")
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    action, nbytes, nsegs = download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"),
+                                         retries=3, ffmpeg_path="ffmpeg")
+    assert action == "hls-ffmpeg"
+    assert seg_calls["n"] == 1                    # first 404 -> ffmpeg, no retry spin
 
 
 def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
