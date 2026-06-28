@@ -313,6 +313,50 @@ def test_download_truncated_then_resumes_to_completion(tmp_path, monkeypatch):
     assert not (tmp_path / "v.mp4.part").exists()
 
 
+# -- direct download length guard (item 2) ------------------------------------
+# Without a Content-Length the truncation check cannot fire, so a connection that
+# drops at EOF reads back as a clean empty buffer and looks complete. Consistent
+# with item 1 ("empty = reject"), the minimum guard is: a no-Content-Length
+# stream that delivers zero bytes (nothing received this attempt) is never
+# accepted as a finished download. The Content-Length path stays unchanged.
+
+def test_download_no_content_length_nonempty_completes(tmp_path, monkeypatch):
+    # no Content-Length (BytesIO has no getheader) + non-empty stream -> ok.
+    data = b"streamed body without length"
+    def opener(url, offset=0, timeout=None):
+        return io.BytesIO(data), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=0)
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part").exists()
+
+
+def test_download_no_content_length_empty_stream_raises(tmp_path, monkeypatch):
+    # no Content-Length + empty stream (dropped at EOF) -> failure, never the result.
+    def opener(url, offset=0, timeout=None):
+        return io.BytesIO(b""), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    with pytest.raises(RuntimeError, match="empty download"):
+        download_file(out=out, url="http://x", retries=0)
+    assert not (tmp_path / "v.mp4").exists()           # empty buffer never finalized
+
+
+def test_download_content_length_zero_path_unchanged(tmp_path, monkeypatch):
+    # The empty-result guard is scoped to the no-Content-Length case: a server that
+    # explicitly advertises Content-Length: 0 stays authoritative and is accepted,
+    # so the Content-Length path is unchanged.
+    def opener(url, offset=0, timeout=None):
+        return Sized(b"", length=0), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=0)
+    assert n == 0
+    assert (tmp_path / "v.mp4").read_bytes() == b""
+
+
 # -- byte progress (downloads) ------------------------------------------------
 
 def test_content_length_from_header_and_missing():
