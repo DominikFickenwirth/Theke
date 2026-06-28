@@ -1,5 +1,6 @@
 """Tests for the file primitives (phases 6-8): download, remux, move."""
 
+import errno
 import io
 import json
 import logging
@@ -515,6 +516,41 @@ def test_download_server_error_still_retries(tmp_path, monkeypatch):
     n = download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=2)
     assert calls["n"] == 2                        # 5xx is transient -> retried
     assert n == len(data)
+
+
+# -- disk-full is non-retryable (item 9) --------------------------------------
+# A write that fails with ENOSPC will never succeed by retrying; spinning the
+# retry loop just wastes time and leaves a .part. It must fail fast.
+
+def test_download_disk_full_fails_without_retrying(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, **kw):
+        calls["n"] += 1
+        return io.BytesIO(b"payload"), False
+    monkeypatch.setattr(files, "open_url", opener)
+    real_open = open
+
+    class FullFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def write(self, b):
+            err = OSError("no space left on device")
+            err.errno = errno.ENOSPC
+            raise err
+
+    def fake_open(path, mode="r", *a, **k):
+        if str(path).endswith(".part"):
+            return FullFile()
+        return real_open(path, mode, *a, **k)
+    monkeypatch.setattr("builtins.open", fake_open)
+    with pytest.raises(OSError):
+        download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=3)
+    assert calls["n"] == 1                        # disk full -> no retry spin
 
 
 # -- download stall guard (item 8) --------------------------------------------
