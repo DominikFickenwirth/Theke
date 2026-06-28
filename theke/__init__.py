@@ -27,7 +27,7 @@ from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CAT
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links)
 from theke.queue import select_downloads, resolution_of
-from theke.files import is_hls, download_file, download_hls, run_remux, move_file
+from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import subtitle
 
 CONFIG_DEFAULT_PATH = "theke.json"
@@ -1643,6 +1643,11 @@ def _file_download(cfg, args) -> dict:
 
 
 def _file_remux(cfg, args) -> dict:
+    if args.check_ffmpeg:
+        return {"check_ffmpeg": True, "ffmpeg_path": cfg.ffmpeg_path,
+                "version": check_ffmpeg(cfg.ffmpeg_path)}
+    if not (args.in_path and args.mode and args.out):
+        raise DbError("file remux requires --in, --mode and --out (or --check-ffmpeg)")
     run_remux(cfg.ffmpeg_path, args.in_path, args.mode, args.out, args.language)
     return {"remux": args.mode, "out": args.out}
 
@@ -1770,11 +1775,12 @@ def build_parser() -> argparse.ArgumentParser:
     fdl.add_argument("-u", "--url",     required=True, metavar="URL",  help="media URL to download")
     fdl.add_argument("-o", "--out",     required=True, metavar="PATH", help="output file path")
     fdl.add_argument("-r", "--retries", type=int, metavar="N",         help="retry attempts on error (default: config download_retries)")
-    frx = fsub.add_parser("remux", help="remux a file via ffmpeg (stream copy)", description="Stream-copy --in into --out with ffmpeg (no transcoding). --mode picks what to keep: AV (audio+video), A (audio only), V (video only). --language tags the first audio track.")
-    frx.add_argument("-i", "--in",       dest="in_path", required=True, metavar="PATH",     help="input file path")
-    frx.add_argument("-m", "--mode",     required=True, choices=["AV", "A", "V"],            help="what to keep: AV (audio+video), A (audio), V (video)")
-    frx.add_argument("-o", "--out",      required=True, metavar="PATH",                      help="output file path")
-    frx.add_argument("-l", "--language", metavar="CODE",                                     help="set the audio track language tag (e.g. deu)")
+    frx = fsub.add_parser("remux", help="remux a file via ffmpeg (stream copy)", description="Stream-copy --in into --out with ffmpeg (no transcoding). --mode picks what to keep: AV (audio+video), A (audio only), V (video only). --language tags the first audio track. --check-ffmpeg only probes the configured ffmpeg binary and exits.")
+    frx.add_argument("-i", "--in",          dest="in_path", metavar="PATH",                  help="input file path")
+    frx.add_argument("-m", "--mode",        choices=["AV", "A", "V"],                         help="what to keep: AV (audio+video), A (audio), V (video)")
+    frx.add_argument("-o", "--out",         metavar="PATH",                                  help="output file path")
+    frx.add_argument("-l", "--language",    metavar="CODE",                                  help="set the audio track language tag (e.g. deu)")
+    frx.add_argument(      "--check-ffmpeg", dest="check_ffmpeg", action="store_true",        help="probe the configured ffmpeg binary (-version) and exit")
     frxs = fsub.add_parser("remux-subtitle", help="convert a subtitle file to player-ready sidecars", description="Convert --in (TTML/EBU-TT(-D) XML or WebVTT) into one '<base>.<lang>.<ext>' sidecar per format. ffmpeg-free (ffmpeg cannot decode TTML and drops colour/position). --format overrides the configured subtitle_formats; --out sets the base path (default: --in without its extension).")
     frxs.add_argument("-i", "--in",       dest="in_path", required=True, metavar="PATH",     help="input subtitle file (.ttml/.xml/.vtt)")
     frxs.add_argument("-o", "--out",      metavar="BASE",                                     help="output base path (default: input path without extension)")

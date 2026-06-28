@@ -592,6 +592,13 @@ def test_check_ffmpeg_missing_binary_raises():
         check_ffmpeg("this-ffmpeg-does-not-exist")
 
 
+def test_check_ffmpeg_error_shows_expanded_path(monkeypatch):
+    monkeypatch.setenv("THEKE_FF_DIR", "nope-ffmpeg-dir")
+    with pytest.raises(RuntimeError) as exc:
+        check_ffmpeg("$THEKE_FF_DIR/ffmpeg")   # not found -> expanded path in message
+    assert os.path.abspath("nope-ffmpeg-dir/ffmpeg") in str(exc.value)
+
+
 def test_check_ffmpeg_nonzero_exit_raises(monkeypatch):
     monkeypatch.setattr(files.subprocess, "run",
                         lambda *a, **k: FakeRun("", 1))
