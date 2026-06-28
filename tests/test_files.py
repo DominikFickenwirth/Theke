@@ -106,6 +106,50 @@ def test_parse_media_playlist_method_none_not_encrypted():
     assert enc is False
 
 
+# -- network timeout ----------------------------------------------------------
+
+def test_open_url_passes_timeout_to_urlopen(monkeypatch):
+    seen = {}
+
+    class Resp:
+        status = 200
+
+    def fake_urlopen(request, timeout=None):
+        seen["timeout"] = timeout
+        return Resp()
+
+    monkeypatch.setattr(files.urllib.request, "urlopen", fake_urlopen)
+    reader, resumed = files.open_url("http://x", timeout=7)
+    assert seen["timeout"] == 7
+    assert resumed is False
+
+
+def test_download_file_threads_timeout_to_open_url(tmp_path, monkeypatch):
+    seen = {}
+
+    def opener(url, offset=0, timeout=None):
+        seen["timeout"] = timeout
+        return io.BytesIO(b"data"), False
+
+    monkeypatch.setattr(files, "open_url", opener)
+    download_file(url="http://x", out=str(tmp_path / "v.mp4"), retries=0, timeout=9)
+    assert seen["timeout"] == 9
+
+
+def test_download_hls_threads_timeout_to_http_get(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_get(url, timeout=None):
+        seen.append(timeout)
+        return {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
+                "https://h/v/seg1.ts": b"BBB"}[url]
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+    download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
+                 ffmpeg_path="ffmpeg", timeout=11)
+    assert seen == [11, 11, 11]   # playlist + both segments
+
+
 # -- direct download (resume + retry) -----------------------------------------
 
 class Opener:
@@ -474,6 +518,36 @@ def test_cli_file_download_hls_routes_to_segments(tmp_path, capsys, monkeypatch)
 
 def test_cli_file_download_missing_args_is_usage_error(capsys):
     assert main(["file", "download"]) == 2
+
+
+def test_cli_file_download_timeout_overrides_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def opener(url, offset=0, timeout=None):
+        seen["timeout"] = timeout
+        return io.BytesIO(b"data"), False
+
+    monkeypatch.setattr(files, "open_url", opener)
+    rc = main(["file", "download", "--url", "http://x/v.mp4",
+               "--out", str(tmp_path / "v.mp4"), "--timeout", "5"])
+    assert rc == 0
+    assert seen["timeout"] == 5
+
+
+def test_cli_file_download_timeout_defaults_to_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)          # no theke.json -> config defaults
+    seen = {}
+
+    def opener(url, offset=0, timeout=None):
+        seen["timeout"] = timeout
+        return io.BytesIO(b"data"), False
+
+    monkeypatch.setattr(files, "open_url", opener)
+    rc = main(["file", "download", "--url", "http://x/v.mp4",
+               "--out", str(tmp_path / "v.mp4")])
+    assert rc == 0
+    assert seen["timeout"] == 60         # Config().download_timeout
 
 
 # -- remux (ffmpeg stream copy) -----------------------------------------------

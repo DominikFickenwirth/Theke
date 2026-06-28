@@ -158,6 +158,18 @@ TMDB_BOOT = {
 }
 
 
+def test_tmdb_movie_passes_configured_timeout(monkeypatch):
+    seen = {}
+
+    def fake_get(url, timeout=None):
+        seen["timeout"] = timeout
+        return json.dumps(TMDB_BOOT).encode("utf-8")
+
+    monkeypatch.setattr(theke, "http_get", fake_get)
+    tmdb_movie(Config(tmdb_api_key="KEY", download_timeout=44), 1234)
+    assert seen["timeout"] == 44
+
+
 def test_tmdb_movie_parses_titles_year_runtime(monkeypatch):
     seen = {}
 

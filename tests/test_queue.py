@@ -851,6 +851,29 @@ def test_queue_download_runs_pipeline_to_target(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_queue_download_passes_configured_timeout(tmp_path, monkeypatch):
+    seen = {}
+
+    def dl(url, out, retries, timeout=None):
+        seen["timeout"] = timeout
+        with open(out, "wb") as fh:
+            fh.write(b"SRC")
+        return 3
+
+    monkeypatch.setattr(theke, "download_file", dl)
+    monkeypatch.setattr(theke, "run_remux", _fake_remux)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, download_timeout=22)
+        insert_local(conn, "m_de", "Solo", url_video="http://de")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert seen["timeout"] == 22
+    finally:
+        conn.close()
+
+
 def test_queue_download_audio_only_remux_mode(tmp_path, monkeypatch):
     # the audio pick is remuxed in mode 'A' to its '.fr.aac' destination.
     stub_tmdb(monkeypatch)
