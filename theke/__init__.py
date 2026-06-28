@@ -62,6 +62,7 @@ class Config:
     ffmpeg_path:          str   = "ffmpeg"
     download_retries:     int   = 3
     download_timeout:     int   = 60
+    download_stall_timeout: int = 120
     temp_path:            str   = ""
     video_ext:            str   = "mp4"
     audio_ext:            str   = "aac"
@@ -1540,7 +1541,8 @@ def _fetch(cfg, url, out):
     if is_hls(url):
         download_hls(url, out, cfg.download_retries, cfg.ffmpeg_path, cfg.download_timeout)
     else:
-        download_file(url, out, cfg.download_retries, cfg.download_timeout)
+        download_file(url, out, cfg.download_retries, cfg.download_timeout,
+                      cfg.download_stall_timeout)
 
 
 def _download_subtitle(cfg, row, base, force):
@@ -1642,7 +1644,8 @@ def _file_download(cfg, args) -> dict:
         if action == "hls":
             result["segments"] = nsegs
         return result
-    nbytes = download_file(args.url, args.out, retries, timeout)
+    nbytes = download_file(args.url, args.out, retries, timeout,
+                           cfg.download_stall_timeout)
     return {"action": "download", "out": args.out, "bytes": nbytes}
 
 

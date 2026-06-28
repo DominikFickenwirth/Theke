@@ -805,7 +805,7 @@ def test_queue_delete_cli(tmp_path, monkeypatch, capsys):
 # The file primitives (download/remux/move) are stubbed; we test the chaining,
 # status transitions, cleanup and error handling -- not ffmpeg/HTTP themselves.
 
-def _fake_dl(url, out, retries, timeout=None):
+def _fake_dl(url, out, retries, timeout=None, stall_timeout=0):
     with open(out, "wb") as fh:
         fh.write(b"SRC")
     return 3
@@ -854,7 +854,7 @@ def test_queue_download_runs_pipeline_to_target(tmp_path, monkeypatch):
 def test_queue_download_passes_configured_timeout(tmp_path, monkeypatch):
     seen = {}
 
-    def dl(url, out, retries, timeout=None):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         seen["timeout"] = timeout
         with open(out, "wb") as fh:
             fh.write(b"SRC")
@@ -941,7 +941,7 @@ def test_queue_download_by_id(tmp_path, monkeypatch):
 
 
 def test_queue_download_failure_marks_failed_and_continues(tmp_path, monkeypatch):
-    def dl(url, out, retries, timeout=None):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         if "bad" in url:
             raise RuntimeError("net down")
         with open(out, "wb") as fh:
@@ -1043,7 +1043,7 @@ _VTT_SUB = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHallo Welt\n"
 
 
 def test_queue_download_writes_converted_subtitle_sidecars(tmp_path, monkeypatch):
-    def dl(url, out, retries, timeout=None):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         data = _VTT_SUB if url.endswith(".vtt") else b"SRC"
         with open(out, "wb") as fh:
             fh.write(data)
@@ -1075,7 +1075,7 @@ def test_queue_download_writes_converted_subtitle_sidecars(tmp_path, monkeypatch
 
 def test_queue_download_skips_unrecognised_subtitle(tmp_path, monkeypatch):
     # NDR serves an HTML page at the subtitle URL: no sidecar, film still done.
-    def dl(url, out, retries, timeout=None):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         data = b"<!DOCTYPE html><html></html>" if url.endswith(".html") else b"SRC"
         with open(out, "wb") as fh:
             fh.write(data)
@@ -1133,7 +1133,7 @@ def test_queue_download_uses_descriptive_temp_names(tmp_path, monkeypatch):
     # the url's extension (.src.<ext>), the remux target the path's (.mux.<ext>).
     seen = {}
 
-    def dl(url, out, retries, timeout=None):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         seen["src"] = os.path.basename(out)
         with open(out, "wb") as fh:
             fh.write(b"SRC")
@@ -1164,7 +1164,7 @@ def test_queue_download_uses_descriptive_temp_names(tmp_path, monkeypatch):
 def test_queue_download_temp_src_omits_ext_when_url_has_none(tmp_path, monkeypatch):
     seen = {}
 
-    def dl(url, out, retries, timeout=None):
+    def dl(url, out, retries, timeout=None, stall_timeout=0):
         seen["src"] = os.path.basename(out)
         with open(out, "wb") as fh:
             fh.write(b"SRC")

@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -165,16 +166,42 @@ def _is_fatal_http(exc) -> bool:
             and exc.code not in _TRANSIENT_HTTP and exc.code != 416)
 
 
-def download_file(url, out, retries, timeout=None) -> int:
+class _Stall:
+    """Throughput floor for a transfer: aborts once a sliding window of `window`
+    seconds delivers less than one CHUNK, catching a trickle the per-read socket
+    timeout never trips. window<=0 disables it. The clock is time.monotonic
+    (patched in tests)."""
+
+    def __init__(self, window, label):
+        self.window = window
+        self.label = label
+        self.start = time.monotonic() if window else 0.0
+        self.bytes = 0
+
+    def feed(self, n):
+        if not self.window:
+            return
+        self.bytes += n
+        now = time.monotonic()
+        if now - self.start < self.window:
+            return
+        if self.bytes < CHUNK:
+            raise RuntimeError(
+                f"stalled: <{CHUNK} bytes in {self.window}s ({self.label})")
+        self.start, self.bytes = now, 0          # window met -> slide it forward
+
+
+def download_file(url, out, retries, timeout=None, stall_timeout=0) -> int:
     """Stream url to out, resuming a leftover '.part' via Range when possible.
     On a transient error retry up to `retries` times (each retry resumes from the
     current '.part' size); a fatal HTTP status (404/403/410/...) fails fast and a
     416 discards the stale '.part' and restarts. `timeout` (seconds) bounds each
-    socket read. Return the byte count. Seam: open_url."""
+    socket read; `stall_timeout` (seconds, 0 = off) aborts a transfer that trickles
+    below one CHUNK per window. Return the byte count. Seam: open_url."""
     log.info("downloading %s", url.rsplit("/", 1)[-1])
     for attempt in range(retries + 1):
         try:
-            return _download_once(url, out, timeout)
+            return _download_once(url, out, timeout, stall_timeout)
         except Exception as exc:
             _classify_download_error(exc, out)   # fatal -> reraise; 416 -> reset .part
             if attempt == retries:
@@ -196,7 +223,7 @@ def _classify_download_error(exc, out) -> None:
         raise exc
 
 
-def _download_once(url, out, timeout=None) -> int:
+def _download_once(url, out, timeout=None, stall_timeout=0) -> int:
     part = out + ".part"
     meta = part + ".meta"
     _ensure_parent(out)
@@ -214,6 +241,7 @@ def _download_once(url, out, timeout=None) -> int:
     if total is not None and resumed:
         total += offset                  # 206 Content-Length covers only the remainder
     progress = _Progress(os.path.basename(out), total)
+    stall = _Stall(stall_timeout, os.path.basename(out))
     done = offset
     try:
         with open(part, "ab" if offset else "wb") as fh:   # wb truncates a stale part
@@ -224,6 +252,7 @@ def _download_once(url, out, timeout=None) -> int:
                 fh.write(buf)
                 done += len(buf)
                 progress.update(done)
+                stall.feed(len(buf))
     finally:
         reader.close()
     if total is not None:
