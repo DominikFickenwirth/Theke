@@ -173,7 +173,7 @@ def test_tmdb_movie_passes_configured_timeout(monkeypatch):
 def test_tmdb_movie_parses_titles_year_runtime(monkeypatch):
     seen = {}
 
-    def fake_get(url):
+    def fake_get(url, timeout=None):
         seen["url"] = url
         return json.dumps(TMDB_BOOT).encode("utf-8")
 
@@ -270,7 +270,7 @@ def boot_db(tmp_path, monkeypatch):
     """A DB with two matching movie rows (m1 exact, m2 substring) + one miss,
     and http_get stubbed to the canned Das Boot payload."""
     monkeypatch.setattr(theke, "http_get",
-                        lambda url: json.dumps(TMDB_BOOT).encode("utf-8"))
+                        lambda url, timeout=None: json.dumps(TMDB_BOOT).encode("utf-8"))
     conn = open_db(tmp_path)
     insert_movie(conn, "m1", "Das Boot", 1981, 8940)
     insert_movie(conn, "m2", "Das Boot Extended", 1981, 9000)
@@ -517,7 +517,7 @@ TMDB_TATORT_EP = {
 def fake_tv_get(seen):
     """http_get stub: the episode payload for /season/.../episode/ URLs, the
     series payload otherwise. Appends every URL seen to `seen`."""
-    def get(url):
+    def get(url, timeout=None):
         seen.append(url)
         body = TMDB_TATORT_EP if "/season/" in url else TMDB_TATORT
         return json.dumps(body).encode("utf-8")
@@ -769,7 +769,7 @@ def arte_boot_db(tmp_path, monkeypatch):
     """A German Arte hit (a1, matches by title) plus two foreign-language variants
     (a2/a3) the title pass cannot reach, all sharing one video-id."""
     monkeypatch.setattr(theke, "http_get",
-                        lambda url: json.dumps(TMDB_BOOT).encode("utf-8"))
+                        lambda url, timeout=None: json.dumps(TMDB_BOOT).encode("utf-8"))
     conn = open_db(tmp_path)
     insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
                 "https://www.arte.tv/de/videos/100000-000-A/das-boot/")
@@ -834,7 +834,7 @@ LISBON_VARIANTS = [   # (mediathek_id, clean_title, sender, lang_slug)
 
 def test_cmd_match_run_links_mysteries_of_lisbon(tmp_path, monkeypatch):
     monkeypatch.setattr(theke, "http_get",
-                        lambda url: json.dumps(TMDB_LISBON).encode("utf-8"))
+                        lambda url, timeout=None: json.dumps(TMDB_LISBON).encode("utf-8"))
     conn = open_db(tmp_path)
     try:
         vid = "131183-000-A"

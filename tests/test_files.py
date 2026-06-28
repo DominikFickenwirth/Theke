@@ -18,7 +18,7 @@ from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
 def install_http(monkeypatch, mapping):
     """Monkeypatch theke.http_get to serve URL-mapped bytes (or raise an
     Exception value); an unmapped URL is an error."""
-    def fake_get(url):
+    def fake_get(url, timeout=None):
         value = mapping.get(url)
         if value is None:
             raise RuntimeError(f"unexpected url: {url}")
@@ -161,7 +161,7 @@ class Opener:
         self.resumable = resumable
         self.offsets = []
 
-    def __call__(self, url, offset=0):
+    def __call__(self, url, offset=0, timeout=None):
         self.offsets.append(offset)
         resumed = self.resumable and offset > 0
         body = self.data[offset:] if resumed else self.data
@@ -212,7 +212,7 @@ def test_download_retries_then_succeeds(tmp_path, monkeypatch):
     data = b"retry me please"
     calls = {"n": 0}
 
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("connection reset")
@@ -241,7 +241,7 @@ def test_download_resumes_across_a_midstream_failure(tmp_path, monkeypatch):
         def close(self):
             pass
 
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return Failing(data), False                # dies after one chunk
@@ -254,7 +254,7 @@ def test_download_resumes_across_a_midstream_failure(tmp_path, monkeypatch):
 
 
 def test_download_raises_after_exhausting_retries(tmp_path, monkeypatch):
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         raise RuntimeError("always down")
 
     monkeypatch.setattr(files, "open_url", opener)
@@ -285,7 +285,7 @@ class Sized:
 def test_download_truncated_stream_raises_not_silently_completes(tmp_path, monkeypatch):
     # server promises 16 bytes but delivers 6, then a clean EOF: must NOT be taken
     # as a finished download (no final file, the half stays a .part).
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         return Sized(b"012345", length=16), False
     monkeypatch.setattr(files, "open_url", opener)
     out = str(tmp_path / "v.mp4")
@@ -299,7 +299,7 @@ def test_download_truncated_then_resumes_to_completion(tmp_path, monkeypatch):
     data = b"0123456789abcdef"                          # 16 bytes
     calls = {"n": 0}
 
-    def opener(url, offset=0):
+    def opener(url, offset=0, timeout=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return Sized(data[:6], length=16), False    # drops at 6 bytes (EOF)

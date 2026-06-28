@@ -1027,7 +1027,7 @@ def test_diff_import_preserves_phase3_ids(tmp_path):
 # -- fetch: cmd_fetch decision (mocked network) ----------------------------
 
 CFG = SimpleNamespace(filmliste_url="FULL", filmliste_diff_url="DIFF",
-                      filmliste_id_url="ID")
+                      filmliste_id_url="ID", download_timeout=60)
 
 
 def xz_list(rows, list_id="id", created="01.01.2020, 00:00"):
@@ -1038,7 +1038,7 @@ def xz_list(rows, list_id="id", created="01.01.2020, 00:00"):
 def install_http(monkeypatch, mapping):
     import theke
 
-    def fake_get(url):
+    def fake_get(url, timeout=None):
         value = mapping.get(url)
         if value is None:
             raise RuntimeError(f"unexpected url: {url}")

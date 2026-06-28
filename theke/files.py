@@ -118,36 +118,39 @@ def parse_media_playlist(text, base_url):
 
 # -- direct download ----------------------------------------------------------
 
-def open_url(url, offset=0):
+def open_url(url, offset=0, timeout=None):
     """Open a URL for streaming; return (reader, resumed). With offset>0 a Range
     request is sent and resumed is True only when the server honors it (HTTP 206).
-    The network seam for the direct downloader -- monkeypatched in tests."""
+    `timeout` (seconds) bounds each socket operation (None = no timeout). The
+    network seam for the direct downloader -- monkeypatched in tests."""
     headers = {"User-Agent": theke.USER_AGENT}
     if offset:
         headers["Range"] = f"bytes={offset}-"
-    response = urllib.request.urlopen(urllib.request.Request(url, headers=headers))
+    response = urllib.request.urlopen(
+        urllib.request.Request(url, headers=headers), timeout=timeout)
     return response, response.status == 206
 
 
-def download_file(url, out, retries) -> int:
+def download_file(url, out, retries, timeout=None) -> int:
     """Stream url to out, resuming a leftover '.part' via Range when possible.
     On error retry up to `retries` times (each retry resumes from the current
-    '.part' size). Return the byte count. The seam is open_url."""
+    '.part' size). `timeout` (seconds) bounds each socket read, so a dropped
+    connection fails into the retry loop. Return the byte count. Seam: open_url."""
     log.info("downloading %s", url.rsplit("/", 1)[-1])
     for attempt in range(retries + 1):
         try:
-            return _download_once(url, out)
+            return _download_once(url, out, timeout)
         except Exception as exc:
             if attempt == retries:
                 raise
             log.info("download error (%s); retry %d/%d", exc, attempt + 1, retries)
 
 
-def _download_once(url, out) -> int:
+def _download_once(url, out, timeout=None) -> int:
     part = out + ".part"
     _ensure_parent(out)
     offset = os.path.getsize(part) if os.path.exists(part) else 0
-    reader, resumed = open_url(url, offset)
+    reader, resumed = open_url(url, offset, timeout)
     if offset and not resumed:
         offset = 0   # server ignored the Range -> rewrite from scratch
         log.info("range not honored; restarting")
@@ -325,26 +328,27 @@ def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
 
 # -- HLS download -------------------------------------------------------------
 
-def download_hls(url, out, retries, ffmpeg_path):
+def download_hls(url, out, retries, ffmpeg_path, timeout=None):
     """Download an HLS stream to out: resolve the master playlist (highest
     bandwidth), assemble the media playlist's segments natively, and hand off to
     ffmpeg when the stream is encrypted or native assembly fails after retries.
+    `timeout` (seconds) bounds each playlist/segment fetch (None = no timeout).
     Return (action, bytes, segments) with action 'hls' or 'hls-ffmpeg'."""
     _ensure_parent(out)
-    text = theke.http_get(url).decode("utf-8")
+    text = theke.http_get(url, timeout).decode("utf-8")
     media_url = url
     if is_master(text):
         variants = parse_master(text, url)
         if not variants:
             raise RuntimeError("empty HLS master playlist")
         media_url = max(variants, key=lambda v: v[0])[1]
-        text = theke.http_get(media_url).decode("utf-8")
+        text = theke.http_get(media_url, timeout).decode("utf-8")
     init, segments, encrypted = parse_media_playlist(text, media_url)
     if encrypted:
         log.info("encrypted HLS; handing off to ffmpeg")
         return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path), len(segments)
     try:
-        nbytes = _download_segments(out, init, segments, retries)
+        nbytes = _download_segments(out, init, segments, retries, timeout)
         return "hls", nbytes, len(segments)
     except Exception as exc:
         log.info("native HLS failed (%s); handing off to ffmpeg", exc)
@@ -361,7 +365,7 @@ def _hls_ffmpeg(url, out, ffmpeg_path) -> int:
     return os.path.getsize(out)
 
 
-def _download_segments(out, init, segments, retries) -> int:
+def _download_segments(out, init, segments, retries, timeout=None) -> int:
     """Fetch each segment into out.segments/ (skipping ones already on disk), then
     concatenate init + segments into out and drop the segment dir."""
     segdir = out + ".segments"
@@ -375,7 +379,7 @@ def _download_segments(out, init, segments, retries) -> int:
             done = 0
             for name, seg_url in parts:
                 path = os.path.join(segdir, name)
-                _fetch_segment(path, seg_url)
+                _fetch_segment(path, seg_url, timeout)
                 done += os.path.getsize(path)
                 progress.update(done)
             break
@@ -391,10 +395,10 @@ def _download_segments(out, init, segments, retries) -> int:
     return os.path.getsize(out)
 
 
-def _fetch_segment(path, url) -> None:
+def _fetch_segment(path, url, timeout=None) -> None:
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return   # already downloaded (resume)
     tmp = path + ".part"
     with open(tmp, "wb") as fh:
-        fh.write(theke.http_get(url))
+        fh.write(theke.http_get(url, timeout))
     os.replace(tmp, path)

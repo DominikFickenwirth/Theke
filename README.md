@@ -534,6 +534,7 @@ nach stderr, das Ergebnis (in `--json` ein Objekt) nach stdout.
 | ------------------ | ------------------------------------------------------------------- |
 | `ffmpeg_path`      | Pfad/Name des ffmpeg-Binaries (Std. `"ffmpeg"`, nutzt den PATH).    |
 | `download_retries` | Wiederholungen bei Download-Fehlern (Std. `3`).                     |
+| `download_timeout` | Netzwerk-Timeout in Sekunden je Socket-Vorgang -- bricht hängende Downloads und API-Abfragen ab statt ewig zu warten (Std. `60`). Gilt für alle Downloads (fetch, Filmliste, HLS, Untertitel) und alle TMDB-Abfragen. |
 
 ### `file download`
 
@@ -545,13 +546,16 @@ verarbeitet werden -- verschlüsselt (AES-128) oder Segment-Download endgültig
 fehlgeschlagen --, übernimmt ffmpeg (`-c copy`). Jede andere URL ist ein
 einfacher HTTP-Download, der eine liegengebliebene `.part`-Datei per
 Range-Header fortsetzt (sofern der Server es unterstützt, sonst Neustart).
-Fehlgeschlagene Versuche werden bis `download_retries` mal wiederholt.
+Fehlgeschlagene Versuche werden bis `download_retries` mal wiederholt. Jeder
+Socket-Vorgang ist auf `--timeout` Sekunden begrenzt, sodass eine abgebrochene
+Verbindung in die Wiederholung läuft statt hängen zu bleiben.
 
 | Option              | Wirkung                                                  |
 | ------------------- | -------------------------------------------------------- |
 | `-u`, `--url URL`   | Herunterzuladende Medien-URL.                            |
 | `-o`, `--out PATH`  | Zieldatei.                                               |
 | `-r`, `--retries N` | Wiederholungen bei Fehler (Std. `download_retries`).    |
+| `-t`, `--timeout SEC` | Netzwerk-Timeout in Sekunden (Std. `download_timeout`). |
 
 ```powershell
 theke file download --url https://.../film.mp4 --out build/film.mp4
