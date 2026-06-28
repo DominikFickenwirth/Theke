@@ -398,7 +398,10 @@ def _download_segments(out, init, segments, retries, timeout=None) -> int:
 def _fetch_segment(path, url, timeout=None) -> None:
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return   # already downloaded (resume)
+    body = theke.http_get(url, timeout)
+    if not body:   # no Content-Length + early EOF reads empty: never accept as final
+        raise RuntimeError(f"empty segment: {os.path.basename(path)}")
     tmp = path + ".part"
     with open(tmp, "wb") as fh:
-        fh.write(theke.http_get(url, timeout))
+        fh.write(body)
     os.replace(tmp, path)
