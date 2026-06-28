@@ -12,7 +12,7 @@ import theke.files as files
 from theke import Config, main
 from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
                          download_file, download_hls, ffmpeg_args, run_remux,
-                         run_ffmpeg, move_file)
+                         run_ffmpeg, check_ffmpeg, move_file)
 
 
 def install_http(monkeypatch, mapping):
@@ -566,6 +566,62 @@ def test_run_ffmpeg_without_duration_logs_no_progress(monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger="theke")
     run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])
     assert [r.getMessage() for r in caplog.records if "%" in r.getMessage()] == []
+
+
+# -- check-ffmpeg (probe the configured binary via -version) -------------------
+
+class FakeRun:
+    """Fake subprocess.run result for check_ffmpeg: serves stdout and returncode."""
+
+    def __init__(self, stdout, returncode):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def test_check_ffmpeg_returns_version_line(monkeypatch):
+    version = ("ffmpeg version 6.0 Copyright (c) 2000-2023 the FFmpeg developers\n"
+               "built with gcc 13.1.1\n")
+    monkeypatch.setattr(files.subprocess, "run",
+                        lambda *a, **k: FakeRun(version, 0))
+    assert check_ffmpeg("ffmpeg") == (
+        "ffmpeg version 6.0 Copyright (c) 2000-2023 the FFmpeg developers")
+
+
+def test_check_ffmpeg_missing_binary_raises():
+    with pytest.raises(RuntimeError, match="not found"):
+        check_ffmpeg("this-ffmpeg-does-not-exist")
+
+
+def test_check_ffmpeg_error_shows_expanded_path(monkeypatch):
+    monkeypatch.setenv("THEKE_FF_DIR", "nope-ffmpeg-dir")
+    with pytest.raises(RuntimeError) as exc:
+        check_ffmpeg("$THEKE_FF_DIR/ffmpeg")   # not found -> expanded path in message
+    assert os.path.abspath("nope-ffmpeg-dir/ffmpeg") in str(exc.value)
+
+
+def test_check_ffmpeg_nonzero_exit_raises(monkeypatch):
+    monkeypatch.setattr(files.subprocess, "run",
+                        lambda *a, **k: FakeRun("", 1))
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        check_ffmpeg("ffmpeg")
+
+
+def test_cli_file_remux_check_ffmpeg_json(capsys, monkeypatch):
+    monkeypatch.setattr(files.subprocess, "run",
+                        lambda *a, **k: FakeRun("ffmpeg version 6.0\n", 0))
+    rc = main(["--json", "file", "remux", "--check-ffmpeg"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "check_ffmpeg": True, "ffmpeg_path": "ffmpeg", "version": "ffmpeg version 6.0"}
+
+
+def test_cli_file_remux_check_ffmpeg_missing_binary_errors(capsys, monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError
+    monkeypatch.setattr(files.subprocess, "run", boom)
+    rc = main(["--json", "file", "remux", "--check-ffmpeg"])
+    assert rc == 1
+    assert "not found" in json.loads(capsys.readouterr().out)["error"]
 
 
 def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):

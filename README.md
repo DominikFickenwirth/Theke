@@ -562,7 +562,9 @@ theke file download --url https://.../master.m3u8 --out build/film.ts
 
 Stream-Copy von `--in` nach `--out` via ffmpeg (kein Transcoding). `--mode`
 bestimmt, was übernommen wird: `AV` (Audio+Video), `A` (nur Audio), `V` (nur
-Video). `--language` setzt den Sprach-Tag der ersten Audiospur.
+Video). `--language` setzt den Sprach-Tag der ersten Audiospur. `--check-ffmpeg`
+prüft nur, ob das konfigurierte ffmpeg (`ffmpeg_path`) aufrufbar ist, und endet
+danach -- gibt bei Erfolg die Versionszeile aus, sonst Exit-Code 1.
 
 | Option                 | Wirkung                                                |
 | ---------------------- | ------------------------------------------------------ |
@@ -570,10 +572,12 @@ Video). `--language` setzt den Sprach-Tag der ersten Audiospur.
 | `-m`, `--mode MODE`    | Was übernehmen: `AV`, `A` (nur Audio), `V` (nur Video).|
 | `-o`, `--out PATH`     | Ausgabedatei (Endung bestimmt den Container).          |
 | `-l`, `--language CODE`| Sprach-Tag der ersten Audiospur (z. B. `deu`).         |
+| `--check-ffmpeg`       | ffmpeg-Binary via `-version` prüfen und beenden.       |
 
 ```powershell
 theke file remux --in build/film.ts --mode AV --out build/film.mp4
 theke file remux --in build/film.ts --mode A --language fra --out build/film.aac
+theke file remux --check-ffmpeg
 ```
 
 ### `file remux-subtitle`

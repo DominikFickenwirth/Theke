@@ -253,6 +253,27 @@ def run_ffmpeg(args) -> None:
         raise RuntimeError(f"ffmpeg failed (exit {code}): {'; '.join(tail)}")
 
 
+def expand_ffmpeg_path(ffmpeg_path) -> str:
+    """The configured ffmpeg path resolved for diagnostics: ~ and env vars
+    expanded, a bare command name looked up on PATH, the result made absolute."""
+    expanded = os.path.expanduser(os.path.expandvars(ffmpeg_path))
+    return shutil.which(expanded) or os.path.abspath(expanded)
+
+
+def check_ffmpeg(ffmpeg_path) -> str:
+    """Probe the configured ffmpeg binary by running '-version'; return its first
+    output line (the version string), or raise on a missing/failing binary. The
+    error names the expanded, absolute path that was tried."""
+    expected = expand_ffmpeg_path(ffmpeg_path)
+    try:
+        proc = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(f"ffmpeg not found: {expected} (set ffmpeg_path)") from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed (exit {proc.returncode}): {expected} -version")
+    return proc.stdout.splitlines()[0].strip() if proc.stdout else ""
+
+
 # -- move ---------------------------------------------------------------------
 
 def move_file(src, dst, force=False) -> str:
