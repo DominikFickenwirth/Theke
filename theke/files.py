@@ -172,10 +172,14 @@ def _download_once(url, out, timeout=None) -> int:
                 progress.update(done)
     finally:
         reader.close()
-    if total is not None and done < total:   # EOF below Content-Length == dropped
-        raise RuntimeError(                  # connection; keep .part so a retry resumes
-            f"incomplete download: {done}/{total} bytes ({os.path.basename(out)})")
-    os.replace(part, out)
+    if total is not None:
+        if done < total:                     # EOF below Content-Length == dropped
+            raise RuntimeError(              # connection; keep .part so a retry resumes
+                f"incomplete download: {done}/{total} bytes ({os.path.basename(out)})")
+    elif done == offset:                      # no Content-Length: nothing received this
+        raise RuntimeError(                  # attempt (incl. a no-progress resume of an
+            f"empty download: no bytes received ({os.path.basename(out)})")  # always-
+    os.replace(part, out)                    # incomplete leftover .part) is never done
     return os.path.getsize(out)
 
 
