@@ -421,6 +421,42 @@ def test_render_template_unknown_placeholder_raises():
         _render_template("{bogus}", {"Title": "X"})
 
 
+# Library filename sanitization (item 9): a title carrying FS-reserved characters
+# would otherwise only blow up at the final move, after the whole download+remux.
+# Sanitizing is opt-in (sanitize=True) and applies per substituted value, so the
+# template's own path separators survive.
+
+def test_render_template_sanitizes_reserved_chars():
+    from theke import _render_template
+    fields = {"Title": "A: B? C", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    out = _render_template("{Title} ({Year}).mp4", fields, sanitize=True)
+    assert out == "A- B- C (2020).mp4"          # ':' '?' reserved -> '-'
+
+
+def test_render_template_strips_trailing_dot_and_space():
+    from theke import _render_template
+    fields = {"Title": "Trailing. ", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    out = _render_template("{Title}.mp4", fields, sanitize=True)
+    assert out == "Trailing.mp4"                 # trailing '. ' stripped from value
+
+
+def test_render_template_keeps_path_separators_when_sanitizing():
+    from theke import _render_template
+    fields = {"Title": "X/Y", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    out = _render_template("movies/{Title}/{Title}.mp4", fields, sanitize=True)
+    assert out == "movies/X-Y/X-Y.mp4"          # value '/' replaced, template kept
+
+
+def test_render_template_no_sanitize_by_default():
+    from theke import _render_template
+    fields = {"Title": "A:B", "Year": 2020, "Series": None,
+              "Season": None, "Episode": None}
+    assert _render_template("{Title}.mp4", fields) == "A:B.mp4"
+
+
 def test_queue_add_custom_extensions(tmp_path, monkeypatch):
     stub_tmdb(monkeypatch)
     conn = open_db(tmp_path)
