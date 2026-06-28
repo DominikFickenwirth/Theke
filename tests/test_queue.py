@@ -1,5 +1,6 @@
 """Tests for the download queue (phase 5): dedup selection + cmd_queue."""
 
+import io
 import json
 import os
 
@@ -943,6 +944,52 @@ def test_queue_download_failure_marks_failed_and_continues(tmp_path, monkeypatch
         assert os.listdir(str(tmp_path / "scratch")) == []   # temp cleaned even on failure
     finally:
         conn.close()
+
+
+def test_queue_download_truncated_source_fails_without_remux(tmp_path, monkeypatch):
+    # a mid-download drop (real download_file over a truncating open_url) must mark
+    # the row failed -- never remux the half file. Reproduces the silent-truncation
+    # bug: a clean EOF below Content-Length used to be taken as a finished download.
+    import theke.files as files
+
+    def opener(url, offset=0):
+        return Sized(b"012345", length=16), False        # 6 of 16 bytes, clean EOF
+    monkeypatch.setattr(files, "open_url", opener)
+    monkeypatch.setattr(theke, "run_remux",
+                        lambda *a, **k: pytest.fail("must not remux a truncated download"))
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, download_retries=1)
+        insert_local(conn, "m_de", "Solo", url_video="http://de/v.mp4")
+        cmd_queue(conn, cfg, qargs(mediathek_id=["m_de"]))
+        conn.execute("UPDATE queue SET status='A'")
+        result = cmd_queue(conn, cfg, qargs(queue_cmd="download", all=True))
+        assert result == {"downloaded": 0, "failed": 1}
+        assert status_of(conn, "m_de") == "F"
+        bad = queue_rows(conn)[0]
+        assert "incomplete" in bad["error"]
+        assert os.listdir(str(tmp_path / "scratch")) == []   # half file cleaned up
+        assert not (tmp_path / "lib").exists()               # nothing reached library
+    finally:
+        conn.close()
+
+
+class Sized:
+    """Fake response advertising Content-Length, serving `body` then a clean EOF;
+    a short body models a connection drop that ends in EOF, not an exception."""
+
+    def __init__(self, body, length):
+        self.buf = io.BytesIO(body)
+        self.length = length
+
+    def getheader(self, name, default=None):
+        return str(self.length) if name == "Content-Length" else default
+
+    def read(self, n=-1):
+        return self.buf.read(n)
+
+    def close(self):
+        pass
 
 
 def test_queue_download_routes_hls(tmp_path, monkeypatch):

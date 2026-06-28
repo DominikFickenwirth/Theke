@@ -219,6 +219,56 @@ def test_download_raises_after_exhausting_retries(tmp_path, monkeypatch):
         download_file(out=out, url="http://x", retries=2)
 
 
+class Sized:
+    """Fake response advertising a Content-Length header, serving `body` then a
+    clean EOF. A body shorter than `length` models a dropped connection that ends
+    in EOF instead of raising (the silent-truncation case)."""
+
+    def __init__(self, body, length):
+        self.buf = io.BytesIO(body)
+        self.length = length
+
+    def getheader(self, name, default=None):
+        return str(self.length) if name == "Content-Length" else default
+
+    def read(self, n=-1):
+        return self.buf.read(n)
+
+    def close(self):
+        pass
+
+
+def test_download_truncated_stream_raises_not_silently_completes(tmp_path, monkeypatch):
+    # server promises 16 bytes but delivers 6, then a clean EOF: must NOT be taken
+    # as a finished download (no final file, the half stays a .part).
+    def opener(url, offset=0):
+        return Sized(b"012345", length=16), False
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    with pytest.raises(RuntimeError, match="incomplete"):
+        download_file(out=out, url="http://x", retries=0)
+    assert not (tmp_path / "v.mp4").exists()           # half file never the result
+    assert (tmp_path / "v.mp4.part").read_bytes() == b"012345"   # kept for resume
+
+
+def test_download_truncated_then_resumes_to_completion(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"                          # 16 bytes
+    calls = {"n": 0}
+
+    def opener(url, offset=0):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return Sized(data[:6], length=16), False    # drops at 6 bytes (EOF)
+        return Sized(data[offset:], length=len(data) - offset), offset > 0
+
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=2)
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part").exists()
+
+
 # -- byte progress (downloads) ------------------------------------------------
 
 def test_content_length_from_header_and_missing():
