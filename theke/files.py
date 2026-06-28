@@ -392,18 +392,26 @@ def download_hls(url, out, retries, ffmpeg_path, timeout=None):
     init, segments, encrypted = parse_media_playlist(text, media_url)
     if encrypted:
         log.info("encrypted HLS; handing off to ffmpeg")
-        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path), len(segments)
+        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path, timeout), len(segments)
     try:
         nbytes = _download_segments(out, init, segments, retries, timeout)
         return "hls", nbytes, len(segments)
     except Exception as exc:
         log.info("native HLS failed (%s); handing off to ffmpeg", exc)
-        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path), len(segments)
+        return "hls-ffmpeg", _hls_ffmpeg(url, out, ffmpeg_path, timeout), len(segments)
 
 
-def _hls_ffmpeg(url, out, ffmpeg_path) -> int:
+def _hls_ffmpeg_args(url, out, ffmpeg_path, timeout=None) -> list:
+    """ffmpeg command to fetch an HLS stream straight to out (stream copy). With
+    timeout set, -rw_timeout (microseconds) bounds each network read/write so a
+    dropped connection fails instead of hanging forever."""
+    rw = ["-rw_timeout", str(int(timeout * 1_000_000))] if timeout else []
+    return [ffmpeg_path, "-y"] + rw + ["-i", url, "-c", "copy", out]
+
+
+def _hls_ffmpeg(url, out, ffmpeg_path, timeout=None) -> int:
     try:
-        run_ffmpeg([ffmpeg_path, "-y", "-i", url, "-c", "copy", out])
+        run_ffmpeg(_hls_ffmpeg_args(url, out, ffmpeg_path, timeout))
     except Exception:
         if os.path.exists(out):   # drop the partial/faulty target ffmpeg left
             os.remove(out)
