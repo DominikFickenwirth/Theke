@@ -169,6 +169,9 @@ def _download_once(url, out) -> int:
                 progress.update(done)
     finally:
         reader.close()
+    if total is not None and done < total:   # EOF below Content-Length == dropped
+        raise RuntimeError(                  # connection; keep .part so a retry resumes
+            f"incomplete download: {done}/{total} bytes ({os.path.basename(out)})")
     os.replace(part, out)
     return os.path.getsize(out)
 
