@@ -357,6 +357,110 @@ def test_download_content_length_zero_path_unchanged(tmp_path, monkeypatch):
     assert (tmp_path / "v.mp4").read_bytes() == b""
 
 
+# -- resume validation via If-Range (item 3) ----------------------------------
+# A byte-offset resume that does not validate the resource can splice two
+# different remote versions into one corrupt file (and the length check still
+# passes when the sizes line up). The fix sends If-Range with the stored ETag/
+# Last-Modified, so a changed resource yields a full 200 (restart) instead of a
+# 206 (append); the validator is persisted in a '<part>.meta' sidecar so it
+# survives process restarts, and is dropped once the download completes.
+
+class SizedTagged(Sized):
+    """A Sized response that also advertises an ETag (for validator storage)."""
+
+    def __init__(self, body, length, etag):
+        super().__init__(body, length)
+        self.etag = etag
+
+    def getheader(self, name, default=None):
+        if name == "ETag":
+            return self.etag
+        return super().getheader(name, default)
+
+
+def test_open_url_sends_if_range_with_validator(monkeypatch):
+    seen = {}
+
+    class Resp:
+        status = 206
+
+    def fake_urlopen(request, timeout=None):
+        seen["range"] = request.get_header("Range")
+        seen["if_range"] = request.get_header("If-range")   # urllib capitalizes keys
+        return Resp()
+
+    monkeypatch.setattr(files.urllib.request, "urlopen", fake_urlopen)
+    reader, resumed = files.open_url("http://x", offset=6, validator='"etag-1"')
+    assert seen["range"] == "bytes=6-"
+    assert seen["if_range"] == '"etag-1"'
+    assert resumed is True
+
+
+def test_open_url_no_if_range_without_validator(monkeypatch):
+    seen = {}
+
+    class Resp:
+        status = 206
+
+    def fake_urlopen(request, timeout=None):
+        seen["if_range"] = request.get_header("If-range")
+        return Resp()
+
+    monkeypatch.setattr(files.urllib.request, "urlopen", fake_urlopen)
+    files.open_url("http://x", offset=6)
+    assert seen["if_range"] is None                          # current behaviour
+
+
+def test_download_resume_sends_stored_validator(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"
+    (tmp_path / "v.mp4.part").write_bytes(data[:6])
+    (tmp_path / "v.mp4.part.meta").write_text('"etag-1"', encoding="utf-8")
+    seen = {}
+
+    def opener(url, offset=0, timeout=None, validator=None):
+        seen["offset"], seen["validator"] = offset, validator
+        return io.BytesIO(data[offset:]), True
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=0)
+    assert seen["offset"] == 6
+    assert seen["validator"] == '"etag-1"'                   # sidecar -> If-Range
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part.meta").exists()       # cleared on success
+
+
+def test_download_changed_resource_restarts_without_splicing(tmp_path, monkeypatch):
+    new = b"BRANDNEWDATA1234"                                # 16 bytes
+    (tmp_path / "v.mp4.part").write_bytes(b"OLDOLD")         # stale 6-byte partial
+    (tmp_path / "v.mp4.part.meta").write_text('"etag-old"', encoding="utf-8")
+
+    def opener(url, offset=0, timeout=None, validator=None):
+        return io.BytesIO(new), False                        # changed -> full 200
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    download_file(out=out, url="http://x", retries=0)
+    assert (tmp_path / "v.mp4").read_bytes() == new          # not b"OLDOLD" + new
+
+
+def test_download_truncated_stores_response_validator_for_resume(tmp_path, monkeypatch):
+    data = b"0123456789abcdef"                               # 16 bytes
+    calls = {"n": 0}
+
+    def opener(url, offset=0, timeout=None, validator=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SizedTagged(data[:6], length=16, etag='"etag-9"'), False
+        assert validator == '"etag-9"'                       # response ETag was stored
+        return SizedTagged(data[offset:], length=16 - offset, etag='"etag-9"'), True
+    monkeypatch.setattr(files, "open_url", opener)
+    out = str(tmp_path / "v.mp4")
+    n = download_file(out=out, url="http://x", retries=1)
+    assert calls["n"] == 2
+    assert n == len(data)
+    assert (tmp_path / "v.mp4").read_bytes() == data
+    assert not (tmp_path / "v.mp4.part.meta").exists()
+
+
 # -- byte progress (downloads) ------------------------------------------------
 
 def test_content_length_from_header_and_missing():
