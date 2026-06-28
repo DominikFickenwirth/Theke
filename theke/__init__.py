@@ -1332,10 +1332,22 @@ def _path_fields(title, year, series=None, season=None, episode=None) -> dict:
             "Season": season, "Episode": episode}
 
 
-def _render_template(template, fields) -> str:
+_RESERVED_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_component(value) -> str:
+    """Make a rendered template value safe as a path component on the target FS:
+    replace reserved characters (Windows + POSIX) with '-' and strip trailing dots
+    and spaces (illegal/awkward on Windows)."""
+    return _RESERVED_PATH_CHARS.sub("-", value).rstrip(". ")
+
+
+def _render_template(template, fields, sanitize=False) -> str:
     """Substitute {Placeholder} (case-insensitive) from `fields`. An optional
     ':N' zero-pads an integer to N digits ({Season:2} -> '03'). None/empty values
-    render empty (never 'None'); an unknown placeholder is an error (typo guard)."""
+    render empty (never 'None'); an unknown placeholder is an error (typo guard).
+    With sanitize, each substituted value is made path-safe (the template's own
+    separators are untouched)."""
     lookup = {k.casefold(): v for k, v in fields.items()}
 
     def repl(match):
@@ -1345,7 +1357,8 @@ def _render_template(template, fields) -> str:
         value = lookup[key]
         if value is None or value == "":
             return ""
-        return f"{int(value):0{int(width)}d}" if width else str(value)
+        rendered = f"{int(value):0{int(width)}d}" if width else str(value)
+        return _sanitize_component(rendered) if sanitize else rendered
 
     return re.sub(r"\{([A-Za-z_]+)(?::(\d+))?\}", repl, template)
 
@@ -1355,7 +1368,7 @@ def _library_path(cfg, fields, language, remux, primary) -> str:
     configured template, drop its extension and re-apply video_ext (or audio_ext
     for audio-only rows). Non-anchor picks get a '.<language>' infix so several
     language variants of one film coexist in the same folder."""
-    stem = os.path.splitext(_render_template(cfg.library_path, fields))[0]
+    stem = os.path.splitext(_render_template(cfg.library_path, fields, sanitize=True))[0]
     ext = cfg.audio_ext if remux == "A" else cfg.video_ext
     infix = "" if primary else f".{language}"
     return f"{stem}{infix}.{ext}"
