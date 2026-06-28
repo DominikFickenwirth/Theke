@@ -535,6 +535,7 @@ nach stderr, das Ergebnis (in `--json` ein Objekt) nach stdout.
 | `ffmpeg_path`      | Pfad/Name des ffmpeg-Binaries (Std. `"ffmpeg"`, nutzt den PATH).    |
 | `download_retries` | Wiederholungen bei Download-Fehlern (Std. `3`).                     |
 | `download_timeout` | Netzwerk-Timeout in Sekunden je Socket-Vorgang -- bricht hängende Downloads und API-Abfragen ab statt ewig zu warten (Std. `60`). Gilt für alle Downloads (fetch, Filmliste, HLS, Untertitel) und alle TMDB-Abfragen. |
+| `download_stall_timeout` | Durchsatz-Untergrenze in Sekunden (Std. `120`, `0` = aus): bricht einen direkten Download ab, der pro Zeitfenster weniger als 64 KiB liefert -- fängt einen Trickle, den der Socket-Timeout nie auslöst. |
 
 ### `file download`
 
