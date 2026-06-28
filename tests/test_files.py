@@ -517,6 +517,80 @@ def test_download_server_error_still_retries(tmp_path, monkeypatch):
     assert n == len(data)
 
 
+# -- download stall guard (item 8) --------------------------------------------
+# The socket timeout bounds a single read, not the whole transfer, so a server
+# that trickles a little data per interval never trips it and the download hangs
+# effectively forever. download_stall_timeout (config, default 120 s; 0 = off)
+# adds a throughput floor: a transfer delivering less than one CHUNK per window is
+# aborted into the retry loop. The clock is injected via time.monotonic.
+
+def test_download_stall_aborts_on_low_throughput(tmp_path, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(files.time, "monotonic", lambda: clock["t"])
+
+    class Trickle:
+        def __init__(self, n):
+            self.left = n
+
+        def read(self, size):
+            clock["t"] += 1.0                 # each read takes ~1 s
+            if self.left <= 0:
+                return b""
+            self.left -= 1
+            return b"x"                        # one byte per read -> far below floor
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(files, "open_url", lambda *a, **k: (Trickle(1000), False))
+    with pytest.raises(RuntimeError, match="stall"):
+        download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=0,
+                      stall_timeout=5)
+
+
+def test_download_stall_disabled_with_zero(tmp_path, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(files.time, "monotonic", lambda: clock["t"])
+
+    class Trickle:
+        def __init__(self, body):
+            self.buf = io.BytesIO(body)
+
+        def read(self, size):
+            clock["t"] += 100.0               # huge gaps, but the guard is off
+            return self.buf.read(1)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(files, "open_url", lambda *a, **k: (Trickle(b"abc"), False))
+    n = download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=0,
+                      stall_timeout=0)
+    assert n == 3                              # 0 disables the floor -> completes
+
+
+def test_download_stall_allows_steady_throughput(tmp_path, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(files.time, "monotonic", lambda: clock["t"])
+    data = b"y" * (files.CHUNK + 100)
+
+    class Clocked:
+        def __init__(self, body):
+            self.buf = io.BytesIO(body)
+
+        def read(self, size):
+            clock["t"] += 1.0                 # 1 s per read, window is 5 -> never low
+            return self.buf.read(size)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(files, "open_url", lambda *a, **k: (Clocked(data), False))
+    n = download_file(out=str(tmp_path / "v.mp4"), url="http://x", retries=0,
+                      stall_timeout=5)
+    assert n == len(data)
+
+
 # -- byte progress (downloads) ------------------------------------------------
 
 def test_content_length_from_header_and_missing():
@@ -883,6 +957,22 @@ def test_cli_file_download_timeout_defaults_to_config(tmp_path, monkeypatch):
                "--out", str(tmp_path / "v.mp4")])
     assert rc == 0
     assert seen["timeout"] == 60         # Config().download_timeout
+
+
+def test_cli_file_download_passes_stall_timeout_from_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)          # no theke.json -> config defaults
+    seen = {}
+
+    def fake_download(url, out, retries, timeout=None, stall_timeout=0):
+        seen["stall"] = stall_timeout
+        with open(out, "wb") as fh:
+            fh.write(b"x")
+        return 1
+    monkeypatch.setattr(theke, "download_file", fake_download)
+    rc = main(["file", "download", "--url", "http://x/v.mp4",
+               "--out", str(tmp_path / "v.mp4")])
+    assert rc == 0
+    assert seen["stall"] == 120          # Config().download_stall_timeout
 
 
 # -- remux (ffmpeg stream copy) -----------------------------------------------

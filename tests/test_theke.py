@@ -201,6 +201,12 @@ def test_config_download_timeout_default(tmp_path, monkeypatch):
     assert cfg.download_timeout == 60
 
 
+def test_config_download_stall_timeout_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.download_stall_timeout == 120
+
+
 def test_config_download_timeout_from_file(tmp_path):
     path = tmp_path / "t.json"
     write_config(path, {"download_timeout": 15})
