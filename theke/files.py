@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -153,19 +154,46 @@ def _read_validator(meta):
         return None
 
 
+_TRANSIENT_HTTP = {408, 429}   # client errors still worth retrying
+
+
+def _is_fatal_http(exc) -> bool:
+    """True for an HTTP status a retry cannot fix: a 4xx other than the transient
+    ones and 416 (which is handled by resetting the '.part')."""
+    return (isinstance(exc, urllib.error.HTTPError)
+            and 400 <= exc.code < 500
+            and exc.code not in _TRANSIENT_HTTP and exc.code != 416)
+
+
 def download_file(url, out, retries, timeout=None) -> int:
     """Stream url to out, resuming a leftover '.part' via Range when possible.
-    On error retry up to `retries` times (each retry resumes from the current
-    '.part' size). `timeout` (seconds) bounds each socket read, so a dropped
-    connection fails into the retry loop. Return the byte count. Seam: open_url."""
+    On a transient error retry up to `retries` times (each retry resumes from the
+    current '.part' size); a fatal HTTP status (404/403/410/...) fails fast and a
+    416 discards the stale '.part' and restarts. `timeout` (seconds) bounds each
+    socket read. Return the byte count. Seam: open_url."""
     log.info("downloading %s", url.rsplit("/", 1)[-1])
     for attempt in range(retries + 1):
         try:
             return _download_once(url, out, timeout)
         except Exception as exc:
+            _classify_download_error(exc, out)   # fatal -> reraise; 416 -> reset .part
             if attempt == retries:
                 raise
             log.info("download error (%s); retry %d/%d", exc, attempt + 1, retries)
+
+
+def _classify_download_error(exc, out) -> None:
+    """Triage a download failure: re-raise a fatal HTTP status so the retry loop
+    does not spin, or discard a stale oversized '.part' on 416 so the next attempt
+    restarts from scratch. Anything else is left to retry."""
+    if not isinstance(exc, urllib.error.HTTPError):
+        return
+    if exc.code == 416:
+        _discard(out + ".part")
+        _discard(out + ".part.meta")
+        log.info("range unsatisfiable; discarded stale .part, restarting")
+    elif _is_fatal_http(exc):
+        raise exc
 
 
 def _download_once(url, out, timeout=None) -> int:
@@ -442,7 +470,7 @@ def _download_segments(out, init, segments, retries, timeout=None) -> int:
                 progress.update(done)
             break
         except Exception as exc:
-            if attempt == retries:
+            if _is_fatal_http(exc) or attempt == retries:   # permanent -> stop spinning
                 raise
             log.info("segment error (%s); retry %d/%d", exc, attempt + 1, retries)
     with open(out, "wb") as dst:
