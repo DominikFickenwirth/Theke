@@ -508,6 +508,12 @@ Eintrags gelöscht. Nur `approved`-Zeilen sind berechtigt; eine fehlgeschlagene
 Zeile wird `failed` (mit Fehlertext) markiert und bricht den Lauf nicht ab --
 zum Wiederholen erneut `approve` (`--force`). Gibt `downloaded`/`failed` aus.
 
+Nach erfolgreichem Move wird der Film in der Bibliothek vermerkt: trägt die Zeile
+eine `tmdb_id`, wird der zugehörige `library`-Eintrag auf `L` (in Bibliothek)
+gesetzt -- ein offener Wunsch (`W`) kippt damit auf `L`, sonst wird ein neuer
+`L`-Eintrag angelegt (siehe `theke library`). So lädt ein erneutes `theke update`
+einen bereits geholten Wunsch nicht noch einmal.
+
 | Option          | Wirkung                                          |
 | --------------- | ------------------------------------------------ |
 | `ID ...`        | Herunterzuladende (genehmigte) Eintrags-IDs.     |
@@ -621,4 +627,84 @@ vorhandenes Ziel ist ein Fehler, außer mit `--force` (dann wird es ersetzt).
 
 ```powershell
 theke file move --in build/film.mp4 --out "M:/Filme/Film (2020)/Film (2020).mp4"
+```
+
+## `theke library`
+
+Stufe 9: verwaltet die **Wunschliste** -- TMDB-Film-IDs, die automatisch
+beschafft werden sollen. Die Tabelle `library` ist Wunschliste und Bibliotheks-
+Akte in einem (Schlüssel `tmdb_id`); die Spalte `status` (ein Zeichen) ist `W`
+(Wunsch), `M` (fehlende Folge, später) oder `L` (in Bibliothek). Reine
+DB-Operation; nichts hier berührt das Dateisystem. Ohne Aktion läuft der Default
+`list`, d. h. `theke library` entspricht `theke library list`.
+
+Ein Wunsch verlässt `W` erst, wenn sein Download tatsächlich fertig ist: dann
+vermerkt `theke queue download` ihn als `L`. `theke update` arbeitet nur offene
+Wünsche (`W`) ab.
+
+### `library add`
+
+Fügt TMDB-Film-IDs als Wünsche (`W`) hinzu. **Idempotent**: eine bereits
+vorhandene ID bleibt unangetastet (zählt als `skipped`, wird nie von `L` zurück
+auf `W` gesetzt). Ist ein TMDB-Key konfiguriert, wird der Filmtitel als Label
+erfasst (nur Anzeige; ein fehlgeschlagener Abruf lässt das Label leer). Gibt
+`added`/`skipped` aus.
+
+| Option            | Wirkung                                          |
+| ----------------- | ------------------------------------------------ |
+| `-t`, `--tmdb ID` | TMDB-Film-ID als Wunsch (wiederholbar, Pflicht). |
+
+```powershell
+theke --db build/theke.db library add --tmdb 1474601
+```
+
+### `library list`
+
+Listet Einträge (älteste Erstellung zuerst), optional nach Zustand gefiltert.
+`--json` gibt die Zeilen zurück, sonst eine Tabelle auf stdout.
+
+| Option                 | Wirkung                                          |
+| ---------------------- | ------------------------------------------------ |
+| `-s`, `--status STATE` | Nur diesen Zustand: `wish`, `missing`, `library`. |
+
+```powershell
+theke --db build/theke.db library list
+theke --db build/theke.db --json library list --status wish
+```
+
+### `library remove`
+
+Löscht Einträge über genau einen Selektor: angegebene `tmdb_id`s oder `--all`.
+Gibt `removed = N` aus.
+
+| Option            | Wirkung                                     |
+| ----------------- | ------------------------------------------- |
+| `-t`, `--tmdb ID` | Zu entfernende `tmdb_id` (wiederholbar).    |
+| `-a`, `--all`     | Alle Einträge entfernen.                    |
+
+```powershell
+theke --db build/theke.db library remove --tmdb 1474601
+theke --db build/theke.db library remove --all
+```
+
+## `theke update`
+
+Stufe 9: **ein unbeaufsichtigter Durchlauf** der gesamten Pipeline für die
+Wunschliste. Der Reihe nach: `fetch` (Filmliste aktualisieren), `enrich`
+(Metadaten extrahieren), dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen
+und passende `mediathek`-Zeilen taggen) und `queue add` (deduplizierte
+Download-Menge einreihen). Ist `queue_auto_approve` gesetzt, werden die
+genehmigten Einträge anschließend gleich heruntergeladen (jeder fertige Wunsch
+wird dabei als `L` vermerkt); sonst endet der Lauf am Genehmigungs-Tor mit
+`proposed`-Einträgen. Ein einzelner fehlschlagender Wunsch (z. B. ein TMDB-
+Fehler) bricht den Durchlauf nicht ab, sondern zählt nur in `failed`. Fortschritt
+geht nach stderr; das Ergebnis fasst `fetch`/`enriched`/`wishes`/`queued`/
+`skipped`/`deduplicated`/`failed`/`downloaded` zusammen.
+
+Erfordert einen TMDB-Key (`tmdb_api_key`) für `match` und `queue add`. Der Befehl
+hat keine eigenen Optionen.
+
+```powershell
+theke --db build/theke.db update
+theke --db build/theke.db --json update
 ```
