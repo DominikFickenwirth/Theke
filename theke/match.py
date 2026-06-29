@@ -197,6 +197,30 @@ def tmdb_search(cfg, title) -> list:
     return out
 
 
+def tmdb_list(cfg, list_id) -> list:
+    """Fetch a TMDB list's entries as {tmdb_id, title, year, media_type}, reading
+    the v3 /list/{id} endpoint. A configured read access token authenticates via a
+    Bearer header (covers private lists); otherwise the api_key query param is used
+    (public lists only). Paginates defensively when the response is paged."""
+    headers = {"Authorization": f"Bearer {cfg.tmdb_read_token}"} if cfg.tmdb_read_token else None
+    items, page, pages = [], 1, 1
+    while page <= pages:
+        params = {"language": cfg.tmdb_language, "page": page}
+        if not cfg.tmdb_read_token:
+            params["api_key"] = cfg.tmdb_api_key
+        url = f"{cfg.tmdb_api_url}/list/{list_id}?{urlencode(params)}"
+        data = json.loads(core.http_get(url, cfg.download_timeout, headers=headers).decode("utf-8"))
+        for r in data.get("items") or data.get("results") or []:
+            rel = r.get("release_date") or r.get("first_air_date") or ""
+            year = int(rel[:4]) if rel[:4].isdigit() else None
+            items.append({"tmdb_id": str(r["id"]),
+                          "title": r.get("title") or r.get("name") or "",
+                          "year": year, "media_type": r.get("media_type") or "movie"})
+        pages = data.get("total_pages") or 1
+        page += 1
+    return items
+
+
 def pick_by_year(candidates, year, tolerance):
     """Pick the best search candidate for a wanted year: within tolerance, the
     smallest year distance, ties keeping TMDB's popularity order. With no wanted

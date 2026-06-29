@@ -28,7 +28,8 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
                         db_get_meta, db_set_meta)
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
-                         arte_anchor_ids, find_arte_links, tmdb_search, pick_by_year)
+                         arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
+                         pick_by_year)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import subtitle
@@ -1448,18 +1449,23 @@ def _resolve_title(cfg, args) -> tuple:
 
 
 def _library_add(conn, cfg, args) -> dict:
-    """Add wishes as status 'W'. Each wish is resolved to a tmdb_id: given
-    directly via --tmdb, or by a title/year lookup via --title. Idempotent: an
-    existing tmdb_id is left untouched (counted as skipped, never reset from 'L'
-    back to 'W')."""
-    if args.title and args.tmdb:
-        raise ValueError("give --tmdb or --title, not both")
+    """Add wishes as status 'W'. Each wish resolves to a tmdb_id: given directly
+    via --tmdb, by a title/year lookup via --title, or in bulk from a TMDB list via
+    --tmdb-list (movies only; series skipped). Idempotent: an existing tmdb_id is
+    left untouched (counted as skipped, never reset from 'L' back to 'W')."""
+    lists = getattr(args, "tmdb_list", None)
+    if sum(map(bool, (args.title, args.tmdb, lists))) > 1:
+        raise ValueError("give only one of --tmdb, --title or --tmdb-list")
+    if lists:
+        parts = [_add_list_wishes(conn, cfg, lid) for lid in lists]
+        return {k: sum(p[k] for p in parts)
+                for k in ("added", "skipped", "series_skipped")}
     if args.title:
         wishes = [_resolve_title(cfg, args)]
     elif args.tmdb:
         wishes = [(str(t), *_wish_meta(cfg, t)) for t in args.tmdb]
     else:
-        raise ValueError("library add needs --tmdb or --title")
+        raise ValueError("library add needs --tmdb, --title or --tmdb-list")
     return _insert_wishes(conn, wishes)
 
 
@@ -1482,6 +1488,23 @@ def _insert_wishes(conn, wishes) -> dict:
         conn.execute("ROLLBACK")
         raise
     return totals
+
+
+def _add_list_wishes(conn, cfg, list_id) -> dict:
+    """Import a TMDB list's movies as wishes (status 'W', idempotent). Series are
+    skipped with a stderr warning (the library is movies-only until phase 13). Titles
+    and years come straight from the list payload, so no per-item TMDB call. Shared by
+    `library add --tmdb-list` and the `update` list sync. Needs a TMDB key or read
+    token (the latter also reads private lists)."""
+    if not cfg.tmdb_api_key and not cfg.tmdb_read_token:
+        raise ConfigError("TMDB list import needs a tmdb_api_key or tmdb_read_token")
+    items = tmdb_list(cfg, list_id)
+    movies = [(it["tmdb_id"], it["title"], it["year"])
+              for it in items if it["media_type"] == "movie"]
+    series = len(items) - len(movies)
+    if series:
+        log.warning("list %s: %d series skipped (movies only)", list_id, series)
+    return {**_insert_wishes(conn, movies), "series_skipped": series}
 
 
 def _library_list(conn, args) -> dict:
@@ -1729,6 +1752,12 @@ def cmd_update(conn, cfg, args: argparse.Namespace) -> dict:
     auto-approved). Returns one aggregated summary."""
     fetch = cmd_fetch(conn, cfg, _ns(force=False))
     enriched = _enrich_run(conn, cfg, _ns(force=False))
+    list_added = 0
+    for lid in cfg.tmdb_lists:
+        try:
+            list_added += _add_list_wishes(conn, cfg, lid)["added"]
+        except Exception as exc:
+            log.warning("update list %s failed: %s", lid, exc)
     status = QUEUE_STATUS["approved"] if cfg.queue_auto_approve else QUEUE_STATUS["proposed"]
     totals = {"queued": 0, "skipped": 0, "deduplicated": 0}
     wishes = [r["tmdb_id"] for r in
@@ -1747,8 +1776,8 @@ def cmd_update(conn, cfg, args: argparse.Namespace) -> dict:
     if cfg.queue_auto_approve:
         downloaded = _queue_download(conn, cfg, _ns(all=True, ids=[], force=False))["downloaded"]
     return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
-            "wishes": len(wishes), "failed": failed, "downloaded": downloaded,
-            **totals}
+            "list_added": list_added, "wishes": len(wishes), "failed": failed,
+            "downloaded": downloaded, **totals}
 
 
 # -- cli ----------------------------------------------------------------------
@@ -1949,11 +1978,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     libp = sub.add_parser("library", help="manage the wishlist (TMDB ids to acquire)", description="Manage the wishlist: TMDB movie ids to acquire automatically. Entries are status 'W' (wish) until a finished download records them as 'L' (in library). DB-only: nothing here touches the filesystem.")
     lsub = libp.add_subparsers(dest="library_cmd", required=True, metavar="action")
-    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id or title",  description="Add movie wishes (status 'W'): give TMDB ids directly via --tmdb, or resolve a title via --title (with a tolerant --year). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured.")
+    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id, title or list",  description="Add movie wishes (status 'W'): give TMDB ids directly via --tmdb, resolve a title via --title (with a tolerant --year), or import a whole TMDB list via --tmdb-list (movies only -- series are skipped with a warning). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured. A list import needs a tmdb_api_key (public lists) or tmdb_read_token (also private lists).")
     limp = lsub.add_parser("import", help="bulk-add wishes from a txt/csv file", description="Bulk-add movie wishes from a file. Each entry resolves to a TMDB id -- given directly or searched from a title/year -- and entries that do not resolve are reported in an error log rather than aborting the import; the rest are added (status 'W', idempotent). Format is taken from the extension (.txt/.csv), overridable with --format. txt: one 'Title (Year)' or tmdb_id per line (see --mode). csv: a header row of 'tmdb_id', 'title', 'year' columns (any may be missing; 'title'/'year' both or neither; 'dummy' columns ignored, other names rejected). Needs a TMDB key.")
     llst = lsub.add_parser("list",   help="list library entries (default)", description="List library entries, oldest creation first. Filter by lifecycle state with --status.")
     lrem = lsub.add_parser("remove", help="remove library entries",         description="Delete library entries by exactly one selector: given tmdb_ids or --all.")
     ladd.add_argument("-t", "--tmdb",            action="append", metavar="ID",    help="TMDB movie id to wish for (repeatable)")
+    ladd.add_argument(      "--tmdb-list",       action="append", metavar="ID", dest="tmdb_list", help="TMDB list id to import (movies only; series skipped; repeatable)")
     ladd.add_argument(      "--title",           metavar="TITLE",                  help="movie title to resolve to a TMDB id via search (instead of --tmdb)")
     ladd.add_argument("-y", "--year",            type=int, metavar="YEAR",         help="release year to disambiguate --title (may be off by --year-tolerance)")
     ladd.add_argument(      "--year-tolerance",  type=int, metavar="N", dest="year_tolerance", help="accepted year difference for --title (default: config match_year_tolerance)")
@@ -1965,7 +1995,7 @@ def build_parser() -> argparse.ArgumentParser:
     lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
     lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")
 
-    sub.add_parser("update", help="run the wishlist pipeline end to end", description="One unattended pass: fetch + enrich the mirror, then for every open wish ('W') match the TMDB id and stage the deduplicated download set. With queue_auto_approve set, the approved entries are downloaded straight away (recording each finished wish as 'L'); otherwise the run stops at the approval gate. A failing wish does not abort the pass. Progress is printed to stderr.")
+    sub.add_parser("update", help="run the wishlist pipeline end to end", description="One unattended pass: fetch + enrich the mirror, import any configured tmdb_lists into the library (movies only, additive), then for every open wish ('W') match the TMDB id and stage the deduplicated download set. With queue_auto_approve set, the approved entries are downloaded straight away (recording each finished wish as 'L'); otherwise the run stops at the approval gate. A failing wish or list does not abort the pass. Progress is printed to stderr.")
 
     _set_default_action(parser, "enrich",  csub, "run")
     _set_default_action(parser, "match",   msub, "run")
