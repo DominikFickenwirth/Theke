@@ -5,6 +5,7 @@ needed). Sections: config / DB / CLI.
 """
 
 import argparse
+import csv
 import dataclasses
 import glob
 import hashlib
@@ -1542,6 +1543,117 @@ def _library_record(conn, tmdb_id, path, year):
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+# -- library import (phase 9: bulk wishes from a txt/csv file) ----------------
+# Read a wishlist file into the library, best-effort: every line resolves to a
+# tmdb_id (given directly or via a title/year search), and entries that do not
+# resolve are collected into an error log instead of aborting the import. The
+# parsers are pure (text in, entries out); only resolution touches TMDB. An entry
+# is {"kind": "id"|"title"|"error", ...}; an "error" entry is a parse-level row
+# problem (bad year, empty row) that never reaches TMDB.
+
+_IMPORT_FORMATS = ("txt", "csv")
+_YEAR_SUFFIX = re.compile(r"\s*\((\d{4})\)\s*$")   # trailing "(YYYY)"
+_CSV_COLS = ("tmdb_id", "title", "year", "dummy")  # "dummy" is ignored
+
+
+def _import_detect_format(path, override):
+    """Pick the file format: an explicit override wins, else the extension
+    (.txt/.csv, case-insensitive). Raises ValueError when neither decides."""
+    if override:
+        return override
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    if ext in _IMPORT_FORMATS:
+        return ext
+    raise ValueError(f"cannot infer format from {path!r}; use --format")
+
+
+def _parse_title(text):
+    """Split "Title (YYYY)" into (title, year); a missing or non-4-digit suffix
+    yields year None and the whole (stripped) text as the title."""
+    m = _YEAR_SUFFIX.search(text)
+    if m:
+        return text[:m.start()].strip(), int(m.group(1))
+    return text.strip(), None
+
+
+def _txt_entry(raw, mode):
+    """Classify one non-blank txt line into an id/title entry. `auto` reads an
+    all-digit line as an id and anything else as a title; `id`/`title` force it."""
+    if mode == "id" or (mode == "auto" and raw.isdigit()):
+        return {"kind": "id", "id": raw}
+    title, year = _parse_title(raw)
+    return {"kind": "title", "title": title, "year": year}
+
+
+def _parse_txt(text, mode):
+    """Parse a txt wishlist into (lineno, raw, entry) tuples, skipping blank
+    lines. Line numbers track the source file (blanks counted)."""
+    out = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        raw = line.strip()
+        if raw:
+            out.append((lineno, raw, _txt_entry(raw, mode)))
+    return out
+
+
+def _csv_header(cols):
+    """Validate a csv header and return the index map of the recognized data
+    columns. Unknown names, title/year not paired, or no tmdb_id/title all raise
+    (structural errors that abort the import)."""
+    cols = [c.strip() for c in cols]
+    unknown = [c for c in cols if c not in _CSV_COLS]
+    if unknown:
+        raise ValueError(f"unknown csv column(s): {', '.join(unknown)} "
+                         f"(allowed: {', '.join(_CSV_COLS)})")
+    idx = {name: cols.index(name) for name in ("tmdb_id", "title", "year")
+           if name in cols}
+    if ("title" in idx) != ("year" in idx):
+        raise ValueError("csv needs both 'title' and 'year' columns or neither")
+    if "tmdb_id" not in idx and "title" not in idx:
+        raise ValueError("csv needs a 'tmdb_id' or 'title' column")
+    return idx
+
+
+def _cell(row, idx, name):
+    """The stripped value of column `name` in `row`, or '' when absent/short."""
+    pos = idx.get(name)
+    return row[pos].strip() if pos is not None and pos < len(row) else ""
+
+
+def _csv_entry(row, idx):
+    """Build one entry from a csv data row: a filled tmdb_id wins, else a filled
+    title (+ optional year). A bad year or a row with neither is an error entry."""
+    tmdb_id = _cell(row, idx, "tmdb_id")
+    if tmdb_id:
+        return {"kind": "id", "id": tmdb_id}
+    title = _cell(row, idx, "title")
+    if not title:
+        return {"kind": "error", "reason": "row has neither tmdb_id nor title"}
+    year_cell = _cell(row, idx, "year")
+    if not year_cell:
+        return {"kind": "title", "title": title, "year": None}
+    try:
+        return {"kind": "title", "title": title, "year": int(year_cell)}
+    except ValueError:
+        return {"kind": "error", "reason": f"invalid year {year_cell!r}"}
+
+
+def _parse_csv(text):
+    """Parse a csv wishlist into (lineno, raw, entry) tuples. The header is
+    validated (structural errors raise); per-row data problems become 'error'
+    entries. Fully blank lines are skipped; line numbers track the source file."""
+    lines = text.splitlines()
+    rows = list(csv.reader(lines))
+    if not rows:
+        return []
+    idx = _csv_header(rows[0])
+    out = []
+    for i in range(1, len(rows)):   # rows[0] is the header
+        if rows[i]:                 # a fully blank line yields []; skip it
+            out.append((i + 1, lines[i], _csv_entry(rows[i], idx)))
+    return out
 
 
 # -- update (phase 9: the wishlist automation orchestrator) -------------------
