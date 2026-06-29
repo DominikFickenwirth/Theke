@@ -1424,18 +1424,25 @@ def _wish_meta(cfg, tmdb_id) -> tuple:
     return meta["title"] or "", meta["year"]
 
 
+def _search_title(cfg, title, year, tol) -> tuple:
+    """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
+    year tolerant by `tol` years (smallest distance wins, ties keep popularity).
+    Raises ValueError when nothing qualifies. The pure-input core shared by
+    `library add --title` and `library import`."""
+    cand = pick_by_year(tmdb_search(cfg, title), year, tol)
+    if cand is None:
+        raise ValueError(f"no TMDB movie for {title!r} (year {year}, +-{tol})")
+    return cand["tmdb_id"], cand["title"], cand["year"]
+
+
 def _resolve_title(cfg, args) -> tuple:
-    """Resolve --title (+ tolerant --year) to one (tmdb_id, title, year) via TMDB
-    search. The year may be off by --year-tolerance years (default: config
-    match_year_tolerance, as in match). Raises when unresolvable."""
+    """Resolve --title (+ tolerant --year) to one (tmdb_id, title, year). The year
+    may be off by --year-tolerance years (default: config match_year_tolerance, as
+    in match). Raises when unresolvable."""
     if not cfg.tmdb_api_key:
         raise ConfigError("--title lookup needs a TMDB API key (set tmdb_api_key)")
     tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
-    cand = pick_by_year(tmdb_search(cfg, args.title), args.year, tol)
-    if cand is None:
-        raise ValueError(f"no TMDB movie for {args.title!r} "
-                         f"(year {args.year}, +-{tol})")
-    return cand["tmdb_id"], cand["title"], cand["year"]
+    return _search_title(cfg, args.title, args.year, tol)
 
 
 def _library_add(conn, cfg, args) -> dict:
