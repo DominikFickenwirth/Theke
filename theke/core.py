@@ -198,6 +198,11 @@ MIGRATIONS: list[tuple[str, ...]] = [
         "ALTER TABLE library ADD COLUMN year INTEGER",
         "ALTER TABLE library ADD COLUMN path TEXT",
     ),
+    (  # phase 9: carry the release year on the queue row (resolved at add time,
+       # like path) so a finished download records it in the library even without
+       # a prior wish.
+        "ALTER TABLE queue ADD COLUMN year INTEGER",
+    ),
 ]
 
 

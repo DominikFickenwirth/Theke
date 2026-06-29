@@ -798,7 +798,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
 QUEUE_COLS = {
     "id", "status", "mediathek_id", "tmdb_id", "language",
     "resolution", "remux", "error", "created_at", "updated_at",
-    "url", "url_subtitle", "path",
+    "url", "url_subtitle", "path", "year",
 }
 
 

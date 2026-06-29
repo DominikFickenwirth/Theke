@@ -1052,7 +1052,8 @@ def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
         src = rows[p["mediathek_id"]]
         row = _queue_row(status, p["mediathek_id"], tmdb_id, p["language"],
                          p["resolution"], p["remux"], src,
-                         _library_path(cfg, fields, p["language"], p["remux"], i == 0))
+                         _library_path(cfg, fields, p["language"], p["remux"], i == 0),
+                         meta["year"])
         _queue_insert(conn, row, overrides, totals)
 
 
@@ -1076,7 +1077,7 @@ def _queue_add_mediathek(conn, cfg, mediathek_id, status, overrides, totals):
     fields = _path_fields(title, year, r["series_name"], r["season"], r["episode"])
     resolution = resolution_of(r)
     row = _queue_row(status, mediathek_id, tmdb_id, language, resolution,
-                     "AV", r, _library_path(cfg, fields, language, "AV", True))
+                     "AV", r, _library_path(cfg, fields, language, "AV", True), year)
     _queue_insert(conn, row, overrides, totals)
 
 
@@ -1090,12 +1091,13 @@ def _media_url(row, resolution) -> str:
 
 
 def _queue_row(status, mediathek_id, tmdb_id, language, resolution,
-               remux, src, path) -> dict:
+               remux, src, path, year) -> dict:
     """Assemble one queue column dict from a pick + its mediathek source row."""
     return {"status": status, "mediathek_id": mediathek_id, "tmdb_id": tmdb_id,
             "language": language, "resolution": resolution,
             "remux": remux, "url": _media_url(src, resolution),
-            "url_subtitle": src.get("url_subtitle") or "", "path": path}
+            "url_subtitle": src.get("url_subtitle") or "", "path": path,
+            "year": year}
 
 
 def _path_fields(title, year, series=None, season=None, episode=None) -> dict:
@@ -1159,7 +1161,7 @@ def _queue_insert(conn, row, overrides, totals):
         return
     ts = _now()
     cols = ["status", "mediathek_id", "tmdb_id", "language", "resolution",
-            "remux", "url", "url_subtitle", "path", "created_at", "updated_at"]
+            "remux", "url", "url_subtitle", "path", "year", "created_at", "updated_at"]
     row = {**row, "created_at": ts, "updated_at": ts}
     conn.execute(f"INSERT INTO queue ({', '.join(cols)}) VALUES "
                  f"({', '.join(':' + c for c in cols)})", row)
@@ -1313,7 +1315,7 @@ def _download_entry(conn, cfg, row, force, totals):
                 log.warning("queue %s subtitle skipped: %s", row["id"], exc)
         _cleanup(base)
         _queue_status(conn, row["id"], QUEUE_STATUS["done"], None)
-        _library_record(conn, row["tmdb_id"], os.path.dirname(row["path"]))
+        _library_record(conn, row["tmdb_id"], os.path.dirname(row["path"]), row["year"])
         totals["downloaded"] += 1
         log.info("queue %s done -> %s", row["id"], row["path"])
     except Exception as exc:
@@ -1513,21 +1515,23 @@ def _print_library(rows):
         print(f'  [{r["status"]}] {r["tmdb_id"]:>8}  {r["title"]!r}')
 
 
-def _library_record(conn, tmdb_id, path):
+def _library_record(conn, tmdb_id, path, year):
     """Record a downloaded film in the library as 'L': flip an existing wish or
-    insert a fresh row, recording the library folder it landed in. Own transaction
-    (like _queue_status), so it stays outside the long filesystem work. No-op for a
-    queue row without a tmdb_id."""
+    insert a fresh row, recording the library folder it landed in and its release
+    year (carried on the queue row). On a flip a year already captured at wish time
+    is kept (COALESCE). Own transaction (like _queue_status), so it stays outside
+    the long filesystem work. No-op for a queue row without a tmdb_id."""
     if not tmdb_id:
         return
     ts = _now()
     conn.execute("BEGIN")
     try:
         conn.execute(
-            "INSERT INTO library (tmdb_id, status, title, path, created_at, updated_at) "
-            "VALUES (?, 'L', '', ?, ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
-            "status='L', path=excluded.path, updated_at=excluded.updated_at",
-            (tmdb_id, path, ts, ts))
+            "INSERT INTO library (tmdb_id, status, title, path, year, created_at, updated_at) "
+            "VALUES (?, 'L', '', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
+            "status='L', path=excluded.path, "
+            "year=COALESCE(library.year, excluded.year), updated_at=excluded.updated_at",
+            (tmdb_id, path, year, ts, ts))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
