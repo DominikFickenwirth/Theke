@@ -1313,7 +1313,7 @@ def _download_entry(conn, cfg, row, force, totals):
                 log.warning("queue %s subtitle skipped: %s", row["id"], exc)
         _cleanup(base)
         _queue_status(conn, row["id"], QUEUE_STATUS["done"], None)
-        _library_record(conn, row["tmdb_id"])
+        _library_record(conn, row["tmdb_id"], os.path.dirname(row["path"]))
         totals["downloaded"] += 1
         log.info("queue %s done -> %s", row["id"], row["path"])
     except Exception as exc:
@@ -1411,20 +1411,21 @@ def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
         case _: raise DbError(f"unhandled library action: {args.library_cmd}")
 
 
-def _wish_title(cfg, tmdb_id) -> str:
-    """Best-effort movie title for the wish label; '' with no key or on failure
-    (the label is convenience only, never load-bearing)."""
+def _wish_meta(cfg, tmdb_id) -> tuple:
+    """Best-effort (title, year) for the wish label; ('', None) with no key or on
+    failure (the label/year are convenience only, never load-bearing)."""
     if not cfg.tmdb_api_key:
-        return ""
+        return "", None
     try:
-        return tmdb_movie(cfg, tmdb_id)["title"] or ""
+        meta = tmdb_movie(cfg, tmdb_id)
+        return meta["title"] or "", meta["year"]
     except Exception as exc:
         log.warning("library add %s: title lookup failed: %s", tmdb_id, exc)
-        return ""
+        return "", None
 
 
 def _resolve_title(cfg, args) -> tuple:
-    """Resolve --title (+ tolerant --year) to one (tmdb_id, title) via TMDB
+    """Resolve --title (+ tolerant --year) to one (tmdb_id, title, year) via TMDB
     search. The year may be off by --year-tolerance years (default: config
     match_year_tolerance, as in match). Raises when unresolvable."""
     if not cfg.tmdb_api_key:
@@ -1434,7 +1435,7 @@ def _resolve_title(cfg, args) -> tuple:
     if cand is None:
         raise ValueError(f"no TMDB movie for {args.title!r} "
                          f"(year {args.year}, +-{tol})")
-    return cand["tmdb_id"], cand["title"]
+    return cand["tmdb_id"], cand["title"], cand["year"]
 
 
 def _library_add(conn, cfg, args) -> dict:
@@ -1447,18 +1448,18 @@ def _library_add(conn, cfg, args) -> dict:
     if args.title:
         wishes = [_resolve_title(cfg, args)]
     elif args.tmdb:
-        wishes = [(str(t), _wish_title(cfg, t)) for t in args.tmdb]
+        wishes = [(str(t), *_wish_meta(cfg, t)) for t in args.tmdb]
     else:
         raise ValueError("library add needs --tmdb or --title")
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
-        for tid, title in wishes:
+        for tid, title, year in wishes:
             ts = _now()
             cur = conn.execute(
-                "INSERT INTO library (tmdb_id, status, title, created_at, updated_at) "
-                "VALUES (?, 'W', ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
-                (tid, title, ts, ts))
+                "INSERT INTO library (tmdb_id, status, title, year, created_at, updated_at) "
+                "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
+                (tid, title, year, ts, ts))
             totals["added" if cur.rowcount else "skipped"] += 1
         conn.execute("COMMIT")
     except BaseException:
@@ -1512,19 +1513,21 @@ def _print_library(rows):
         print(f'  [{r["status"]}] {r["tmdb_id"]:>8}  {r["title"]!r}')
 
 
-def _library_record(conn, tmdb_id):
+def _library_record(conn, tmdb_id, path):
     """Record a downloaded film in the library as 'L': flip an existing wish or
-    insert a fresh row. Own transaction (like _queue_status), so it stays outside
-    the long filesystem work. No-op for a queue row without a tmdb_id."""
+    insert a fresh row, recording the library folder it landed in. Own transaction
+    (like _queue_status), so it stays outside the long filesystem work. No-op for a
+    queue row without a tmdb_id."""
     if not tmdb_id:
         return
     ts = _now()
     conn.execute("BEGIN")
     try:
         conn.execute(
-            "INSERT INTO library (tmdb_id, status, title, created_at, updated_at) "
-            "VALUES (?, 'L', '', ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
-            "status='L', updated_at=excluded.updated_at", (tmdb_id, ts, ts))
+            "INSERT INTO library (tmdb_id, status, title, path, created_at, updated_at) "
+            "VALUES (?, 'L', '', ?, ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
+            "status='L', path=excluded.path, updated_at=excluded.updated_at",
+            (tmdb_id, path, ts, ts))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")

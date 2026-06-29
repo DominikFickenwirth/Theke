@@ -193,6 +193,11 @@ MIGRATIONS: list[tuple[str, ...]] = [
             updated_at TEXT NOT NULL
         )""",
     ),
+    (  # phase 9: capture the release year (from TMDB at wish time) and the
+       # library folder (the directory a finished download landed in).
+        "ALTER TABLE library ADD COLUMN year INTEGER",
+        "ALTER TABLE library ADD COLUMN path TEXT",
+    ),
 ]
 
 
