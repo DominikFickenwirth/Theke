@@ -802,6 +802,32 @@ def test_library_cli_add_by_title(tmp_path, monkeypatch, capsys):
         conn.close()
 
 
+def test_import_cli_txt(tmp_path, monkeypatch, capsys):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100")
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY"}),
+                       encoding="utf-8")
+    assert main(["--json", "--config", str(cfgpath),
+                 "library", "import", path]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"added": 1, "skipped": 0, "failed": 0, "errors": []}
+
+
+def test_import_cli_format_override(tmp_path, monkeypatch, capsys):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.dat", "tmdb_id\n100")
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY"}),
+                       encoding="utf-8")
+    assert main(["--json", "--config", str(cfgpath), "library", "import",
+                 path, "--format", "csv"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["added"] == 1
+
+
 def test_update_cli_runs(tmp_path, monkeypatch, capsys):
     stub_tmdb(monkeypatch)
     stub_stages(monkeypatch)
