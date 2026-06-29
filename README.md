@@ -644,18 +644,31 @@ Wünsche (`W`) ab.
 
 ### `library add`
 
-Fügt TMDB-Film-IDs als Wünsche (`W`) hinzu. **Idempotent**: eine bereits
-vorhandene ID bleibt unangetastet (zählt als `skipped`, wird nie von `L` zurück
-auf `W` gesetzt). Ist ein TMDB-Key konfiguriert, wird der Filmtitel als Label
-erfasst (nur Anzeige; ein fehlgeschlagener Abruf lässt das Label leer). Gibt
-`added`/`skipped` aus.
+Fügt Filmwünsche (`W`) hinzu -- entweder über TMDB-IDs direkt (`--tmdb`) oder
+über einen Titel (`--title`), der per TMDB-Suche (`/search/movie`) in eine ID
+aufgelöst wird. Das Jahr (`--year`) darf dabei -- wie in `theke match` -- um ein
+paar Jahre danebenliegen: Aus den Treffern wird der mit der kleinsten
+Jahresdifferenz innerhalb der Toleranz gewählt (bei Gleichstand der populärste);
+ohne `--year` der populärste Treffer. Die erlaubte Differenz steuert
+`--year-tolerance` (Default: Config `match_year_tolerance`, ab Werk `2`). `--tmdb`
+und `--title` schließen sich aus.
 
-| Option            | Wirkung                                          |
-| ----------------- | ------------------------------------------------ |
-| `-t`, `--tmdb ID` | TMDB-Film-ID als Wunsch (wiederholbar, Pflicht). |
+**Idempotent**: eine bereits vorhandene ID bleibt unangetastet (zählt als
+`skipped`, wird nie von `L` zurück auf `W` gesetzt). Ist ein TMDB-Key
+konfiguriert, wird der Filmtitel als Label erfasst (bei `--title` der gefundene
+Titel; bei `--tmdb` nur Anzeige, ein fehlgeschlagener Abruf lässt das Label
+leer). `--title` erfordert einen TMDB-Key. Gibt `added`/`skipped` aus.
+
+| Option                  | Wirkung                                                  |
+| ----------------------- | -------------------------------------------------------- |
+| `-t`, `--tmdb ID`       | TMDB-Film-ID als Wunsch (wiederholbar).                  |
+| `--title TITLE`         | Filmtitel, per Suche in eine TMDB-ID aufgelöst.          |
+| `-y`, `--year YEAR`     | Erscheinungsjahr zur Disambiguierung von `--title`.      |
+| `--year-tolerance N`    | Erlaubte Jahresdifferenz (Default: `match_year_tolerance`). |
 
 ```powershell
 theke --db build/theke.db library add --tmdb 1474601
+theke --db build/theke.db library add --title "Die Klapperschlange" --year 1981
 ```
 
 ### `library list`
