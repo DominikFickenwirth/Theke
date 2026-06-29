@@ -362,9 +362,10 @@ daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile ist **selbsttragend**:
 sie enthält alles, was `download` braucht, ohne erneut in die `mediathek`-Tabelle
 oder die Konfiguration zu schauen -- `language`,
 `resolution` (`HD`/`SD`/`LQ`), `remux` (`A` = nur Audio, `V` = nur Video,
-`AV` = beides), `url` (Quell-Medien-URL), `url_subtitle` (optional) und `path`
-(vollständiges Zielverzeichnis in der Bibliothek). Alle drei werden beim `add`
-aufgelöst und sind dort per CLI überschreibbar.
+`AV` = beides), `url` (Quell-Medien-URL), `url_subtitle` (optional), `path`
+(vollständiges Zielverzeichnis in der Bibliothek) und `year` (Erscheinungsjahr,
+für die Bibliotheks-Akte). Sie werden beim `add` aufgelöst; `url`/`url_subtitle`/
+`path` sind dort per CLI überschreibbar.
 
 **Konfiguration** (in `theke.json`):
 
@@ -402,10 +403,11 @@ nicht. Beide Optionen sind wiederholbar. `deduplicated` meldet die dabei
 zusammengefassten/herausgefilterten Quellzeilen.
 
 Dabei werden zugleich die download-relevanten Spalten aufgelöst: `url` aus der
-zur `resolution` passenden Medien-URL, `url_subtitle` aus der Quellzeile und
-`path` aus `library_path` (mit TMDB-Titel/-Jahr, sonst `clean_title`/`year`).
-Jede dieser Spalten lässt sich per Option überschreiben (Escape-Hatch, z. B. ein
-manueller Zielpfad).
+zur `resolution` passenden Medien-URL, `url_subtitle` aus der Quellzeile, `path`
+aus `library_path` (mit TMDB-Titel/-Jahr, sonst `clean_title`/`year`) und `year`
+(TMDB-Jahr bei gematchten Picks, sonst das angereicherte `year`) -- letzteres
+landet beim Download in der Bibliotheks-Akte. `url`/`url_subtitle`/`path` lassen
+sich per Option überschreiben (Escape-Hatch, z. B. ein manueller Zielpfad).
 
 | Option                    | Wirkung                                                  |
 | ------------------------- | -------------------------------------------------------- |
@@ -512,9 +514,11 @@ zum Wiederholen erneut `approve` (`--force`). Gibt `downloaded`/`failed` aus.
 
 Nach erfolgreichem Move wird der Film in der Bibliothek vermerkt: trägt die Zeile
 eine `tmdb_id`, wird der zugehörige `library`-Eintrag auf `L` (in Bibliothek)
-gesetzt und sein `path` auf den Zielordner -- ein offener Wunsch (`W`) kippt damit
-auf `L`, sonst wird ein neuer `L`-Eintrag angelegt (siehe `theke library`). So
-lädt ein erneutes `theke update` einen bereits geholten Wunsch nicht noch einmal.
+gesetzt und sein `path` auf den Zielordner sowie `year` aus der Queue-Zeile
+übernommen (ein bereits beim Wunsch erfasstes Jahr bleibt erhalten) -- ein offener
+Wunsch (`W`) kippt damit auf `L`, sonst wird ein neuer `L`-Eintrag angelegt (siehe
+`theke library`). So lädt ein erneutes `theke update` einen bereits geholten
+Wunsch nicht noch einmal.
 
 | Option          | Wirkung                                          |
 | --------------- | ------------------------------------------------ |
