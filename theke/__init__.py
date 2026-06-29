@@ -27,7 +27,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
                         db_get_meta, db_set_meta)
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
-                         arte_anchor_ids, find_arte_links)
+                         arte_anchor_ids, find_arte_links, tmdb_search, pick_by_year)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import subtitle
@@ -1421,21 +1421,42 @@ def _wish_title(cfg, tmdb_id) -> str:
         return ""
 
 
+def _resolve_title(cfg, args) -> tuple:
+    """Resolve --title (+ tolerant --year) to one (tmdb_id, title) via TMDB
+    search. The year may be off by --year-tolerance years (default: config
+    match_year_tolerance, as in match). Raises when unresolvable."""
+    if not cfg.tmdb_api_key:
+        raise ConfigError("--title lookup needs a TMDB API key (set tmdb_api_key)")
+    tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
+    cand = pick_by_year(tmdb_search(cfg, args.title), args.year, tol)
+    if cand is None:
+        raise ValueError(f"no TMDB movie for {args.title!r} "
+                         f"(year {args.year}, +-{tol})")
+    return cand["tmdb_id"], cand["title"]
+
+
 def _library_add(conn, cfg, args) -> dict:
-    """Add wishes by tmdb_id as status 'W'. Idempotent: an existing tmdb_id is
-    left untouched (counted as skipped, never reset from 'L' back to 'W')."""
-    if not args.tmdb:
-        raise ValueError("library add needs --tmdb")
+    """Add wishes as status 'W'. Each wish is resolved to a tmdb_id: given
+    directly via --tmdb, or by a title/year lookup via --title. Idempotent: an
+    existing tmdb_id is left untouched (counted as skipped, never reset from 'L'
+    back to 'W')."""
+    if args.title and args.tmdb:
+        raise ValueError("give --tmdb or --title, not both")
+    if args.title:
+        wishes = [_resolve_title(cfg, args)]
+    elif args.tmdb:
+        wishes = [(str(t), _wish_title(cfg, t)) for t in args.tmdb]
+    else:
+        raise ValueError("library add needs --tmdb or --title")
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
-        for tid in args.tmdb:
-            tid = str(tid)
+        for tid, title in wishes:
             ts = _now()
             cur = conn.execute(
                 "INSERT INTO library (tmdb_id, status, title, created_at, updated_at) "
                 "VALUES (?, 'W', ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
-                (tid, _wish_title(cfg, tid), ts, ts))
+                (tid, title, ts, ts))
             totals["added" if cur.rowcount else "skipped"] += 1
         conn.execute("COMMIT")
     except BaseException:
@@ -1744,10 +1765,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     libp = sub.add_parser("library", help="manage the wishlist (TMDB ids to acquire)", description="Manage the wishlist: TMDB movie ids to acquire automatically. Entries are status 'W' (wish) until a finished download records them as 'L' (in library). DB-only: nothing here touches the filesystem.")
     lsub = libp.add_subparsers(dest="library_cmd", required=True, metavar="action")
-    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id",         description="Add TMDB movie ids as wishes (status 'W'). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured.")
+    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id or title",  description="Add movie wishes (status 'W'): give TMDB ids directly via --tmdb, or resolve a title via --title (with a tolerant --year). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured.")
     llst = lsub.add_parser("list",   help="list library entries (default)", description="List library entries, oldest creation first. Filter by lifecycle state with --status.")
     lrem = lsub.add_parser("remove", help="remove library entries",         description="Delete library entries by exactly one selector: given tmdb_ids or --all.")
-    ladd.add_argument("-t", "--tmdb",   action="append", required=True, metavar="ID", help="TMDB movie id to wish for (repeatable)")
+    ladd.add_argument("-t", "--tmdb",            action="append", metavar="ID",    help="TMDB movie id to wish for (repeatable)")
+    ladd.add_argument(      "--title",           metavar="TITLE",                  help="movie title to resolve to a TMDB id via search (instead of --tmdb)")
+    ladd.add_argument("-y", "--year",            type=int, metavar="YEAR",         help="release year to disambiguate --title (may be off by --year-tolerance)")
+    ladd.add_argument(      "--year-tolerance",  type=int, metavar="N", dest="year_tolerance", help="accepted year difference for --title (default: config match_year_tolerance)")
     llst.add_argument("-s", "--status", choices=list(LIBRARY_STATUS), metavar="STATE", help="filter by state: " + ", ".join(LIBRARY_STATUS))
     lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
     lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")

@@ -179,6 +179,43 @@ def tmdb_movie(cfg, tmdb_id) -> dict:
             "original_language": data.get("original_language")}
 
 
+def tmdb_search(cfg, title) -> list:
+    """Search TMDB movies by title, popularity-ordered, as {tmdb_id, title,
+    year} candidates. The wanted year is NOT sent to the API (we want a tolerant
+    local match); pick_by_year refines the pick afterwards."""
+    params = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
+                        "query": title})
+    url = f"{cfg.tmdb_api_url}/search/movie?{params}"
+    data = json.loads(core.http_get(url, cfg.download_timeout).decode("utf-8"))
+    out = []
+    for r in data.get("results", []):
+        rel = r.get("release_date") or ""
+        year = int(rel[:4]) if rel[:4].isdigit() else None
+        out.append({"tmdb_id": str(r["id"]), "title": r.get("title") or "",
+                    "year": year})
+    return out
+
+
+def pick_by_year(candidates, year, tolerance):
+    """Pick the best search candidate for a wanted year: within tolerance, the
+    smallest year distance, ties keeping TMDB's popularity order. With no wanted
+    year, take the most popular result. None when nothing qualifies (candidates
+    without a year are skipped once a year is wanted)."""
+    if not candidates:
+        return None
+    if year is None:
+        return candidates[0]
+    best, best_delta = None, None
+    for c in candidates:
+        if c["year"] is None:
+            continue
+        delta = abs(c["year"] - year)
+        if delta > tolerance or (best_delta is not None and delta >= best_delta):
+            continue
+        best, best_delta = c, delta
+    return best
+
+
 def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
     """Fetch a TMDB series' metadata for episode matching, in two calls: the
     series (name + original + DE alternative titles, the gate) and the episode
