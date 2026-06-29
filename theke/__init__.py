@@ -1414,16 +1414,14 @@ def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
 
 
 def _wish_meta(cfg, tmdb_id) -> tuple:
-    """Best-effort (title, year) for the wish label; ('', None) with no key or on
-    failure (the label/year are convenience only, never load-bearing)."""
+    """(title, year) for the wish label, via a TMDB lookup that doubles as id
+    verification: an invalid id answers 404 and propagates, so a bogus wish is
+    never silently added. ('', None) only without a key (nothing to verify or
+    label against)."""
     if not cfg.tmdb_api_key:
         return "", None
-    try:
-        meta = tmdb_movie(cfg, tmdb_id)
-        return meta["title"] or "", meta["year"]
-    except Exception as exc:
-        log.warning("library add %s: title lookup failed: %s", tmdb_id, exc)
-        return "", None
+    meta = tmdb_movie(cfg, tmdb_id)
+    return meta["title"] or "", meta["year"]
 
 
 def _resolve_title(cfg, args) -> tuple:
