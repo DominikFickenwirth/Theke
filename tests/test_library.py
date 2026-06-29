@@ -191,6 +191,32 @@ def test_library_remove_needs_a_selector(tmp_path):
         conn.close()
 
 
+def test_library_list_prints_year(tmp_path, monkeypatch, capsys):
+    stub_tmdb(monkeypatch)   # title "Mein Film", year 2020
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
+        capsys.readouterr()
+        cmd_library(conn, CFG, libargs("list"))   # human-readable (not --json)
+        out = capsys.readouterr().out
+        # tmdb_id right-aligned to width 8, then 'Title' (Year)
+        assert "  [W]      100  'Mein Film' (2020)" in out
+    finally:
+        conn.close()
+
+
+def test_library_list_omits_missing_year(tmp_path, capsys):
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, Config(), libargs("add", tmdb=["100"]))   # no key -> no year
+        capsys.readouterr()
+        cmd_library(conn, Config(), libargs("list"))
+        out = capsys.readouterr().out
+        assert "  [W]      100  ''" in out   # no trailing "(...)" for a NULL year
+    finally:
+        conn.close()
+
+
 def test_library_list_filters_by_status(tmp_path, monkeypatch):
     stub_tmdb(monkeypatch)
     conn = open_db(tmp_path)
