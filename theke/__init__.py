@@ -1409,6 +1409,7 @@ def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
     """Dispatch a library action: `add` stages wishes, list/remove manage them."""
     match args.library_cmd:
         case "add":    return _library_add(conn, cfg, args)
+        case "import": return _library_import(conn, cfg, args)
         case "list":   return _library_list(conn, args)
         case "remove": return _library_remove(conn, args)
         case _: raise DbError(f"unhandled library action: {args.library_cmd}")
@@ -1459,6 +1460,13 @@ def _library_add(conn, cfg, args) -> dict:
         wishes = [(str(t), *_wish_meta(cfg, t)) for t in args.tmdb]
     else:
         raise ValueError("library add needs --tmdb or --title")
+    return _insert_wishes(conn, wishes)
+
+
+def _insert_wishes(conn, wishes) -> dict:
+    """Insert (tmdb_id, title, year) wishes as status 'W' in one transaction.
+    Idempotent: an existing tmdb_id is left untouched (counted as skipped, never
+    reset from 'L' back to 'W'). Returns the added/skipped counts."""
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
@@ -1654,6 +1662,52 @@ def _parse_csv(text):
         if rows[i]:                 # a fully blank line yields []; skip it
             out.append((i + 1, lines[i], _csv_entry(rows[i], idx)))
     return out
+
+
+def _resolve_entry(cfg, entry, tol) -> tuple:
+    """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
+    id is verified via TMDB (a bad id propagates as 404); a title is searched."""
+    if entry["kind"] == "id":
+        meta = tmdb_movie(cfg, entry["id"])
+        return str(entry["id"]), meta["title"] or "", meta["year"]
+    return _search_title(cfg, entry["title"], entry["year"], tol)
+
+
+def _library_import(conn, cfg, args) -> dict:
+    """Bulk-add wishes from a txt/csv file. Each entry resolves to a tmdb_id
+    (directly or via a title/year search); entries that do not resolve are
+    collected into an error log and the rest are added (status 'W', idempotent).
+    Resolution (the TMDB IO) runs before the insert transaction, like
+    `_library_add`. Returns added/skipped/failed counts plus the errors."""
+    if not cfg.tmdb_api_key:
+        raise ConfigError("library import needs a TMDB API key (set tmdb_api_key)")
+    fmt = _import_detect_format(args.path, args.format)
+    with open(args.path, encoding="utf-8-sig") as fh:
+        text = fh.read()
+    entries = _parse_txt(text, args.mode) if fmt == "txt" else _parse_csv(text)
+    tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
+    resolved, errors = [], []
+    for lineno, raw, entry in entries:
+        if entry["kind"] == "error":
+            errors.append({"line": lineno, "input": raw, "reason": entry["reason"]})
+            continue
+        try:
+            resolved.append(_resolve_entry(cfg, entry, tol))
+        except Exception as exc:
+            errors.append({"line": lineno, "input": raw, "reason": str(exc)})
+    result = {**_insert_wishes(conn, resolved), "failed": len(errors), "errors": errors}
+    if args.json:
+        return result
+    _print_import(result)
+    return {}
+
+
+def _print_import(result):
+    """Counts headline + one line per unresolved entry to stdout (the result)."""
+    print(f'{result["added"]} added, {result["skipped"]} skipped, '
+          f'{result["failed"]} failed')
+    for e in result["errors"]:
+        print(f'  line {e["line"]}: {e["input"]!r} -- {e["reason"]}')
 
 
 # -- update (phase 9: the wishlist automation orchestrator) -------------------
