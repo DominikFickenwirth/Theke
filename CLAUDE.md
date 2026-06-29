@@ -235,5 +235,6 @@ KEEP IN MIND:
 - Update README.md after adding/changing subcommands.
 
 NEVER:
-- Describe problems that no longer exist (or never applied). State the design as
+- Never describe problems that no longer exist (or never applied). State the design as
   it is; don't justify a choice against a non-problem.
+- Never use cyclic imports. Use injection instead.

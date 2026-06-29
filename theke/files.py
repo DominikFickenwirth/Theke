@@ -2,8 +2,8 @@
 # Queue-independent file primitives driven by explicit URLs/paths: download a
 # media URL (plain HTTP with Range-resume, or HLS segment assembly with an ffmpeg
 # fallback), remux via ffmpeg (stream copy, no transcode), move into the library.
-# Network is touched through http_get/open_url (monkeypatched in tests); ffmpeg
-# through run_ffmpeg. CLI wiring + result emission live in __init__.py.
+# Network is touched through core.http_get/open_url (monkeypatched in tests);
+# ffmpeg through run_ffmpeg. CLI wiring + result emission live in __init__.py.
 
 import collections
 import errno
@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import theke   # for http_get, resolved at call time (avoids an import cycle)
+from theke import core   # http_get/USER_AGENT; via module so theke.core.http_get patches apply
 
 log = logging.getLogger("theke")
 
@@ -129,7 +129,7 @@ def open_url(url, offset=0, timeout=None, validator=None):
     server answer 200 (full body) instead of 206 when the resource has changed, so
     a resume never splices two versions. `timeout` (seconds) bounds each socket
     operation (None = no timeout). The network seam -- monkeypatched in tests."""
-    headers = {"User-Agent": theke.USER_AGENT}
+    headers = {"User-Agent": core.USER_AGENT}
     if offset:
         headers["Range"] = f"bytes={offset}-"
         if validator:
@@ -490,14 +490,14 @@ def download_hls(url, out, retries, ffmpeg_path, timeout=None):
     `timeout` (seconds) bounds each playlist/segment fetch (None = no timeout).
     Return (action, bytes, segments) with action 'hls' or 'hls-ffmpeg'."""
     _ensure_parent(out)
-    text = theke.http_get(url, timeout).decode("utf-8")
+    text = core.http_get(url, timeout).decode("utf-8")
     media_url = url
     if is_master(text):
         variants = parse_master(text, url)
         if not variants:
             raise RuntimeError("empty HLS master playlist")
         media_url = max(variants, key=lambda v: v[0])[1]
-        text = theke.http_get(media_url, timeout).decode("utf-8")
+        text = core.http_get(media_url, timeout).decode("utf-8")
     init, segments, encrypted = parse_media_playlist(text, media_url)
     if encrypted:
         log.info("encrypted HLS; handing off to ffmpeg")
@@ -561,7 +561,7 @@ def _download_segments(out, init, segments, retries, timeout=None) -> int:
 def _fetch_segment(path, url, timeout=None) -> None:
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return   # already downloaded (resume)
-    body = theke.http_get(url, timeout)
+    body = core.http_get(url, timeout)
     if not body:   # no Content-Length + early EOF reads empty: never accept as final
         raise RuntimeError(f"empty segment: {os.path.basename(path)}")
     tmp = path + ".part"

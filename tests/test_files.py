@@ -18,7 +18,7 @@ from theke.files import (is_hls, is_master, parse_master, parse_media_playlist,
 
 
 def install_http(monkeypatch, mapping):
-    """Monkeypatch theke.http_get to serve URL-mapped bytes (or raise an
+    """Monkeypatch theke.core.http_get to serve URL-mapped bytes (or raise an
     Exception value); an unmapped URL is an error."""
     def fake_get(url, timeout=None):
         value = mapping.get(url)
@@ -27,7 +27,7 @@ def install_http(monkeypatch, mapping):
         if isinstance(value, Exception):
             raise value
         return value
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
 
 
 # -- m3u8 parsing (pure) ------------------------------------------------------
@@ -146,7 +146,7 @@ def test_download_hls_threads_timeout_to_http_get(tmp_path, monkeypatch):
         return {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA",
                 "https://h/v/seg1.ts": b"BBB"}[url]
 
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
     download_hls(url=MEDIA_URL, out=str(tmp_path / "v.ts"), retries=0,
                  ffmpeg_path="ffmpeg", timeout=11)
     assert seen == [11, 11, 11]   # playlist + both segments
@@ -852,7 +852,7 @@ def test_hls_segment_fatal_http_skips_retries_to_ffmpeg(tmp_path, monkeypatch):
             return MEDIA_TXT
         seg_calls["n"] += 1
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
 
     def fake_ffmpeg(args):
         with open(args[-1], "wb") as fh:
@@ -877,7 +877,7 @@ def test_hls_logs_byte_progress_lines(tmp_path, monkeypatch, caplog):
 
 
 # -- HLS segment length guard (item 1) ----------------------------------------
-# theke.http_get exposes no Content-Length to the caller: a short read *with* a
+# core.http_get exposes no Content-Length to the caller: a short read *with* a
 # Content-Length already raises IncompleteRead inside http_get (-> retry loop), so
 # the only residual, otherwise-undetectable case is a no-Content-Length stream
 # that ends early, which reads back as an empty body. Consistent with item 2 ("an
@@ -911,7 +911,7 @@ def test_hls_empty_segment_retries_then_succeeds(tmp_path, monkeypatch):
             return b"" if calls["n"] == 1 else b"BBB"
         return {MEDIA_URL: MEDIA_TXT, "https://h/v/seg0.ts": b"AAA"}[url]
 
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
     monkeypatch.setattr(files, "run_ffmpeg",
                         lambda args: pytest.fail("should not fall back"))
     out = str(tmp_path / "v.ts")
