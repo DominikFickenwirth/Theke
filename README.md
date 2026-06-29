@@ -652,14 +652,24 @@ vermerkt `theke queue download` ihn als `L` und trägt seinen Bibliotheksordner 
 
 ### `library add`
 
-Fügt Filmwünsche (`W`) hinzu -- entweder über TMDB-IDs direkt (`--tmdb`) oder
-über einen Titel (`--title`), der per TMDB-Suche (`/search/movie`) in eine ID
-aufgelöst wird. Das Jahr (`--year`) darf dabei -- wie in `theke match` -- um ein
-paar Jahre danebenliegen: Aus den Treffern wird der mit der kleinsten
-Jahresdifferenz innerhalb der Toleranz gewählt (bei Gleichstand der populärste);
-ohne `--year` der populärste Treffer. Die erlaubte Differenz steuert
-`--year-tolerance` (Default: Config `match_year_tolerance`, ab Werk `2`). `--tmdb`
-und `--title` schließen sich aus.
+Fügt Filmwünsche (`W`) hinzu -- über TMDB-IDs direkt (`--tmdb`), über einen Titel
+(`--title`), der per TMDB-Suche (`/search/movie`) in eine ID aufgelöst wird, oder
+durch Import einer **ganzen TMDB-Liste** (`--tmdb-list`). Bei `--title` darf das
+Jahr (`--year`) -- wie in `theke match` -- um ein paar Jahre danebenliegen: Aus den
+Treffern wird der mit der kleinsten Jahresdifferenz innerhalb der Toleranz gewählt
+(bei Gleichstand der populärste); ohne `--year` der populärste Treffer. Die erlaubte
+Differenz steuert `--year-tolerance` (Default: Config `match_year_tolerance`, ab
+Werk `2`). `--tmdb`, `--title` und `--tmdb-list` schließen sich gegenseitig aus.
+
+**Listen-Import** (`--tmdb-list ID`): liest den v3-Endpoint `/list/{id}` und legt
+alle enthaltenen **Filme** als Wünsche an. Titel und Jahr stammen direkt aus der
+Liste (kein Einzelabruf je Film). **Serien werden übersprungen** und auf stderr
+gemeldet (die Library ist bis Phase 13 reine Filmsache); ihre Zahl steht in
+`series_skipped`. Öffentliche Listen liest schon der `tmdb_api_key`; für **private**
+Listen wird ein `tmdb_read_token` (das "API Read Access Token" von TMDB, als
+Bearer-Header) benötigt. Die Listen-ID ist die Zahl in der Listen-URL
+(`themoviedb.org/list/{id}`). Konfigurierte Listen zieht `theke update`
+automatisch nach (s. u.).
 
 **Idempotent**: eine bereits vorhandene ID bleibt unangetastet (zählt als
 `skipped`, wird nie von `L` zurück auf `W` gesetzt). Ist ein TMDB-Key
@@ -667,12 +677,14 @@ konfiguriert, werden Filmtitel und Erscheinungsjahr (`year`) als Label erfasst
 (bei `--title` aus dem gefundenen Treffer; bei `--tmdb` per Abruf, der zugleich
 die ID prüft: eine ungültige ID liefert einen TMDB-404 und lässt `add` mit einem
 Fehler abbrechen, statt einen ungültigen Wunsch anzulegen). Ohne TMDB-Key bleiben
-Titel/Jahr leer (keine Prüfung möglich). `--title` erfordert einen TMDB-Key. Gibt
-`added`/`skipped` aus.
+Titel/Jahr leer (keine Prüfung möglich). `--title` und `--tmdb-list` erfordern
+einen TMDB-Key (oder `tmdb_read_token`). Gibt `added`/`skipped` aus (beim
+Listen-Import zusätzlich `series_skipped`).
 
 | Option                  | Wirkung                                                  |
 | ----------------------- | -------------------------------------------------------- |
 | `-t`, `--tmdb ID`       | TMDB-Film-ID als Wunsch (wiederholbar).                  |
+| `--tmdb-list ID`        | TMDB-Listen-ID importieren (nur Filme; wiederholbar).    |
 | `--title TITLE`         | Filmtitel, per Suche in eine TMDB-ID aufgelöst.          |
 | `-y`, `--year YEAR`     | Erscheinungsjahr zur Disambiguierung von `--title`.      |
 | `--year-tolerance N`    | Erlaubte Jahresdifferenz (Default: `match_year_tolerance`). |
@@ -680,6 +692,7 @@ Titel/Jahr leer (keine Prüfung möglich). `--title` erfordert einen TMDB-Key. G
 ```powershell
 theke --db build/theke.db library add --tmdb 1474601
 theke --db build/theke.db library add --title "Die Klapperschlange" --year 1981
+theke --db build/theke.db library add --tmdb-list 8334221
 ```
 
 ### `library import`
@@ -753,18 +766,25 @@ theke --db build/theke.db library remove --all
 
 Stufe 9: **ein unbeaufsichtigter Durchlauf** der gesamten Pipeline für die
 Wunschliste. Der Reihe nach: `fetch` (Filmliste aktualisieren), `enrich`
-(Metadaten extrahieren), dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen
-und passende `mediathek`-Zeilen taggen) und `queue add` (deduplizierte
-Download-Menge einreihen). Ist `queue_auto_approve` gesetzt, werden die
-genehmigten Einträge anschließend gleich heruntergeladen (jeder fertige Wunsch
+(Metadaten extrahieren), dann -- sofern `tmdb_lists` konfiguriert ist -- jede
+**konfigurierte TMDB-Liste** additiv in die Library nachziehen (nur Filme, wie
+`library add --tmdb-list`; gezählt in `list_added`), dann je offenem Wunsch (`W`)
+`match` (TMDB-ID auflösen und passende `mediathek`-Zeilen taggen) und `queue add`
+(deduplizierte Download-Menge einreihen). Ist `queue_auto_approve` gesetzt, werden
+die genehmigten Einträge anschließend gleich heruntergeladen (jeder fertige Wunsch
 wird dabei als `L` vermerkt); sonst endet der Lauf am Genehmigungs-Tor mit
-`proposed`-Einträgen. Ein einzelner fehlschlagender Wunsch (z. B. ein TMDB-
-Fehler) bricht den Durchlauf nicht ab, sondern zählt nur in `failed`. Fortschritt
-geht nach stderr; das Ergebnis fasst `fetch`/`enriched`/`wishes`/`queued`/
+`proposed`-Einträgen. Ein einzelner fehlschlagender Wunsch oder eine fehlschlagende
+Liste (z. B. ein TMDB-Fehler) bricht den Durchlauf nicht ab. Fortschritt geht nach
+stderr; das Ergebnis fasst `fetch`/`enriched`/`list_added`/`wishes`/`queued`/
 `skipped`/`deduplicated`/`failed`/`downloaded` zusammen.
 
-Erfordert einen TMDB-Key (`tmdb_api_key`) für `match` und `queue add`. Der Befehl
-hat keine eigenen Optionen.
+Der Listen-Abgleich ist **nur additiv**: aus einer Liste entfernte Filme werden
+**nicht** aus der Library gelöscht (die Library hat mehrere Quellen, und ein
+einmal gestarteter Wunsch soll nicht still verschwinden). Bereits geladene Filme
+(`L`) bleiben ohnehin unberührt.
+
+Erfordert einen TMDB-Key (`tmdb_api_key`) für `match` und `queue add` (für private
+Listen zusätzlich `tmdb_read_token`). Der Befehl hat keine eigenen Optionen.
 
 ```powershell
 theke --db build/theke.db update
