@@ -234,8 +234,8 @@ def test_http_get_passes_timeout_to_urlopen(monkeypatch):
         seen["timeout"] = timeout
         return Resp()
 
-    monkeypatch.setattr(theke.urllib.request, "urlopen", fake_urlopen)
-    assert http_get("http://x", 42) == b"body"   # timeout (seconds) is the 2nd arg
+    monkeypatch.setattr(theke.core.urllib.request, "urlopen", fake_urlopen)
+    assert theke.core.http_get("http://x", 42) == b"body"   # timeout (seconds) is the 2nd arg
     assert seen["timeout"] == 42
 
 
@@ -1052,7 +1052,7 @@ def install_http(monkeypatch, mapping):
             raise value
         return value
 
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
 
 
 def recent_created():
@@ -1072,7 +1072,7 @@ def test_cmd_fetch_passes_configured_timeout(tmp_path, monkeypatch):
         seen["timeout"] = timeout
         return body
 
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
     conn = open_db(tmp_path)
     try:
         cfg = SimpleNamespace(filmliste_url="FULL", filmliste_diff_url="DIFF",

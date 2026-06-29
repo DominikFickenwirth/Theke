@@ -169,9 +169,13 @@ many tiny files.
 ```
 Theke/
 +-- theke/            Python package (all logic)
-|   +-- __init__.py   config, DB layer, fetch, match, CLI
+|   +-- __init__.py   fetch + CLI (commands, parser, main); re-exports core
+|   +-- core.py       leaf infrastructure: config, DB layer, http_get (no theke imports)
 |   +-- enrich.py     metadata extraction
 |   +-- match.py      tmdb_id matching
+|   +-- queue.py      download-queue dedup / selection
+|   +-- files.py      download / remux / move primitives
+|   +-- subtitle.py   subtitle download + conversion
 |   +-- ...           (more files as needed)
 +-- pyproject.toml    package + console-script `theke`, dependencies
 +-- tests/            pytest suite
@@ -235,5 +239,6 @@ KEEP IN MIND:
 - Update README.md after adding/changing subcommands.
 
 NEVER:
-- Describe problems that no longer exist (or never applied). State the design as
+- Never describe problems that no longer exist (or never applied). State the design as
   it is; don't justify a choice against a non-problem.
+- Never use cyclic imports. Use injection instead.

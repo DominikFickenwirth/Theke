@@ -223,7 +223,7 @@ def qargs(queue_cmd="add", tmdb=None, mediathek_id=None, status=None,
 
 
 def stub_tmdb(monkeypatch):
-    monkeypatch.setattr(theke, "http_get",
+    monkeypatch.setattr(theke.core, "http_get",
                         lambda url, timeout=None: json.dumps(TMDB).encode("utf-8"))
 
 

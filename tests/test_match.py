@@ -165,7 +165,7 @@ def test_tmdb_movie_passes_configured_timeout(monkeypatch):
         seen["timeout"] = timeout
         return json.dumps(TMDB_BOOT).encode("utf-8")
 
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
     tmdb_movie(Config(tmdb_api_key="KEY", download_timeout=44), 1234)
     assert seen["timeout"] == 44
 
@@ -177,7 +177,7 @@ def test_tmdb_movie_parses_titles_year_runtime(monkeypatch):
         seen["url"] = url
         return json.dumps(TMDB_BOOT).encode("utf-8")
 
-    monkeypatch.setattr(theke, "http_get", fake_get)
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
     cfg = Config(tmdb_api_key="KEY")
     meta = tmdb_movie(cfg, 1234)
 
@@ -269,7 +269,7 @@ def margs(match_cmd="run", tmdb="1234", type="movie", dry_run=False,
 def boot_db(tmp_path, monkeypatch):
     """A DB with two matching movie rows (m1 exact, m2 substring) + one miss,
     and http_get stubbed to the canned Das Boot payload."""
-    monkeypatch.setattr(theke, "http_get",
+    monkeypatch.setattr(theke.core, "http_get",
                         lambda url, timeout=None: json.dumps(TMDB_BOOT).encode("utf-8"))
     conn = open_db(tmp_path)
     insert_movie(conn, "m1", "Das Boot", 1981, 8940)
@@ -432,7 +432,7 @@ def tv_margs(match_cmd="run", tmdb="55", season=2, episode=6, dry_run=False,
 def tv_db(tmp_path, monkeypatch):
     """A DB with two matching Tatort episodes (e1 exact, e5 runtime-penalized) +
     one same-S/E miss (wrong series), and http_get stubbed to the canned payloads."""
-    monkeypatch.setattr(theke, "http_get", fake_tv_get([]))
+    monkeypatch.setattr(theke.core, "http_get", fake_tv_get([]))
     conn = open_db(tmp_path)
     insert_episode(conn, "e1", "Der rote Schatten", "Tatort", 2, 6)         # 1.0
     insert_episode(conn, "e5", "Der rote Schatten", "Tatort", 2, 6, 4200)   # 0.9 (runtime)
@@ -526,7 +526,7 @@ def fake_tv_get(seen):
 
 def test_tmdb_tv_parses_series_episode(monkeypatch):
     seen = []
-    monkeypatch.setattr(theke, "http_get", fake_tv_get(seen))
+    monkeypatch.setattr(theke.core, "http_get", fake_tv_get(seen))
     meta = tmdb_tv(Config(tmdb_api_key="KEY"), 55, 2, 6)
 
     # series + episode endpoints both hit, with id/key/season/episode in the URLs.
@@ -768,7 +768,7 @@ def test_find_arte_links_empty_without_anchors(tmp_path):
 def arte_boot_db(tmp_path, monkeypatch):
     """A German Arte hit (a1, matches by title) plus two foreign-language variants
     (a2/a3) the title pass cannot reach, all sharing one video-id."""
-    monkeypatch.setattr(theke, "http_get",
+    monkeypatch.setattr(theke.core, "http_get",
                         lambda url, timeout=None: json.dumps(TMDB_BOOT).encode("utf-8"))
     conn = open_db(tmp_path)
     insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
@@ -833,7 +833,7 @@ LISBON_VARIANTS = [   # (mediathek_id, clean_title, sender, lang_slug)
 
 
 def test_cmd_match_run_links_mysteries_of_lisbon(tmp_path, monkeypatch):
-    monkeypatch.setattr(theke, "http_get",
+    monkeypatch.setattr(theke.core, "http_get",
                         lambda url, timeout=None: json.dumps(TMDB_LISBON).encode("utf-8"))
     conn = open_db(tmp_path)
     try:
