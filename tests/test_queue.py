@@ -15,11 +15,11 @@ from theke.queue import select_downloads
 
 def row(mid, language="de", duration=6000, size_mb=700, url_video="http://v",
         url_video_hd="", url_video_small="", url_subtitle="", url_website="",
-        date="2026-01-01 20:00:00"):
+        date="2026-01-01 20:00:00", flags=""):
     return dict(mediathek_id=mid, language=language, duration=duration,
                 size_mb=size_mb, url_video=url_video, url_video_hd=url_video_hd,
                 url_video_small=url_video_small, url_subtitle=url_subtitle,
-                url_website=url_website, date=date)
+                url_website=url_website, date=date, flags=flags)
 
 
 def test_select_single_row_is_av_sd():
@@ -112,6 +112,72 @@ def test_select_ov_resolves_to_original_language_in_whitelist():
 
 def test_select_ov_dropped_when_original_language_not_whitelisted():
     assert select_downloads([row("a", language="ov")], ["de"], "en") == []
+
+
+# -- accessibility flags: clean audio (no A/E) and clean video (no U/S) -------
+
+def test_select_skips_audiodescription_audio_for_clean_entry():
+    # The audio-description copy (flag A) is the better quality (HD) but must
+    # never serve as audio -- the clean SD copy wins its language.
+    a = row("a", "de")                                        # clean SD
+    b = row("b", "de", url_video_hd="http://hd", flags="A")   # AD HD
+    out = select_downloads([a, b], ["de"], "en")
+    assert out == [{"mediathek_id": "a", "language": "de",
+                    "resolution": "SD", "remux": "AV"}]
+
+
+def test_select_skips_simple_language_audio_for_clean_entry():
+    a = row("a", "de", flags="E")                             # Einfache Sprache
+    b = row("b", "de")                                        # clean
+    out = select_downloads([a, b], ["de"], "en")
+    assert out == [{"mediathek_id": "b", "language": "de",
+                    "resolution": "SD", "remux": "AV"}]
+
+
+def test_select_drops_language_when_only_described_or_simple_audio():
+    # No clean audio for 'de' -> the language is left out entirely.
+    out = select_downloads([row("a", "de", flags="A"),
+                            row("b", "de", flags="E")], ["de"], "en")
+    assert out == []
+
+
+def test_select_per_language_pick_prefers_clean_video_over_burned_in_subs():
+    # Within 'de' the clean SD copy beats the higher-res burned-in-subs copy.
+    a = row("a", "de", url_video_hd="http://hd", flags="U")   # U HD
+    b = row("b", "de")                                        # clean SD
+    out = select_downloads([a, b], ["de"], "en")
+    assert out == [{"mediathek_id": "b", "language": "de",
+                    "resolution": "SD", "remux": "AV"}]
+
+
+def test_select_anchor_prefers_clean_video_over_burned_in_subs_hd():
+    # de clean SD vs fr burned-in-subs HD (shared video). Clean de anchors the
+    # video; fr contributes audio only onto that clean video.
+    a = row("a", "de", duration=6000)                                       # clean SD
+    b = row("b", "fr", duration=6000, url_video_hd="http://hd", flags="U")  # U HD
+    out = select_downloads([a, b], ["de", "fr"], "en")
+    assert out == [{"mediathek_id": "a", "language": "de", "resolution": "SD", "remux": "AV"},
+                   {"mediathek_id": "b", "language": "fr", "resolution": "HD", "remux": "A"}]
+
+
+def test_select_anchor_avoids_sign_language_video():
+    # de sign-language HD vs fr clean SD (shared video). The interpreter inset
+    # disqualifies de as the video source; clean fr anchors, de stays audio.
+    a = row("a", "de", duration=6000, url_video_hd="http://hd", flags="S")  # S HD
+    b = row("b", "fr", duration=6000)                                       # clean SD
+    out = select_downloads([a, b], ["de", "fr"], "en")
+    assert out == [{"mediathek_id": "b", "language": "fr", "resolution": "SD", "remux": "AV"},
+                   {"mediathek_id": "a", "language": "de", "resolution": "HD", "remux": "A"}]
+
+
+def test_select_burned_in_subs_audio_still_usable_as_audio_only():
+    # A burned-in-subs row keeps normal audio: usable as an audio-only pick when
+    # a clean video anchors elsewhere. (Covered above, asserted here explicitly.)
+    a = row("a", "de", duration=6000)                          # clean SD anchor
+    b = row("b", "fr", duration=6000, flags="U")               # U, audio fine
+    out = select_downloads([a, b], ["de", "fr"], "en")
+    assert out == [{"mediathek_id": "a", "language": "de", "resolution": "SD", "remux": "AV"},
+                   {"mediathek_id": "b", "language": "fr", "resolution": "SD", "remux": "A"}]
 
 
 # -- cmd_queue add (CLI write side) ------------------------------------------

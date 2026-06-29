@@ -2,8 +2,11 @@
 # Pure, network-free selection: collapse the many mediathek rows of one tmdb_id
 # (senders, SD/HD, languages, repeats) to the minimal download set. One video is
 # downloaded per shared source; same-source other-language picks become audio
-# only. Flags: 'AV' = need audio+video, 'A' = audio only, 'V' = video only
-# (reserved -- not produced by the default policy). DB I/O lives in __init__.py.
+# only. Remux flags: 'AV' = need audio+video, 'A' = audio only, 'V' = video only
+# (reserved -- not produced by the default policy). Accessibility flags on the
+# source row steer the choice: 'A'/'E' audio (audio-description / simplified
+# speech) is never used as audio; 'U'/'S' video (burned-in subtitles / sign-
+# language inset) is avoided as the video source. DB I/O lives in __init__.py.
 
 from theke.match import arte_video_id
 
@@ -25,11 +28,29 @@ def _effective_language(row, original_language):
     return original_language if row.get("language") == "ov" else row.get("language")
 
 
+def _bad_audio(row) -> bool:
+    """Audio unusable as a clean source: an audio-description ('A') or simplified-
+    speech ('E') variant. Such rows are dropped before grouping -- every pick
+    contributes audio, so a flagged one must never be selected."""
+    f = row.get("flags") or ""
+    return "A" in f or "E" in f
+
+
+def _clean_video(row) -> bool:
+    """Video free of burned-in overlays: no burned-in subtitles ('U') and no
+    sign-language interpreter inset ('S'). The anchor (video source) prefers a
+    clean row even at the cost of resolution."""
+    f = row.get("flags") or ""
+    return "U" not in f and "S" not in f
+
+
 def _pick_key(row):
-    """Rank one row within its language group: HD first, then a real subtitle
-    track (url_subtitle filled -- NOT the burned-in 'U' flag), then larger size,
-    later date, then mediathek_id. Greatest wins."""
-    return (resolution_of(row) == "HD", bool(row.get("url_subtitle")),
+    """Rank one row within its language group: clean video first (no burned-in
+    'U'/'S'), then HD, then a real subtitle track (url_subtitle filled -- NOT the
+    burned-in 'U' flag), then larger size, later date, then mediathek_id.
+    Greatest wins."""
+    return (_clean_video(row), resolution_of(row) == "HD",
+            bool(row.get("url_subtitle")),
             row.get("size_mb") or 0, row.get("date") or "", row["mediathek_id"])
 
 
@@ -44,21 +65,26 @@ def _shares_video(a, b) -> bool:
 
 def select_downloads(rows, languages, original_language) -> list:
     """Deduplicate the rows of one tmdb_id into the download set. Keep only
-    whitelisted languages (`languages`, also the preference order); pick the best
-    row per language; the best-resolution pick anchors the video; same-source
-    other-language picks become audio-only. Returns the anchor first, then the
-    rest in preference order, each as {mediathek_id, language, resolution, remux}."""
+    whitelisted languages (`languages`, also the preference order); drop audio-
+    description / simplified-speech rows ('A'/'E' flags) so they never supply
+    audio (a language with no clean audio is left out); pick the best row per
+    language; the cleanest-then-best-resolution pick anchors the video (a clean
+    video without burned-in 'U'/'S' overlays wins even over higher resolution);
+    same-source other-language picks become audio-only. Returns the anchor first,
+    then the rest in preference order, each as
+    {mediathek_id, language, resolution, remux}."""
     groups = {}
     for r in rows:
         lang = _effective_language(r, original_language)
-        if lang not in languages:
+        if lang not in languages or _bad_audio(r):
             continue
         groups.setdefault(lang, []).append(dict(r, _lang=lang))
     if not groups:
         return []
 
     picks = [max(g, key=_pick_key) for g in groups.values()]
-    anchor = sorted(picks, key=lambda p: (-_RES_RANK[resolution_of(p)],
+    anchor = sorted(picks, key=lambda p: (not _clean_video(p),
+                                          -_RES_RANK[resolution_of(p)],
                                           languages.index(p["_lang"]),
                                           p["mediathek_id"]))[0]
     rest = sorted((p for p in picks if p is not anchor),
