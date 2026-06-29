@@ -110,9 +110,10 @@ def stub_stages(monkeypatch):
 def test_library_migration_creates_table(tmp_path):
     conn = open_db(tmp_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(library)")}
-        assert cols == {"tmdb_id", "status", "title", "created_at", "updated_at"}
+        assert cols == {"tmdb_id", "status", "title", "year", "path",
+                        "created_at", "updated_at"}
     finally:
         conn.close()
 
@@ -130,6 +131,7 @@ def test_library_add_inserts_wish(tmp_path, monkeypatch):
         assert rows[0]["tmdb_id"] == "100"
         assert rows[0]["status"] == "W"
         assert rows[0]["title"] == "Mein Film"   # captured from TMDB at add
+        assert rows[0]["year"] == 2020            # release year from TMDB
     finally:
         conn.close()
 
@@ -151,6 +153,7 @@ def test_library_add_without_key_leaves_title_empty(tmp_path):
     try:
         cmd_library(conn, Config(), libargs("add", tmdb=["100"]))
         assert library_rows(conn)[0]["title"] == ""
+        assert library_rows(conn)[0]["year"] is None
     finally:
         conn.close()
 
@@ -263,6 +266,7 @@ def test_library_add_by_title_resolves_tmdb_id(tmp_path, monkeypatch):
         rows = library_rows(conn)
         assert (rows[0]["tmdb_id"], rows[0]["status"], rows[0]["title"]) == \
                ("9268", "W", "Die Klapperschlange")
+        assert rows[0]["year"] == 1981   # release year of the resolved candidate
     finally:
         conn.close()
 
@@ -348,6 +352,9 @@ def test_download_records_library_as_L(tmp_path, monkeypatch):
         rows = library_rows(conn)
         assert len(rows) == 1
         assert (rows[0]["tmdb_id"], rows[0]["status"]) == ("100", "L")
+        # path is the folder the video landed in (template renders
+        # "<lib>/Mein Film (2020)/Mein Film (2020).mp4").
+        assert rows[0]["path"] == (tmp_path / "lib" / "Mein Film (2020)").as_posix()
     finally:
         conn.close()
 
