@@ -1043,7 +1043,7 @@ def test_run_remux_invokes_ffmpeg_with_built_args(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
     seen = {}
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         seen["args"] = args
         with open(args[-1], "wb") as fh:
             fh.write(b"muxed")
@@ -1057,7 +1057,7 @@ def test_run_remux_invokes_ffmpeg_with_built_args(tmp_path, monkeypatch):
 def test_run_remux_creates_missing_parent_dirs(tmp_path, monkeypatch):
     out = str(tmp_path / "new" / "sub" / "out.mp4")    # parents do not exist yet
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"muxed")
 
@@ -1070,7 +1070,7 @@ def test_run_remux_creates_missing_parent_dirs(tmp_path, monkeypatch):
 def test_run_remux_removes_faulty_output_on_failure(tmp_path, monkeypatch):
     out = tmp_path / "out.mp4"
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:        # ffmpeg writes a partial file...
             fh.write(b"partial garbage")
         raise RuntimeError("ffmpeg failed (exit 1): boom")   # ...then dies
@@ -1084,7 +1084,7 @@ def test_run_remux_removes_faulty_output_on_failure(tmp_path, monkeypatch):
 def test_run_remux_failure_without_output_is_fine(tmp_path, monkeypatch):
     out = tmp_path / "out.mp4"
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         raise RuntimeError("ffmpeg failed (exit 1): no output written")
 
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
@@ -1277,7 +1277,7 @@ def test_cli_file_remux_check_ffmpeg_missing_binary_errors(capsys, monkeypatch):
 def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):
     out = str(tmp_path / "out.mp4")
     monkeypatch.setattr(files, "run_ffmpeg",
-                        lambda args: open(args[-1], "wb").write(b"ok"))
+                        lambda args, duration=None: open(args[-1], "wb").write(b"ok"))
     rc = main(["--json", "file", "remux", "--in", "in.ts", "--mode", "AV",
                "--out", out])
     assert rc == 0
