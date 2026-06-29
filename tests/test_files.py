@@ -1112,9 +1112,9 @@ def test_remux_rejects_truncated_source(tmp_path, monkeypatch):
     def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"short")
+        return 12.0                                # -progress: only 12 s written
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
-    durations = {"in.ts": 3600.0, out: 12.0}      # output far shorter than source
-    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: 3600.0)  # source 1 h
     with pytest.raises(RuntimeError, match="truncated"):
         run_remux("ffmpeg", "in.ts", "AV", out)
     assert not os.path.exists(out)                 # short output dropped, not kept
@@ -1126,22 +1126,43 @@ def test_remux_accepts_matching_duration(tmp_path, monkeypatch):
     def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"full")
+        return 3600.0                              # -progress: full length written
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
-    durations = {"in.ts": 3600.0, out: 3600.0}
-    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: 3600.0)
     n = run_remux("ffmpeg", "in.ts", "AV", out)
     assert n == 4                                  # accepted (len b"full")
 
 
-def test_remux_skips_check_when_duration_unknown(tmp_path, monkeypatch):
+def test_remux_uses_progress_duration_not_output_container(tmp_path, monkeypatch):
+    # The .aac regression: a raw-stream output reports no container duration, so
+    # ffmpeg estimates it from bitrate -- materially short of the truth. The check
+    # must trust ffmpeg's -progress out_time (run_ffmpeg's return), never re-probe
+    # the output container, or every audio-only remux would be falsely rejected.
+    out = str(tmp_path / "out.aac")
+
+    def fake_ffmpeg(args, duration=None):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"full audio")
+        return 5412.0                              # -progress: true written length
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    # probe_duration reads the SOURCE header; a re-probe of the output would yield
+    # the short bitrate estimate (5183) and wrongly fail the remux.
+    monkeypatch.setattr(files, "probe_duration",
+                        lambda ff, path: 5413.0 if path == "in.ts" else 5183.0)
+    n = run_remux("ffmpeg", "in.ts", "A", out)
+    assert n == len(b"full audio")                 # accepted, not mistaken for truncation
+
+
+def test_remux_skips_check_when_source_duration_unknown(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
 
     def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"x")
+        return 1.0
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
-    monkeypatch.setattr(files, "probe_duration", lambda ff, path: None)
-    n = run_remux("ffmpeg", "in.ts", "AV", out)    # unknown duration -> no guard
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: None)  # source unknown
+    n = run_remux("ffmpeg", "in.ts", "AV", out)    # no reference -> no guard
     assert n == 1
 
 
@@ -1216,6 +1237,19 @@ def test_run_ffmpeg_without_duration_logs_no_progress(monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger="theke")
     run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])              # no duration -> silent
     assert [r.getMessage() for r in caplog.records if "%" in r.getMessage()] == []
+
+
+def test_run_ffmpeg_returns_final_output_duration(monkeypatch):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(stdout_text=FFMPEG_PROGRESS))
+    # final out_time_us is 40000000 us -> 40.0 s, the true written length
+    assert run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"]) == 40.0
+
+
+def test_run_ffmpeg_returns_none_without_progress(monkeypatch):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(stdout_text=""))   # no progress emitted
+    assert run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"]) is None
 
 
 # -- check-ffmpeg (probe the configured binary via -version) -------------------
