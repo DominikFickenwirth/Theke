@@ -60,10 +60,35 @@ def library_rows(conn):
 
 
 def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False,
-            title=None, year=None, year_tolerance=None):
+            title=None, year=None, year_tolerance=None, path=None, format=None,
+            mode="auto"):
     return SimpleNamespace(library_cmd=library_cmd, tmdb=tmdb, all=all,
                            status=status, json=json, title=title, year=year,
-                           year_tolerance=year_tolerance)
+                           year_tolerance=year_tolerance, path=path,
+                           format=format, mode=mode)
+
+
+def write_file(tmp_path, name, content):
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return str(p)
+
+
+def stub_import(monkeypatch):
+    """http_get branching by URL for import resolution: /movie/999 is unknown
+    (404 -> raises), any other /movie/<id> is the valid TMDB film (title "Mein
+    Film", year 2020), and /search/movie yields SEARCH (first hit id 9268, 1981)
+    unless the query mentions 'Nonexistent' (then no results)."""
+    def fake(url, timeout=None):
+        if "/movie/999" in url:
+            raise RuntimeError("404 Not Found")
+        if "/movie/" in url:
+            return json.dumps(TMDB).encode("utf-8")
+        if "/search/movie" in url:
+            payload = {"results": []} if "Nonexistent" in url else SEARCH
+            return json.dumps(payload).encode("utf-8")
+        raise AssertionError(f"unexpected url {url}")
+    monkeypatch.setattr(theke.core, "http_get", fake)
 
 
 def qargs(queue_cmd, **kw):
@@ -144,6 +169,21 @@ def test_library_add_idempotent(tmp_path, monkeypatch):
         result = cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
         assert result == {"added": 0, "skipped": 1}
         assert len(library_rows(conn)) == 1
+    finally:
+        conn.close()
+
+
+def test_library_add_invalid_tmdb_id_raises(tmp_path, monkeypatch):
+    # An invalid id makes TMDB answer 404 -> http_get raises; add must propagate
+    # it (not silently insert a bogus wish) and leave the table untouched.
+    def boom(url, timeout=None):
+        raise RuntimeError("404 Not Found")
+    monkeypatch.setattr(theke.core, "http_get", boom)
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(RuntimeError):
+            cmd_library(conn, CFG, libargs("add", tmdb=["999999"]))
+        assert library_rows(conn) == []
     finally:
         conn.close()
 
@@ -280,6 +320,124 @@ def test_pick_by_year_empty():
     assert pick_by_year([], 1981, 2) is None
 
 
+# -- import: format detection ------------------------------------------------
+
+def test_detect_format_by_extension():
+    assert theke._import_detect_format("wishes.csv", None) == "csv"
+    assert theke._import_detect_format("wishes.txt", None) == "txt"
+
+
+def test_detect_format_extension_case_insensitive():
+    assert theke._import_detect_format("WISHES.CSV", None) == "csv"
+
+
+def test_detect_format_override_wins():
+    assert theke._import_detect_format("data.dat", "csv") == "csv"
+    assert theke._import_detect_format("wishes.csv", "txt") == "txt"
+
+
+def test_detect_format_unknown_extension_raises():
+    with pytest.raises(ValueError):
+        theke._import_detect_format("data.dat", None)
+
+
+# -- import: title (year) parsing --------------------------------------------
+
+def test_parse_title_with_year():
+    assert theke._parse_title("Der Pate (1972)") == ("Der Pate", 1972)
+
+
+def test_parse_title_without_year():
+    assert theke._parse_title("Heat") == ("Heat", None)
+
+
+def test_parse_title_non_four_digit_paren_is_not_a_year():
+    assert theke._parse_title("Foo (12)") == ("Foo (12)", None)
+
+
+def test_parse_title_trailing_number_without_paren_is_part_of_title():
+    assert theke._parse_title("Blade Runner 2049") == ("Blade Runner 2049", None)
+
+
+# -- import: txt parsing -----------------------------------------------------
+
+def test_parse_txt_auto_classifies_and_skips_blanks():
+    text = "12345\nDer Pate (1972)\n\n  \nHeat\n"
+    assert theke._parse_txt(text, "auto") == [
+        (1, "12345", {"kind": "id", "id": "12345"}),
+        (2, "Der Pate (1972)", {"kind": "title", "title": "Der Pate", "year": 1972}),
+        (5, "Heat", {"kind": "title", "title": "Heat", "year": None}),
+    ]
+
+
+def test_parse_txt_id_mode_takes_whole_line_as_id():
+    text = "12345\nDer Pate (1972)"
+    assert theke._parse_txt(text, "id") == [
+        (1, "12345", {"kind": "id", "id": "12345"}),
+        (2, "Der Pate (1972)", {"kind": "id", "id": "Der Pate (1972)"}),
+    ]
+
+
+def test_parse_txt_title_mode_takes_digits_as_a_title():
+    assert theke._parse_txt("12345", "title") == [
+        (1, "12345", {"kind": "title", "title": "12345", "year": None}),
+    ]
+
+
+# -- import: csv parsing -----------------------------------------------------
+
+def test_parse_csv_tmdb_id_only():
+    assert theke._parse_csv("tmdb_id\n100\n200") == [
+        (2, "100", {"kind": "id", "id": "100"}),
+        (3, "200", {"kind": "id", "id": "200"}),
+    ]
+
+
+def test_parse_csv_title_and_year():
+    assert theke._parse_csv("title,year\nDer Pate,1972\nHeat,") == [
+        (2, "Der Pate,1972", {"kind": "title", "title": "Der Pate", "year": 1972}),
+        (3, "Heat,", {"kind": "title", "title": "Heat", "year": None}),
+    ]
+
+
+def test_parse_csv_all_columns_prefers_id_then_title_and_ignores_dummy():
+    text = "tmdb_id,title,year,dummy\n100,,,x\n,Heat,1995,y"
+    assert theke._parse_csv(text) == [
+        (2, "100,,,x", {"kind": "id", "id": "100"}),
+        (3, ",Heat,1995,y", {"kind": "title", "title": "Heat", "year": 1995}),
+    ]
+
+
+def test_parse_csv_unknown_column_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("foo\n1")
+
+
+def test_parse_csv_title_without_year_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("title\nHeat")
+
+
+def test_parse_csv_year_without_title_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("year\n1995")
+
+
+def test_parse_csv_no_id_or_title_column_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("dummy\nx")
+
+
+def test_parse_csv_bad_year_is_a_row_error():
+    rows = theke._parse_csv("title,year\nHeat,abc")
+    assert rows[0][0] == 2 and rows[0][2]["kind"] == "error"
+
+
+def test_parse_csv_empty_row_is_a_row_error():
+    rows = theke._parse_csv("tmdb_id,title,year\n,,")
+    assert rows[0][0] == 2 and rows[0][2]["kind"] == "error"
+
+
 # -- cmd_library add by title ------------------------------------------------
 
 def test_library_add_by_title_resolves_tmdb_id(tmp_path, monkeypatch):
@@ -359,6 +517,122 @@ def test_library_add_title_and_tmdb_together_raises(tmp_path, monkeypatch):
     try:
         with pytest.raises(ValueError):
             cmd_library(conn, CFG, libargs("add", tmdb=["100"], title="X"))
+    finally:
+        conn.close()
+
+
+# -- cmd_library import ------------------------------------------------------
+
+def test_import_txt_auto_adds_wishes(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100\nDie Klapperschlange (1981)\n")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result == {"added": 2, "skipped": 0, "failed": 0, "errors": []}
+        assert {r["tmdb_id"] for r in library_rows(conn)} == {"100", "9268"}
+    finally:
+        conn.close()
+
+
+def test_import_unresolved_title_goes_to_error_log(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "Nonexistent Film (2000)\n100")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1
+        assert result["failed"] == 1
+        assert result["errors"][0]["line"] == 1
+        assert result["errors"][0]["input"] == "Nonexistent Film (2000)"
+        assert [r["tmdb_id"] for r in library_rows(conn)] == ["100"]
+    finally:
+        conn.close()
+
+
+def test_import_invalid_tmdb_id_goes_to_error_log(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "999")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 0 and result["failed"] == 1
+        assert result["errors"][0]["input"] == "999"
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
+
+
+def test_import_idempotent_skips_existing(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100")
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result == {"added": 0, "skipped": 1, "failed": 0, "errors": []}
+    finally:
+        conn.close()
+
+
+def test_import_csv_resolves_id_and_title(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.csv",
+                      "tmdb_id,title,year\n100,,\n,Die Klapperschlange,1981\n")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 2 and result["failed"] == 0
+        assert {r["tmdb_id"] for r in library_rows(conn)} == {"100", "9268"}
+    finally:
+        conn.close()
+
+
+def test_import_csv_bad_year_row_in_error_log(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.csv",
+                      "title,year\nDie Klapperschlange,1981\nHeat,abc")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 1
+        assert result["errors"][0]["line"] == 3
+    finally:
+        conn.close()
+
+
+def test_import_format_override(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.dat", "100")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG,
+                             libargs("import", path=path, format="txt", json=True))
+        assert result["added"] == 1
+    finally:
+        conn.close()
+
+
+def test_import_without_key_raises(tmp_path):
+    path = write_file(tmp_path, "wishes.txt", "100")
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ConfigError):
+            cmd_library(conn, Config(), libargs("import", path=path))
+    finally:
+        conn.close()
+
+
+def test_import_human_output_lists_errors(tmp_path, monkeypatch, capsys):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "Nonexistent (2000)")
+    conn = open_db(tmp_path)
+    try:
+        capsys.readouterr()
+        cmd_library(conn, CFG, libargs("import", path=path))   # not --json
+        out = capsys.readouterr().out
+        assert "0 added, 0 skipped, 1 failed" in out
+        assert "line 1:" in out
     finally:
         conn.close()
 
@@ -526,6 +800,32 @@ def test_library_cli_add_by_title(tmp_path, monkeypatch, capsys):
         assert library_rows(conn)[0]["tmdb_id"] == "9268"
     finally:
         conn.close()
+
+
+def test_import_cli_txt(tmp_path, monkeypatch, capsys):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100")
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY"}),
+                       encoding="utf-8")
+    assert main(["--json", "--config", str(cfgpath),
+                 "library", "import", path]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"added": 1, "skipped": 0, "failed": 0, "errors": []}
+
+
+def test_import_cli_format_override(tmp_path, monkeypatch, capsys):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.dat", "tmdb_id\n100")
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY"}),
+                       encoding="utf-8")
+    assert main(["--json", "--config", str(cfgpath), "library", "import",
+                 path, "--format", "csv"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["added"] == 1
 
 
 def test_update_cli_runs(tmp_path, monkeypatch, capsys):

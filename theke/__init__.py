@@ -5,6 +5,7 @@ needed). Sections: config / DB / CLI.
 """
 
 import argparse
+import csv
 import dataclasses
 import glob
 import hashlib
@@ -1408,36 +1409,42 @@ def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
     """Dispatch a library action: `add` stages wishes, list/remove manage them."""
     match args.library_cmd:
         case "add":    return _library_add(conn, cfg, args)
+        case "import": return _library_import(conn, cfg, args)
         case "list":   return _library_list(conn, args)
         case "remove": return _library_remove(conn, args)
         case _: raise DbError(f"unhandled library action: {args.library_cmd}")
 
 
 def _wish_meta(cfg, tmdb_id) -> tuple:
-    """Best-effort (title, year) for the wish label; ('', None) with no key or on
-    failure (the label/year are convenience only, never load-bearing)."""
+    """(title, year) for the wish label, via a TMDB lookup that doubles as id
+    verification: an invalid id answers 404 and propagates, so a bogus wish is
+    never silently added. ('', None) only without a key (nothing to verify or
+    label against)."""
     if not cfg.tmdb_api_key:
         return "", None
-    try:
-        meta = tmdb_movie(cfg, tmdb_id)
-        return meta["title"] or "", meta["year"]
-    except Exception as exc:
-        log.warning("library add %s: title lookup failed: %s", tmdb_id, exc)
-        return "", None
+    meta = tmdb_movie(cfg, tmdb_id)
+    return meta["title"] or "", meta["year"]
+
+
+def _search_title(cfg, title, year, tol) -> tuple:
+    """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
+    year tolerant by `tol` years (smallest distance wins, ties keep popularity).
+    Raises ValueError when nothing qualifies. The pure-input core shared by
+    `library add --title` and `library import`."""
+    cand = pick_by_year(tmdb_search(cfg, title), year, tol)
+    if cand is None:
+        raise ValueError(f"no TMDB movie for {title!r} (year {year}, +-{tol})")
+    return cand["tmdb_id"], cand["title"], cand["year"]
 
 
 def _resolve_title(cfg, args) -> tuple:
-    """Resolve --title (+ tolerant --year) to one (tmdb_id, title, year) via TMDB
-    search. The year may be off by --year-tolerance years (default: config
-    match_year_tolerance, as in match). Raises when unresolvable."""
+    """Resolve --title (+ tolerant --year) to one (tmdb_id, title, year). The year
+    may be off by --year-tolerance years (default: config match_year_tolerance, as
+    in match). Raises when unresolvable."""
     if not cfg.tmdb_api_key:
         raise ConfigError("--title lookup needs a TMDB API key (set tmdb_api_key)")
     tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
-    cand = pick_by_year(tmdb_search(cfg, args.title), args.year, tol)
-    if cand is None:
-        raise ValueError(f"no TMDB movie for {args.title!r} "
-                         f"(year {args.year}, +-{tol})")
-    return cand["tmdb_id"], cand["title"], cand["year"]
+    return _search_title(cfg, args.title, args.year, tol)
 
 
 def _library_add(conn, cfg, args) -> dict:
@@ -1453,6 +1460,13 @@ def _library_add(conn, cfg, args) -> dict:
         wishes = [(str(t), *_wish_meta(cfg, t)) for t in args.tmdb]
     else:
         raise ValueError("library add needs --tmdb or --title")
+    return _insert_wishes(conn, wishes)
+
+
+def _insert_wishes(conn, wishes) -> dict:
+    """Insert (tmdb_id, title, year) wishes as status 'W' in one transaction.
+    Idempotent: an existing tmdb_id is left untouched (counted as skipped, never
+    reset from 'L' back to 'W'). Returns the added/skipped counts."""
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
@@ -1537,6 +1551,163 @@ def _library_record(conn, tmdb_id, path, year):
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+# -- library import (phase 9: bulk wishes from a txt/csv file) ----------------
+# Read a wishlist file into the library, best-effort: every line resolves to a
+# tmdb_id (given directly or via a title/year search), and entries that do not
+# resolve are collected into an error log instead of aborting the import. The
+# parsers are pure (text in, entries out); only resolution touches TMDB. An entry
+# is {"kind": "id"|"title"|"error", ...}; an "error" entry is a parse-level row
+# problem (bad year, empty row) that never reaches TMDB.
+
+_IMPORT_FORMATS = ("txt", "csv")
+_YEAR_SUFFIX = re.compile(r"\s*\((\d{4})\)\s*$")   # trailing "(YYYY)"
+_CSV_COLS = ("tmdb_id", "title", "year", "dummy")  # "dummy" is ignored
+
+
+def _import_detect_format(path, override):
+    """Pick the file format: an explicit override wins, else the extension
+    (.txt/.csv, case-insensitive). Raises ValueError when neither decides."""
+    if override:
+        return override
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    if ext in _IMPORT_FORMATS:
+        return ext
+    raise ValueError(f"cannot infer format from {path!r}; use --format")
+
+
+def _parse_title(text):
+    """Split "Title (YYYY)" into (title, year); a missing or non-4-digit suffix
+    yields year None and the whole (stripped) text as the title."""
+    m = _YEAR_SUFFIX.search(text)
+    if m:
+        return text[:m.start()].strip(), int(m.group(1))
+    return text.strip(), None
+
+
+def _txt_entry(raw, mode):
+    """Classify one non-blank txt line into an id/title entry. `auto` reads an
+    all-digit line as an id and anything else as a title; `id`/`title` force it."""
+    if mode == "id" or (mode == "auto" and raw.isdigit()):
+        return {"kind": "id", "id": raw}
+    title, year = _parse_title(raw)
+    return {"kind": "title", "title": title, "year": year}
+
+
+def _parse_txt(text, mode):
+    """Parse a txt wishlist into (lineno, raw, entry) tuples, skipping blank
+    lines. Line numbers track the source file (blanks counted)."""
+    out = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        raw = line.strip()
+        if raw:
+            out.append((lineno, raw, _txt_entry(raw, mode)))
+    return out
+
+
+def _csv_header(cols):
+    """Validate a csv header and return the index map of the recognized data
+    columns. Unknown names, title/year not paired, or no tmdb_id/title all raise
+    (structural errors that abort the import)."""
+    cols = [c.strip() for c in cols]
+    unknown = [c for c in cols if c not in _CSV_COLS]
+    if unknown:
+        raise ValueError(f"unknown csv column(s): {', '.join(unknown)} "
+                         f"(allowed: {', '.join(_CSV_COLS)})")
+    idx = {name: cols.index(name) for name in ("tmdb_id", "title", "year")
+           if name in cols}
+    if ("title" in idx) != ("year" in idx):
+        raise ValueError("csv needs both 'title' and 'year' columns or neither")
+    if "tmdb_id" not in idx and "title" not in idx:
+        raise ValueError("csv needs a 'tmdb_id' or 'title' column")
+    return idx
+
+
+def _cell(row, idx, name):
+    """The stripped value of column `name` in `row`, or '' when absent/short."""
+    pos = idx.get(name)
+    return row[pos].strip() if pos is not None and pos < len(row) else ""
+
+
+def _csv_entry(row, idx):
+    """Build one entry from a csv data row: a filled tmdb_id wins, else a filled
+    title (+ optional year). A bad year or a row with neither is an error entry."""
+    tmdb_id = _cell(row, idx, "tmdb_id")
+    if tmdb_id:
+        return {"kind": "id", "id": tmdb_id}
+    title = _cell(row, idx, "title")
+    if not title:
+        return {"kind": "error", "reason": "row has neither tmdb_id nor title"}
+    year_cell = _cell(row, idx, "year")
+    if not year_cell:
+        return {"kind": "title", "title": title, "year": None}
+    try:
+        return {"kind": "title", "title": title, "year": int(year_cell)}
+    except ValueError:
+        return {"kind": "error", "reason": f"invalid year {year_cell!r}"}
+
+
+def _parse_csv(text):
+    """Parse a csv wishlist into (lineno, raw, entry) tuples. The header is
+    validated (structural errors raise); per-row data problems become 'error'
+    entries. Fully blank lines are skipped; line numbers track the source file."""
+    lines = text.splitlines()
+    rows = list(csv.reader(lines))
+    if not rows:
+        return []
+    idx = _csv_header(rows[0])
+    out = []
+    for i in range(1, len(rows)):   # rows[0] is the header
+        if rows[i]:                 # a fully blank line yields []; skip it
+            out.append((i + 1, lines[i], _csv_entry(rows[i], idx)))
+    return out
+
+
+def _resolve_entry(cfg, entry, tol) -> tuple:
+    """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
+    id is verified via TMDB (a bad id propagates as 404); a title is searched."""
+    if entry["kind"] == "id":
+        meta = tmdb_movie(cfg, entry["id"])
+        return str(entry["id"]), meta["title"] or "", meta["year"]
+    return _search_title(cfg, entry["title"], entry["year"], tol)
+
+
+def _library_import(conn, cfg, args) -> dict:
+    """Bulk-add wishes from a txt/csv file. Each entry resolves to a tmdb_id
+    (directly or via a title/year search); entries that do not resolve are
+    collected into an error log and the rest are added (status 'W', idempotent).
+    Resolution (the TMDB IO) runs before the insert transaction, like
+    `_library_add`. Returns added/skipped/failed counts plus the errors."""
+    if not cfg.tmdb_api_key:
+        raise ConfigError("library import needs a TMDB API key (set tmdb_api_key)")
+    fmt = _import_detect_format(args.path, args.format)
+    with open(args.path, encoding="utf-8-sig") as fh:
+        text = fh.read()
+    entries = _parse_txt(text, args.mode) if fmt == "txt" else _parse_csv(text)
+    tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
+    resolved, errors = [], []
+    for lineno, raw, entry in entries:
+        if entry["kind"] == "error":
+            errors.append({"line": lineno, "input": raw, "reason": entry["reason"]})
+            continue
+        try:
+            resolved.append(_resolve_entry(cfg, entry, tol))
+        except Exception as exc:
+            errors.append({"line": lineno, "input": raw, "reason": str(exc)})
+    result = {**_insert_wishes(conn, resolved), "failed": len(errors), "errors": errors}
+    if args.json:
+        return result
+    _print_import(result)
+    return {}
+
+
+def _print_import(result):
+    """Counts headline + one line per unresolved entry to stdout (the result)."""
+    print(f'{result["added"]} added, {result["skipped"]} skipped, '
+          f'{result["failed"]} failed')
+    for e in result["errors"]:
+        print(f'  line {e["line"]}: {e["input"]!r} -- {e["reason"]}')
 
 
 # -- update (phase 9: the wishlist automation orchestrator) -------------------
@@ -1779,12 +1950,17 @@ def build_parser() -> argparse.ArgumentParser:
     libp = sub.add_parser("library", help="manage the wishlist (TMDB ids to acquire)", description="Manage the wishlist: TMDB movie ids to acquire automatically. Entries are status 'W' (wish) until a finished download records them as 'L' (in library). DB-only: nothing here touches the filesystem.")
     lsub = libp.add_subparsers(dest="library_cmd", required=True, metavar="action")
     ladd = lsub.add_parser("add",    help="add wishes by tmdb_id or title",  description="Add movie wishes (status 'W'): give TMDB ids directly via --tmdb, or resolve a title via --title (with a tolerant --year). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured.")
+    limp = lsub.add_parser("import", help="bulk-add wishes from a txt/csv file", description="Bulk-add movie wishes from a file. Each entry resolves to a TMDB id -- given directly or searched from a title/year -- and entries that do not resolve are reported in an error log rather than aborting the import; the rest are added (status 'W', idempotent). Format is taken from the extension (.txt/.csv), overridable with --format. txt: one 'Title (Year)' or tmdb_id per line (see --mode). csv: a header row of 'tmdb_id', 'title', 'year' columns (any may be missing; 'title'/'year' both or neither; 'dummy' columns ignored, other names rejected). Needs a TMDB key.")
     llst = lsub.add_parser("list",   help="list library entries (default)", description="List library entries, oldest creation first. Filter by lifecycle state with --status.")
     lrem = lsub.add_parser("remove", help="remove library entries",         description="Delete library entries by exactly one selector: given tmdb_ids or --all.")
     ladd.add_argument("-t", "--tmdb",            action="append", metavar="ID",    help="TMDB movie id to wish for (repeatable)")
     ladd.add_argument(      "--title",           metavar="TITLE",                  help="movie title to resolve to a TMDB id via search (instead of --tmdb)")
     ladd.add_argument("-y", "--year",            type=int, metavar="YEAR",         help="release year to disambiguate --title (may be off by --year-tolerance)")
     ladd.add_argument(      "--year-tolerance",  type=int, metavar="N", dest="year_tolerance", help="accepted year difference for --title (default: config match_year_tolerance)")
+    limp.add_argument("path",                    metavar="PATH",                   help="the txt/csv wishlist file to import")
+    limp.add_argument("-F", "--format",          choices=["txt", "csv"],           help="file format (default: inferred from the extension)")
+    limp.add_argument("-m", "--mode",            choices=["auto", "id", "title"], default="auto", help="txt line interpretation: auto (digits=id, else title), id, or title (default auto)")
+    limp.add_argument(      "--year-tolerance",  type=int, metavar="N", dest="year_tolerance", help="accepted year difference for title rows (default: config match_year_tolerance)")
     llst.add_argument("-s", "--status", choices=list(LIBRARY_STATUS), metavar="STATE", help="filter by state: " + ", ".join(LIBRARY_STATUS))
     lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
     lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")

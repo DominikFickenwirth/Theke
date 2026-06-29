@@ -664,9 +664,11 @@ und `--title` schließen sich aus.
 **Idempotent**: eine bereits vorhandene ID bleibt unangetastet (zählt als
 `skipped`, wird nie von `L` zurück auf `W` gesetzt). Ist ein TMDB-Key
 konfiguriert, werden Filmtitel und Erscheinungsjahr (`year`) als Label erfasst
-(bei `--title` aus dem gefundenen Treffer; bei `--tmdb` per Abruf, der nur der
-Anzeige dient -- ein Fehlschlag lässt Titel/Jahr leer). `--title` erfordert einen
-TMDB-Key. Gibt `added`/`skipped` aus.
+(bei `--title` aus dem gefundenen Treffer; bei `--tmdb` per Abruf, der zugleich
+die ID prüft: eine ungültige ID liefert einen TMDB-404 und lässt `add` mit einem
+Fehler abbrechen, statt einen ungültigen Wunsch anzulegen). Ohne TMDB-Key bleiben
+Titel/Jahr leer (keine Prüfung möglich). `--title` erfordert einen TMDB-Key. Gibt
+`added`/`skipped` aus.
 
 | Option                  | Wirkung                                                  |
 | ----------------------- | -------------------------------------------------------- |
@@ -678,6 +680,44 @@ TMDB-Key. Gibt `added`/`skipped` aus.
 ```powershell
 theke --db build/theke.db library add --tmdb 1474601
 theke --db build/theke.db library add --title "Die Klapperschlange" --year 1981
+```
+
+### `library import`
+
+Fügt **mehrere** Filmwünsche aus einer Datei hinzu (Massen-Import). Jeder Eintrag
+wird auf eine `tmdb_id` aufgelöst -- direkt angegeben oder per Titel/Jahr-Suche
+(wie bei `add --title`, inkl. Jahres-Toleranz). Einträge, die sich nicht auflösen
+lassen, landen in einem **Fehlerprotokoll**, statt den Import abzubrechen; der
+Rest wird angelegt (`W`, idempotent). Erfordert einen TMDB-Key.
+
+Das Format ergibt sich aus der Endung (`.txt`/`.csv`), `--format` überschreibt:
+
+- **txt**: eine Zeile je Eintrag, entweder `Titel (Jahr)` oder eine `tmdb_id`;
+  Leerzeilen werden übersprungen. `--mode` steuert die Deutung: `auto` (Default --
+  reine Ziffern = `tmdb_id`, sonst Titel), `id` (alles als IDs) oder `title`
+  (alles als Titel).
+- **csv**: Kopfzeile aus den Spalten `tmdb_id`, `title`, `year` (jede darf
+  fehlen). `title` und `year` müssen **beide** oder **keine** vorhanden sein;
+  Spalten namens `dummy` werden ignoriert, andere Namen sind ein Fehler. Pro
+  Zeile gewinnt eine gefüllte `tmdb_id`, sonst der Titel (+ optionales Jahr); eine
+  Zeile ohne beides oder mit ungültigem Jahr kommt ins Fehlerprotokoll.
+
+Direkt angegebene IDs werden gegen TMDB geprüft (eine ungültige ID landet im
+Fehlerprotokoll). Gibt `added`/`skipped`/`failed` und die `errors`-Liste
+(`line`, `input`, `reason`) aus; mit `--json` als Objekt, sonst als Bericht auf
+stdout.
+
+| Option                       | Wirkung                                            |
+| ---------------------------- | -------------------------------------------------- |
+| `PATH`                       | Die zu importierende txt/csv-Datei.                |
+| `-F`, `--format {txt,csv}`   | Format erzwingen (Default: aus der Endung).        |
+| `-m`, `--mode {auto,id,title}` | txt-Deutung je Zeile (Default `auto`).           |
+| `--year-tolerance N`         | Erlaubte Jahresdifferenz für Titel-Zeilen.         |
+
+```powershell
+theke --db build/theke.db library import wishes.txt
+theke --db build/theke.db --json library import wishes.csv
+theke --db build/theke.db library import liste.dat --format csv
 ```
 
 ### `library list`
