@@ -441,6 +441,29 @@ def test_queue_add_mediathek_fills_url_and_path(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_queue_add_tmdb_stores_year(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)   # TMDB release year 2020
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_de", language="de")
+        cmd_queue(conn, Config(tmdb_api_key="KEY", languages=["de"]), qargs(tmdb=["100"]))
+        assert queue_rows(conn)[0]["year"] == 2020
+    finally:
+        conn.close()
+
+
+def test_queue_add_mediathek_stores_enrich_year(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)   # not needed (no tmdb_id)
+    conn = open_db(tmp_path)
+    try:
+        insert_mediathek(conn, "m_solo", status="1", tmdb_id="", language="de",
+                         clean_title="Solo", year=2019)
+        cmd_queue(conn, CFG, qargs(mediathek_id=["m_solo"]))
+        assert queue_rows(conn)[0]["year"] == 2019   # enriched year, no TMDB
+    finally:
+        conn.close()
+
+
 def test_queue_add_fills_subtitle_url(tmp_path, monkeypatch):
     stub_tmdb(monkeypatch)
     conn = open_db(tmp_path)

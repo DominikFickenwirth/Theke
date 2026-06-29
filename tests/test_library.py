@@ -110,7 +110,7 @@ def stub_stages(monkeypatch):
 def test_library_migration_creates_table(tmp_path):
     conn = open_db(tmp_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(library)")}
         assert cols == {"tmdb_id", "status", "title", "year", "path",
                         "created_at", "updated_at"}
@@ -355,6 +355,8 @@ def test_download_records_library_as_L(tmp_path, monkeypatch):
         # path is the folder the video landed in (template renders
         # "<lib>/Mein Film (2020)/Mein Film (2020).mp4").
         assert rows[0]["path"] == (tmp_path / "lib" / "Mein Film (2020)").as_posix()
+        # year carried through the queue, even without a prior wish.
+        assert rows[0]["year"] == 2020
     finally:
         conn.close()
 
