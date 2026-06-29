@@ -512,9 +512,9 @@ zum Wiederholen erneut `approve` (`--force`). Gibt `downloaded`/`failed` aus.
 
 Nach erfolgreichem Move wird der Film in der Bibliothek vermerkt: trägt die Zeile
 eine `tmdb_id`, wird der zugehörige `library`-Eintrag auf `L` (in Bibliothek)
-gesetzt -- ein offener Wunsch (`W`) kippt damit auf `L`, sonst wird ein neuer
-`L`-Eintrag angelegt (siehe `theke library`). So lädt ein erneutes `theke update`
-einen bereits geholten Wunsch nicht noch einmal.
+gesetzt und sein `path` auf den Zielordner -- ein offener Wunsch (`W`) kippt damit
+auf `L`, sonst wird ein neuer `L`-Eintrag angelegt (siehe `theke library`). So
+lädt ein erneutes `theke update` einen bereits geholten Wunsch nicht noch einmal.
 
 | Option          | Wirkung                                          |
 | --------------- | ------------------------------------------------ |
@@ -636,13 +636,15 @@ theke file move --in build/film.mp4 --out "M:/Filme/Film (2020)/Film (2020).mp4"
 Stufe 9: verwaltet die **Wunschliste** -- TMDB-Film-IDs, die automatisch
 beschafft werden sollen. Die Tabelle `library` ist Wunschliste und Bibliotheks-
 Akte in einem (Schlüssel `tmdb_id`); die Spalte `status` (ein Zeichen) ist `W`
-(Wunsch), `M` (fehlende Folge, später) oder `L` (in Bibliothek). Reine
-DB-Operation; nichts hier berührt das Dateisystem. Ohne Aktion läuft der Default
-`list`, d. h. `theke library` entspricht `theke library list`.
+(Wunsch), `M` (fehlende Folge, später) oder `L` (in Bibliothek). Daneben hält der
+Eintrag das TMDB-Erscheinungsjahr `year` (beim Hinzufügen erfasst) und nach dem
+Download den `path` zum Bibliotheksordner, in dem die Video-Datei(en) liegen.
+Reine DB-Operation; nichts hier berührt das Dateisystem. Ohne Aktion läuft der
+Default `list`, d. h. `theke library` entspricht `theke library list`.
 
 Ein Wunsch verlässt `W` erst, wenn sein Download tatsächlich fertig ist: dann
-vermerkt `theke queue download` ihn als `L`. `theke update` arbeitet nur offene
-Wünsche (`W`) ab.
+vermerkt `theke queue download` ihn als `L` und trägt seinen Bibliotheksordner als
+`path` ein. `theke update` arbeitet nur offene Wünsche (`W`) ab.
 
 ### `library add`
 
@@ -657,9 +659,10 @@ und `--title` schließen sich aus.
 
 **Idempotent**: eine bereits vorhandene ID bleibt unangetastet (zählt als
 `skipped`, wird nie von `L` zurück auf `W` gesetzt). Ist ein TMDB-Key
-konfiguriert, wird der Filmtitel als Label erfasst (bei `--title` der gefundene
-Titel; bei `--tmdb` nur Anzeige, ein fehlgeschlagener Abruf lässt das Label
-leer). `--title` erfordert einen TMDB-Key. Gibt `added`/`skipped` aus.
+konfiguriert, werden Filmtitel und Erscheinungsjahr (`year`) als Label erfasst
+(bei `--title` aus dem gefundenen Treffer; bei `--tmdb` per Abruf, der nur der
+Anzeige dient -- ein Fehlschlag lässt Titel/Jahr leer). `--title` erfordert einen
+TMDB-Key. Gibt `added`/`skipped` aus.
 
 | Option                  | Wirkung                                                  |
 | ----------------------- | -------------------------------------------------------- |
