@@ -61,17 +61,31 @@ def library_rows(conn):
 
 def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False,
             title=None, year=None, year_tolerance=None, path=None, format=None,
-            mode="auto"):
+            mode="auto", tmdb_list=None):
     return SimpleNamespace(library_cmd=library_cmd, tmdb=tmdb, all=all,
                            status=status, json=json, title=title, year=year,
                            year_tolerance=year_tolerance, path=path,
-                           format=format, mode=mode)
+                           format=format, mode=mode, tmdb_list=tmdb_list)
 
 
 def write_file(tmp_path, name, content):
     p = tmp_path / name
     p.write_text(content, encoding="utf-8")
     return str(p)
+
+
+# A v3 /list/{id} response: two movies + one tv item (skipped, library is
+# movies-only). Years derive from release_date / first_air_date.
+TMDB_LIST = {"items": [
+    {"id": 100, "title": "Mein Film",  "release_date": "2020-05-01", "media_type": "movie"},
+    {"id": 200, "title": "Zweiter",    "release_date": "1999-01-01", "media_type": "movie"},
+    {"id": 300, "name":  "Eine Serie", "first_air_date": "2010-01-01", "media_type": "tv"},
+]}
+
+
+def stub_list(monkeypatch, payload=TMDB_LIST):
+    monkeypatch.setattr(theke.core, "http_get",
+        lambda url, timeout=None, headers=None: json.dumps(payload).encode("utf-8"))
 
 
 def stub_import(monkeypatch):
@@ -194,6 +208,102 @@ def test_library_add_without_key_leaves_title_empty(tmp_path):
         cmd_library(conn, Config(), libargs("add", tmdb=["100"]))
         assert library_rows(conn)[0]["title"] == ""
         assert library_rows(conn)[0]["year"] is None
+    finally:
+        conn.close()
+
+
+def test_tmdb_list_parses_movie_and_tv_items(monkeypatch):
+    stub_list(monkeypatch)
+    items = theke.tmdb_list(CFG, "7")
+    assert items == [
+        {"tmdb_id": "100", "title": "Mein Film",  "year": 2020, "media_type": "movie"},
+        {"tmdb_id": "200", "title": "Zweiter",    "year": 1999, "media_type": "movie"},
+        {"tmdb_id": "300", "title": "Eine Serie", "year": 2010, "media_type": "tv"},
+    ]
+
+
+def test_tmdb_list_paginates_over_total_pages(monkeypatch):
+    # a paged response (total_pages 2) is followed page by page until exhausted.
+    pages = {
+        1: {"results": [{"id": 1, "title": "A", "release_date": "2001-01-01",
+                         "media_type": "movie"}], "total_pages": 2},
+        2: {"results": [{"id": 2, "title": "B", "release_date": "2002-01-01",
+                         "media_type": "movie"}], "total_pages": 2},
+    }
+    def fake(url, timeout=None, headers=None):
+        page = 2 if "page=2" in url else 1
+        return json.dumps(pages[page]).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    items = theke.tmdb_list(CFG, "7")
+    assert [it["tmdb_id"] for it in items] == ["1", "2"]
+
+
+def test_tmdb_list_uses_bearer_when_token_set(monkeypatch):
+    seen = {}
+    def fake(url, timeout=None, headers=None):
+        seen["url"], seen["headers"] = url, headers
+        return json.dumps({"items": []}).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    theke.tmdb_list(Config(tmdb_read_token="TOK"), "7")
+    assert seen["headers"] == {"Authorization": "Bearer TOK"}
+    assert "api_key" not in seen["url"]
+
+
+def test_tmdb_list_uses_api_key_without_token(monkeypatch):
+    seen = {}
+    def fake(url, timeout=None, headers=None):
+        seen["url"], seen["headers"] = url, headers
+        return json.dumps({"items": []}).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    theke.tmdb_list(Config(tmdb_api_key="KEY"), "7")
+    assert seen["headers"] is None
+    assert "api_key=KEY" in seen["url"]
+
+
+def test_library_add_tmdb_list_adds_movies_skips_series(tmp_path, monkeypatch, caplog):
+    stub_list(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level("WARNING"):
+            result = cmd_library(conn, CFG, libargs("add", tmdb_list=["7"]))
+        assert result == {"added": 2, "skipped": 0, "series_skipped": 1}
+        rows = library_rows(conn)
+        assert [r["tmdb_id"] for r in rows] == ["100", "200"]
+        assert all(r["status"] == "W" for r in rows)
+        assert rows[0]["title"] == "Mein Film" and rows[0]["year"] == 2020
+        assert any("series" in r.message for r in caplog.records)   # warned on the skip
+    finally:
+        conn.close()
+
+
+def test_library_add_tmdb_list_idempotent(tmp_path, monkeypatch):
+    stub_list(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, CFG, libargs("add", tmdb_list=["7"]))
+        result = cmd_library(conn, CFG, libargs("add", tmdb_list=["7"]))
+        assert result == {"added": 0, "skipped": 2, "series_skipped": 1}
+        assert len(library_rows(conn)) == 2
+    finally:
+        conn.close()
+
+
+def test_library_add_tmdb_list_without_credentials_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ConfigError):
+            cmd_library(conn, Config(), libargs("add", tmdb_list=["7"]))
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
+
+
+def test_library_add_tmdb_list_and_tmdb_together_raises(tmp_path, monkeypatch):
+    stub_list(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            cmd_library(conn, CFG, libargs("add", tmdb=["100"], tmdb_list=["7"]))
     finally:
         conn.close()
 
@@ -770,6 +880,58 @@ def test_update_wish_failure_does_not_abort(tmp_path, monkeypatch):
         conn.close()
 
 
+# A configured list with a single movie that matches the inserted mediathek row.
+LIST_ONE = {"items": [{"id": 100, "title": "Mein Film",
+                       "release_date": "2020-05-01", "media_type": "movie"}]}
+
+
+def stub_update_with_list(monkeypatch, payload):
+    """http_get branching for update: /list/ yields the TMDB list payload, any
+    /movie/<id> the valid TMDB film used for matching."""
+    def fake(url, timeout=None, headers=None):
+        if "/list/" in url:
+            return json.dumps(payload).encode("utf-8")
+        if "/movie/" in url:
+            return json.dumps(TMDB).encode("utf-8")
+        raise AssertionError(f"unexpected url {url}")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+
+
+def test_update_imports_configured_list(tmp_path, monkeypatch):
+    # a configured tmdb list is imported into the library before the wish loop,
+    # so its movies are matched + queued + downloaded in the same pass.
+    stub_update_with_list(monkeypatch, LIST_ONE)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=True, tmdb_lists=["7"])
+        insert_movie(conn, "m_de", tmdb_id="", status="1")
+        result = cmd_update(conn, cfg, SimpleNamespace())
+        assert result["list_added"] == 1
+        assert result["wishes"] == 1            # imported wish entered the loop
+        assert result["downloaded"] == 1
+        assert library_rows(conn)[0]["tmdb_id"] == "100"
+        assert library_rows(conn)[0]["status"] == "L"
+    finally:
+        conn.close()
+
+
+def test_update_list_failure_does_not_abort(tmp_path, monkeypatch):
+    def boom(url, timeout=None, headers=None):
+        raise RuntimeError("list down")
+    monkeypatch.setattr(theke.core, "http_get", boom)
+    stub_stages(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=False, tmdb_lists=["7"])
+        result = cmd_update(conn, cfg, SimpleNamespace())
+        assert result["list_added"] == 0
+        assert result["wishes"] == 0
+    finally:
+        conn.close()
+
+
 # -- CLI wiring --------------------------------------------------------------
 
 def test_library_cli_add_and_default_list(tmp_path, monkeypatch, capsys):
@@ -798,6 +960,23 @@ def test_library_cli_add_by_title(tmp_path, monkeypatch, capsys):
     conn = db_connect(db)
     try:
         assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
+
+
+def test_library_cli_add_tmdb_list(tmp_path, monkeypatch, capsys):
+    stub_list(monkeypatch)
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY"}),
+                       encoding="utf-8")
+    assert main(["--json", "--config", str(cfgpath), "library", "add",
+                 "--tmdb-list", "7"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"added": 2, "skipped": 0, "series_skipped": 1}
+    conn = db_connect(db)
+    try:
+        assert [r["tmdb_id"] for r in library_rows(conn)] == ["100", "200"]
     finally:
         conn.close()
 

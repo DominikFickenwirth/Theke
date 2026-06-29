@@ -122,6 +122,21 @@ def test_config_fiction_topics_default_empty(tmp_path, monkeypatch):
     assert load_config(None).fiction_topics == []
 
 
+def test_config_tmdb_list_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(None)
+    assert cfg.tmdb_read_token == ""
+    assert cfg.tmdb_lists == []
+
+
+def test_config_tmdb_list_keys_from_file(tmp_path):
+    path = tmp_path / "t.json"
+    write_config(path, {"tmdb_read_token": "TOK", "tmdb_lists": ["7", "8"]})
+    cfg = load_config(str(path))
+    assert cfg.tmdb_read_token == "TOK"
+    assert cfg.tmdb_lists == ["7", "8"]
+
+
 def test_config_fiction_topics_from_file(tmp_path):
     path = tmp_path / "ft.json"
     write_config(path, {"fiction_topics": ["Mein Regio-Krimi", "Dorf-Saga"]})
@@ -237,6 +252,28 @@ def test_http_get_passes_timeout_to_urlopen(monkeypatch):
     monkeypatch.setattr(theke.core.urllib.request, "urlopen", fake_urlopen)
     assert theke.core.http_get("http://x", 42) == b"body"   # timeout (seconds) is the 2nd arg
     assert seen["timeout"] == 42
+
+
+def test_http_get_merges_custom_headers(monkeypatch):
+    # custom headers (e.g. an Authorization bearer) are merged over the default
+    # User-Agent rather than replacing it.
+    import theke
+    seen = {}
+
+    class Resp:
+        def __enter__(self):     return self
+        def __exit__(self, *a):  return False
+        def read(self):          return b"body"
+
+    def fake_urlopen(request, timeout=None):
+        seen["request"] = request
+        return Resp()
+
+    monkeypatch.setattr(theke.core.urllib.request, "urlopen", fake_urlopen)
+    theke.core.http_get("http://x", headers={"Authorization": "Bearer T"})
+    req = seen["request"]
+    assert req.get_header("Authorization") == "Bearer T"   # custom header passed through
+    assert req.get_header("User-agent") == "theke"          # default User-Agent kept
 
 
 # -- db ----------------------------------------------------------------------
