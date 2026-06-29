@@ -303,6 +303,7 @@ Serientitel zusätzlich in `series`.
 | `-e`, `--episode N`  | Folgennummer (Pflicht bei `--type series`).                   |
 | `-d`, `--dry-run`    | Treffer berechnen, nichts schreiben.                          |
 | `-m`, `--min-conf X` | Mindest-Confidence zum Markieren (Standard: Config).          |
+| `-y`, `--year-tolerance N` | Erlaubte Jahresdifferenz bei Filmen (Standard: Config `match_year_tolerance`). |
 
 ```powershell
 theke --db build/theke.db match run --tmdb 1474601   # candidates/written/arte_linked
@@ -323,6 +324,7 @@ alles, was nicht verworfen wurde -- zum Justieren der Match-Heuristik.
 | `-s`, `--season N`   | Staffelnummer (Pflicht bei `--type series`).                |
 | `-e`, `--episode N`  | Folgennummer (Pflicht bei `--type series`).                 |
 | `-m`, `--min-conf X` | Mindest-Confidence zum Listen (Standard 0.0).               |
+| `-y`, `--year-tolerance N` | Erlaubte Jahresdifferenz bei Filmen (Standard: Config `match_year_tolerance`). |
 | `-l`, `--limit N`    | Maximale Kandidatenzahl (Standard 20).                      |
 
 ```powershell
