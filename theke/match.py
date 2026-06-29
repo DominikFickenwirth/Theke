@@ -105,17 +105,18 @@ def _runtime_factor(runtime, duration):
     return factor, delta, False
 
 
-def score_match(tmdb_meta, row) -> dict:
+def score_match(tmdb_meta, row, year_tolerance=YEAR_TOLERANCE) -> dict:
     """Score one mediathek row against TMDB metadata. Deterministic and
-    explainable: title is the gate, year a near-hard gate, runtime a soft
-    confirmer. Returns confidence + the breakdown that fed it."""
+    explainable: title is the gate, year a near-hard gate (within
+    year_tolerance years), runtime a soft confirmer. Returns confidence + the
+    breakdown that fed it."""
     title_sim = title_similarity(tmdb_meta["titles"], row["clean_title"])
     rejected = title_sim < TITLE_FLOOR
 
     my, ry = row["year"], tmdb_meta.get("year")
     if my is not None and ry is not None:
         year_delta = abs(my - ry)
-        if year_delta > YEAR_TOLERANCE:
+        if year_delta > year_tolerance:
             rejected = True
             year_factor = 0.0
         else:
@@ -254,16 +255,17 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
 
 # -- candidate search --------------------------------------------------------
 
-def find_matches(conn, tmdb_meta, min_conf) -> list:
-    """Scan the movie subset, score each row, return the matches (confidence >=
-    min_conf, not rejected) sorted by confidence desc, then mediathek_id."""
+def find_matches(conn, tmdb_meta, min_conf, year_tolerance=YEAR_TOLERANCE) -> list:
+    """Scan the movie subset, score each row (accepting years within
+    year_tolerance), return the matches (confidence >= min_conf, not rejected)
+    sorted by confidence desc, then mediathek_id."""
     rows = conn.execute("SELECT mediathek_id, clean_title, year, duration, flags "
                         "FROM mediathek WHERE category='Movie' AND status='1'")
     out = []
     for r in rows:
         if r["flags"] and "T" in r["flags"]:   # trailers are never the wanted film
             continue
-        s = score_match(tmdb_meta, r)
+        s = score_match(tmdb_meta, r, year_tolerance)
         if s["rejected"] or s["confidence"] < min_conf:
             continue
         out.append({"mediathek_id": r["mediathek_id"], "clean_title": r["clean_title"],

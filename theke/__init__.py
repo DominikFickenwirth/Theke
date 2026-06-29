@@ -889,17 +889,19 @@ def _match_reset(conn, args) -> dict:
 
 def _match_resolve(conn, cfg, args, min_conf) -> tuple:
     """Resolve the TMDB id and find candidate rows, for a movie (title/year/
-    runtime) or a series episode (series-name + exact season/episode). Returns
-    (meta, result_head, matches); the head carries the episode title + series
-    name for a series, the film title for a movie."""
+    runtime, year within --year-tolerance) or a series episode (series-name +
+    exact season/episode). Returns (meta, result_head, matches); the head
+    carries the episode title + series name for a series, the film title for a
+    movie."""
     if args.type == "series":
         meta = tmdb_tv(cfg, args.tmdb, args.season, args.episode)
         matches = find_episode_matches(conn, meta, min_conf)
         head = {"tmdb_id": meta["tmdb_id"], "title": meta["episode_name"],
                 "series": meta["series_title"]}
     else:
+        tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
         meta = tmdb_movie(cfg, args.tmdb)
-        matches = find_matches(conn, meta, min_conf)
+        matches = find_matches(conn, meta, min_conf, year_tolerance=tol)
         head = {"tmdb_id": meta["tmdb_id"], "title": meta["title"]}
     return meta, head, matches
 
@@ -1556,7 +1558,8 @@ def cmd_update(conn, cfg, args: argparse.Namespace) -> dict:
     for tid in wishes:
         try:
             _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
-                                      episode=None, dry_run=False, min_conf=None))
+                                      episode=None, dry_run=False, min_conf=None,
+                                      year_tolerance=None))
             _queue_add_tmdb(conn, cfg, str(tid), status, {}, totals)
         except Exception as exc:
             failed += 1
@@ -1701,11 +1704,13 @@ def build_parser() -> argparse.ArgumentParser:
     mrun.add_argument("-e", "--episode",  type=int, metavar="N",                                        help="episode number (required for --type series)")
     mrun.add_argument("-d", "--dry-run",  action="store_true",                                          help="compute matches but write nothing")
     mrun.add_argument("-m", "--min-conf", type=float, metavar="X",                                      help="min confidence to tag (default: config match_min_confidence)")
+    mrun.add_argument("-y", "--year-tolerance", type=int, metavar="N", dest="year_tolerance",           help="accepted production-year difference for movies (default: config match_year_tolerance)")
     msho.add_argument("-t", "--tmdb",     required=True, metavar="ID",                                  help="TMDB id to inspect (movie id, or series id for --type series)")
     msho.add_argument("-T", "--type",     default="movie", choices=["movie", "series"],                 help="media type (default movie)")
     msho.add_argument("-s", "--season",   type=int, metavar="N",                                        help="season number (required for --type series)")
     msho.add_argument("-e", "--episode",  type=int, metavar="N",                                        help="episode number (required for --type series)")
     msho.add_argument("-m", "--min-conf", type=float, metavar="X",                                      help="min confidence to list (default 0.0)")
+    msho.add_argument("-y", "--year-tolerance", type=int, metavar="N", dest="year_tolerance",           help="accepted production-year difference for movies (default: config match_year_tolerance)")
     msho.add_argument("-l", "--limit",    type=int, default=20, metavar="N",                            help="max candidates to list (default 20)")
 
     queuep = sub.add_parser("queue", help="stage and review the download queue", description="Stage downloads into the review queue by tmdb_id (deduplicated) or mediathek_id (direct), and manage them. DB-only: nothing here touches the filesystem.")
