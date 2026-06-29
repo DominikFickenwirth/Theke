@@ -1311,6 +1311,7 @@ def _download_entry(conn, cfg, row, force, totals):
                 log.warning("queue %s subtitle skipped: %s", row["id"], exc)
         _cleanup(base)
         _queue_status(conn, row["id"], QUEUE_STATUS["done"], None)
+        _library_record(conn, row["tmdb_id"])
         totals["downloaded"] += 1
         log.info("queue %s done -> %s", row["id"], row["path"])
     except Exception as exc:
@@ -1388,6 +1389,163 @@ def _print_queue(rows):
     for r in rows:
         print(f'  [{r["id"]}] {r["status"]} {r["resolution"]} {_remux_cols(r["remux"])} '
               f'{r["language"]} {r["path"]!r}')
+
+
+# -- library / wishlist (phase 9) --------------------------------------------
+# The library table is wishlist + library record in one, keyed by tmdb_id.
+# Status chars mirror the other tables: 'W' wish, 'M' missing episode, 'L' in
+# library. cmd_library manages wishes; a finished queue download records its
+# tmdb_id as 'L' via _library_record (called from _download_entry).
+
+LIBRARY_STATUS = {"wish": "W", "missing": "M", "library": "L"}
+
+
+def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a library action: `add` stages wishes, list/remove manage them."""
+    match args.library_cmd:
+        case "add":    return _library_add(conn, cfg, args)
+        case "list":   return _library_list(conn, args)
+        case "remove": return _library_remove(conn, args)
+        case _: raise DbError(f"unhandled library action: {args.library_cmd}")
+
+
+def _wish_title(cfg, tmdb_id) -> str:
+    """Best-effort movie title for the wish label; '' with no key or on failure
+    (the label is convenience only, never load-bearing)."""
+    if not cfg.tmdb_api_key:
+        return ""
+    try:
+        return tmdb_movie(cfg, tmdb_id)["title"] or ""
+    except Exception as exc:
+        log.warning("library add %s: title lookup failed: %s", tmdb_id, exc)
+        return ""
+
+
+def _library_add(conn, cfg, args) -> dict:
+    """Add wishes by tmdb_id as status 'W'. Idempotent: an existing tmdb_id is
+    left untouched (counted as skipped, never reset from 'L' back to 'W')."""
+    if not args.tmdb:
+        raise ValueError("library add needs --tmdb")
+    totals = {"added": 0, "skipped": 0}
+    conn.execute("BEGIN")
+    try:
+        for tid in args.tmdb:
+            tid = str(tid)
+            ts = _now()
+            cur = conn.execute(
+                "INSERT INTO library (tmdb_id, status, title, created_at, updated_at) "
+                "VALUES (?, 'W', ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
+                (tid, _wish_title(cfg, tid), ts, ts))
+            totals["added" if cur.rowcount else "skipped"] += 1
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return totals
+
+
+def _library_list(conn, args) -> dict:
+    """Read-only listing, optionally filtered by lifecycle state (--status name),
+    ordered by creation. --json returns the rows; otherwise prints a table."""
+    sql = "SELECT * FROM library"
+    params = ()
+    if args.status:
+        sql += " WHERE status=?"
+        params = (LIBRARY_STATUS[args.status],)
+    sql += " ORDER BY created_at, tmdb_id"
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    if args.json:
+        return {"library": rows, "count": len(rows)}
+    _print_library(rows)
+    return {}
+
+
+def _library_remove(conn, args) -> dict:
+    """Delete library entries by exactly one selector: given tmdb_ids or --all."""
+    if args.all and args.tmdb:
+        raise ValueError("give --tmdb or --all, not both")
+    if not args.all and not args.tmdb:
+        raise ValueError("give --tmdb or --all")
+    if args.all:
+        sql, params = "DELETE FROM library", ()
+    else:
+        ids = [str(t) for t in args.tmdb]
+        sql = "DELETE FROM library WHERE tmdb_id IN (" + ",".join("?" * len(ids)) + ")"
+        params = ids
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(sql, params).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"removed": n}
+
+
+def _print_library(rows):
+    """One header line + one line per entry to stdout (the result)."""
+    print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
+    for r in rows:
+        print(f'  [{r["status"]}] {r["tmdb_id"]:>8}  {r["title"]!r}')
+
+
+def _library_record(conn, tmdb_id):
+    """Record a downloaded film in the library as 'L': flip an existing wish or
+    insert a fresh row. Own transaction (like _queue_status), so it stays outside
+    the long filesystem work. No-op for a queue row without a tmdb_id."""
+    if not tmdb_id:
+        return
+    ts = _now()
+    conn.execute("BEGIN")
+    try:
+        conn.execute(
+            "INSERT INTO library (tmdb_id, status, title, created_at, updated_at) "
+            "VALUES (?, 'L', '', ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
+            "status='L', updated_at=excluded.updated_at", (tmdb_id, ts, ts))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+# -- update (phase 9: the wishlist automation orchestrator) -------------------
+# One unattended pass over the whole pipeline: refresh + enrich the mirror, then
+# for every open wish ('W') resolve its TMDB id, tag the matching rows and queue
+# the deduplicated download set. With queue_auto_approve the approved entries are
+# downloaded straight away (each finished wish is recorded as 'L' by the download
+# stage); otherwise the run stops at the approval gate. A single failing wish
+# never aborts the pass. Reuses the existing stage handlers verbatim.
+
+def _ns(**kw) -> argparse.Namespace:
+    """A throwaway Namespace to drive a reused stage handler from update (each
+    reads only a few attributes)."""
+    return argparse.Namespace(**kw)
+
+
+def cmd_update(conn, cfg, args: argparse.Namespace) -> dict:
+    """Run fetch -> enrich -> (match + queue) per wish -> download (when
+    auto-approved). Returns one aggregated summary."""
+    fetch = cmd_fetch(conn, cfg, _ns(force=False))
+    enriched = _enrich_run(conn, cfg, _ns(force=False))
+    status = QUEUE_STATUS["approved"] if cfg.queue_auto_approve else QUEUE_STATUS["proposed"]
+    totals = {"queued": 0, "skipped": 0, "deduplicated": 0}
+    wishes = [r["tmdb_id"] for r in
+              conn.execute("SELECT tmdb_id FROM library WHERE status='W'")]
+    failed = 0
+    for tid in wishes:
+        try:
+            _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
+                                      episode=None, dry_run=False, min_conf=None))
+            _queue_add_tmdb(conn, cfg, str(tid), status, {}, totals)
+        except Exception as exc:
+            failed += 1
+            log.warning("update wish %s failed: %s", tid, exc)
+    downloaded = 0
+    if cfg.queue_auto_approve:
+        downloaded = _queue_download(conn, cfg, _ns(all=True, ids=[], force=False))["downloaded"]
+    return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
+            "wishes": len(wishes), "failed": failed, "downloaded": downloaded,
+            **totals}
 
 
 # -- cli ----------------------------------------------------------------------
@@ -1584,9 +1742,22 @@ def build_parser() -> argparse.ArgumentParser:
     fmv.add_argument("-o", "--out",   required=True, metavar="PATH",                 help="destination file path")
     fmv.add_argument("-f", "--force", action="store_true",                           help="overwrite an existing destination")
 
-    _set_default_action(parser, "enrich", csub, "run")
-    _set_default_action(parser, "match",  msub, "run")
-    _set_default_action(parser, "queue",  qsub, "list")
+    libp = sub.add_parser("library", help="manage the wishlist (TMDB ids to acquire)", description="Manage the wishlist: TMDB movie ids to acquire automatically. Entries are status 'W' (wish) until a finished download records them as 'L' (in library). DB-only: nothing here touches the filesystem.")
+    lsub = libp.add_subparsers(dest="library_cmd", required=True, metavar="action")
+    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id",         description="Add TMDB movie ids as wishes (status 'W'). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured.")
+    llst = lsub.add_parser("list",   help="list library entries (default)", description="List library entries, oldest creation first. Filter by lifecycle state with --status.")
+    lrem = lsub.add_parser("remove", help="remove library entries",         description="Delete library entries by exactly one selector: given tmdb_ids or --all.")
+    ladd.add_argument("-t", "--tmdb",   action="append", required=True, metavar="ID", help="TMDB movie id to wish for (repeatable)")
+    llst.add_argument("-s", "--status", choices=list(LIBRARY_STATUS), metavar="STATE", help="filter by state: " + ", ".join(LIBRARY_STATUS))
+    lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
+    lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")
+
+    sub.add_parser("update", help="run the wishlist pipeline end to end", description="One unattended pass: fetch + enrich the mirror, then for every open wish ('W') match the TMDB id and stage the deduplicated download set. With queue_auto_approve set, the approved entries are downloaded straight away (recording each finished wish as 'L'); otherwise the run stops at the approval gate. A failing wish does not abort the pass. Progress is printed to stderr.")
+
+    _set_default_action(parser, "enrich",  csub, "run")
+    _set_default_action(parser, "match",   msub, "run")
+    _set_default_action(parser, "queue",   qsub, "list")
+    _set_default_action(parser, "library", lsub, "list")
     return parser
 
 
@@ -1674,6 +1845,14 @@ def main(argv=None) -> int:
             case "queue":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_queue(conn, cfg, args)
+                finally: conn.close()
+            case "library":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_library(conn, cfg, args)
+                finally: conn.close()
+            case "update":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_update(conn, cfg, args)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 

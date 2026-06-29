@@ -181,6 +181,17 @@ MIGRATIONS: list[tuple[str, ...]] = [
        # in `path` (the full library destination), so `name` carried nothing new.
         "ALTER TABLE queue DROP COLUMN name",
     ),
+    (  # phase 9: the wishlist + library record in one, keyed by tmdb_id. status
+       # 'W' wish / 'M' missing episode / 'L' in library; a finished download
+       # records its tmdb_id here as 'L' (flipping a wish or inserting fresh).
+        """CREATE TABLE library (
+            tmdb_id    TEXT PRIMARY KEY,
+            status     TEXT NOT NULL,
+            title      TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+    ),
 ]
 
 
