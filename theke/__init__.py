@@ -27,7 +27,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
                         db_get_meta, db_set_meta)
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
-                         arte_anchor_ids, find_arte_links)
+                         arte_anchor_ids, find_arte_links, tmdb_search, pick_by_year)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import subtitle
@@ -889,17 +889,19 @@ def _match_reset(conn, args) -> dict:
 
 def _match_resolve(conn, cfg, args, min_conf) -> tuple:
     """Resolve the TMDB id and find candidate rows, for a movie (title/year/
-    runtime) or a series episode (series-name + exact season/episode). Returns
-    (meta, result_head, matches); the head carries the episode title + series
-    name for a series, the film title for a movie."""
+    runtime, year within --year-tolerance) or a series episode (series-name +
+    exact season/episode). Returns (meta, result_head, matches); the head
+    carries the episode title + series name for a series, the film title for a
+    movie."""
     if args.type == "series":
         meta = tmdb_tv(cfg, args.tmdb, args.season, args.episode)
         matches = find_episode_matches(conn, meta, min_conf)
         head = {"tmdb_id": meta["tmdb_id"], "title": meta["episode_name"],
                 "series": meta["series_title"]}
     else:
+        tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
         meta = tmdb_movie(cfg, args.tmdb)
-        matches = find_matches(conn, meta, min_conf)
+        matches = find_matches(conn, meta, min_conf, year_tolerance=tol)
         head = {"tmdb_id": meta["tmdb_id"], "title": meta["title"]}
     return meta, head, matches
 
@@ -1050,7 +1052,8 @@ def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
         src = rows[p["mediathek_id"]]
         row = _queue_row(status, p["mediathek_id"], tmdb_id, p["language"],
                          p["resolution"], p["remux"], src,
-                         _library_path(cfg, fields, p["language"], p["remux"], i == 0))
+                         _library_path(cfg, fields, p["language"], p["remux"], i == 0),
+                         meta["year"])
         _queue_insert(conn, row, overrides, totals)
 
 
@@ -1074,7 +1077,7 @@ def _queue_add_mediathek(conn, cfg, mediathek_id, status, overrides, totals):
     fields = _path_fields(title, year, r["series_name"], r["season"], r["episode"])
     resolution = resolution_of(r)
     row = _queue_row(status, mediathek_id, tmdb_id, language, resolution,
-                     "AV", r, _library_path(cfg, fields, language, "AV", True))
+                     "AV", r, _library_path(cfg, fields, language, "AV", True), year)
     _queue_insert(conn, row, overrides, totals)
 
 
@@ -1088,12 +1091,13 @@ def _media_url(row, resolution) -> str:
 
 
 def _queue_row(status, mediathek_id, tmdb_id, language, resolution,
-               remux, src, path) -> dict:
+               remux, src, path, year) -> dict:
     """Assemble one queue column dict from a pick + its mediathek source row."""
     return {"status": status, "mediathek_id": mediathek_id, "tmdb_id": tmdb_id,
             "language": language, "resolution": resolution,
             "remux": remux, "url": _media_url(src, resolution),
-            "url_subtitle": src.get("url_subtitle") or "", "path": path}
+            "url_subtitle": src.get("url_subtitle") or "", "path": path,
+            "year": year}
 
 
 def _path_fields(title, year, series=None, season=None, episode=None) -> dict:
@@ -1157,7 +1161,7 @@ def _queue_insert(conn, row, overrides, totals):
         return
     ts = _now()
     cols = ["status", "mediathek_id", "tmdb_id", "language", "resolution",
-            "remux", "url", "url_subtitle", "path", "created_at", "updated_at"]
+            "remux", "url", "url_subtitle", "path", "year", "created_at", "updated_at"]
     row = {**row, "created_at": ts, "updated_at": ts}
     conn.execute(f"INSERT INTO queue ({', '.join(cols)}) VALUES "
                  f"({', '.join(':' + c for c in cols)})", row)
@@ -1311,6 +1315,7 @@ def _download_entry(conn, cfg, row, force, totals):
                 log.warning("queue %s subtitle skipped: %s", row["id"], exc)
         _cleanup(base)
         _queue_status(conn, row["id"], QUEUE_STATUS["done"], None)
+        _library_record(conn, row["tmdb_id"], os.path.dirname(row["path"]), row["year"])
         totals["downloaded"] += 1
         log.info("queue %s done -> %s", row["id"], row["path"])
     except Exception as exc:
@@ -1388,6 +1393,191 @@ def _print_queue(rows):
     for r in rows:
         print(f'  [{r["id"]}] {r["status"]} {r["resolution"]} {_remux_cols(r["remux"])} '
               f'{r["language"]} {r["path"]!r}')
+
+
+# -- library / wishlist (phase 9) --------------------------------------------
+# The library table is wishlist + library record in one, keyed by tmdb_id.
+# Status chars mirror the other tables: 'W' wish, 'M' missing episode, 'L' in
+# library. cmd_library manages wishes; a finished queue download records its
+# tmdb_id as 'L' via _library_record (called from _download_entry).
+
+LIBRARY_STATUS = {"wish": "W", "missing": "M", "library": "L"}
+
+
+def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a library action: `add` stages wishes, list/remove manage them."""
+    match args.library_cmd:
+        case "add":    return _library_add(conn, cfg, args)
+        case "list":   return _library_list(conn, args)
+        case "remove": return _library_remove(conn, args)
+        case _: raise DbError(f"unhandled library action: {args.library_cmd}")
+
+
+def _wish_meta(cfg, tmdb_id) -> tuple:
+    """Best-effort (title, year) for the wish label; ('', None) with no key or on
+    failure (the label/year are convenience only, never load-bearing)."""
+    if not cfg.tmdb_api_key:
+        return "", None
+    try:
+        meta = tmdb_movie(cfg, tmdb_id)
+        return meta["title"] or "", meta["year"]
+    except Exception as exc:
+        log.warning("library add %s: title lookup failed: %s", tmdb_id, exc)
+        return "", None
+
+
+def _resolve_title(cfg, args) -> tuple:
+    """Resolve --title (+ tolerant --year) to one (tmdb_id, title, year) via TMDB
+    search. The year may be off by --year-tolerance years (default: config
+    match_year_tolerance, as in match). Raises when unresolvable."""
+    if not cfg.tmdb_api_key:
+        raise ConfigError("--title lookup needs a TMDB API key (set tmdb_api_key)")
+    tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
+    cand = pick_by_year(tmdb_search(cfg, args.title), args.year, tol)
+    if cand is None:
+        raise ValueError(f"no TMDB movie for {args.title!r} "
+                         f"(year {args.year}, +-{tol})")
+    return cand["tmdb_id"], cand["title"], cand["year"]
+
+
+def _library_add(conn, cfg, args) -> dict:
+    """Add wishes as status 'W'. Each wish is resolved to a tmdb_id: given
+    directly via --tmdb, or by a title/year lookup via --title. Idempotent: an
+    existing tmdb_id is left untouched (counted as skipped, never reset from 'L'
+    back to 'W')."""
+    if args.title and args.tmdb:
+        raise ValueError("give --tmdb or --title, not both")
+    if args.title:
+        wishes = [_resolve_title(cfg, args)]
+    elif args.tmdb:
+        wishes = [(str(t), *_wish_meta(cfg, t)) for t in args.tmdb]
+    else:
+        raise ValueError("library add needs --tmdb or --title")
+    totals = {"added": 0, "skipped": 0}
+    conn.execute("BEGIN")
+    try:
+        for tid, title, year in wishes:
+            ts = _now()
+            cur = conn.execute(
+                "INSERT INTO library (tmdb_id, status, title, year, created_at, updated_at) "
+                "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
+                (tid, title, year, ts, ts))
+            totals["added" if cur.rowcount else "skipped"] += 1
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return totals
+
+
+def _library_list(conn, args) -> dict:
+    """Read-only listing, optionally filtered by lifecycle state (--status name),
+    ordered by creation. --json returns the rows; otherwise prints a table."""
+    sql = "SELECT * FROM library"
+    params = ()
+    if args.status:
+        sql += " WHERE status=?"
+        params = (LIBRARY_STATUS[args.status],)
+    sql += " ORDER BY created_at, tmdb_id"
+    rows = [dict(r) for r in conn.execute(sql, params)]
+    if args.json:
+        return {"library": rows, "count": len(rows)}
+    _print_library(rows)
+    return {}
+
+
+def _library_remove(conn, args) -> dict:
+    """Delete library entries by exactly one selector: given tmdb_ids or --all."""
+    if args.all and args.tmdb:
+        raise ValueError("give --tmdb or --all, not both")
+    if not args.all and not args.tmdb:
+        raise ValueError("give --tmdb or --all")
+    if args.all:
+        sql, params = "DELETE FROM library", ()
+    else:
+        ids = [str(t) for t in args.tmdb]
+        sql = "DELETE FROM library WHERE tmdb_id IN (" + ",".join("?" * len(ids)) + ")"
+        params = ids
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(sql, params).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"removed": n}
+
+
+def _print_library(rows):
+    """One header line + one line per entry to stdout (the result)."""
+    print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
+    for r in rows:
+        year = f' ({r["year"]})' if r["year"] else ""
+        print(f'  [{r["status"]}] {r["tmdb_id"]:>8}  {r["title"]!r}{year}')
+
+
+def _library_record(conn, tmdb_id, path, year):
+    """Record a downloaded film in the library as 'L': flip an existing wish or
+    insert a fresh row, recording the library folder it landed in and its release
+    year (carried on the queue row). On a flip a year already captured at wish time
+    is kept (COALESCE). Own transaction (like _queue_status), so it stays outside
+    the long filesystem work. No-op for a queue row without a tmdb_id."""
+    if not tmdb_id:
+        return
+    ts = _now()
+    conn.execute("BEGIN")
+    try:
+        conn.execute(
+            "INSERT INTO library (tmdb_id, status, title, path, year, created_at, updated_at) "
+            "VALUES (?, 'L', '', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
+            "status='L', path=excluded.path, "
+            "year=COALESCE(library.year, excluded.year), updated_at=excluded.updated_at",
+            (tmdb_id, path, year, ts, ts))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+# -- update (phase 9: the wishlist automation orchestrator) -------------------
+# One unattended pass over the whole pipeline: refresh + enrich the mirror, then
+# for every open wish ('W') resolve its TMDB id, tag the matching rows and queue
+# the deduplicated download set. With queue_auto_approve the approved entries are
+# downloaded straight away (each finished wish is recorded as 'L' by the download
+# stage); otherwise the run stops at the approval gate. A single failing wish
+# never aborts the pass. Reuses the existing stage handlers verbatim.
+
+def _ns(**kw) -> argparse.Namespace:
+    """A throwaway Namespace to drive a reused stage handler from update (each
+    reads only a few attributes)."""
+    return argparse.Namespace(**kw)
+
+
+def cmd_update(conn, cfg, args: argparse.Namespace) -> dict:
+    """Run fetch -> enrich -> (match + queue) per wish -> download (when
+    auto-approved). Returns one aggregated summary."""
+    fetch = cmd_fetch(conn, cfg, _ns(force=False))
+    enriched = _enrich_run(conn, cfg, _ns(force=False))
+    status = QUEUE_STATUS["approved"] if cfg.queue_auto_approve else QUEUE_STATUS["proposed"]
+    totals = {"queued": 0, "skipped": 0, "deduplicated": 0}
+    wishes = [r["tmdb_id"] for r in
+              conn.execute("SELECT tmdb_id FROM library WHERE status='W'")]
+    failed = 0
+    for tid in wishes:
+        try:
+            _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
+                                      episode=None, dry_run=False, min_conf=None,
+                                      year_tolerance=None))
+            _queue_add_tmdb(conn, cfg, str(tid), status, {}, totals)
+        except Exception as exc:
+            failed += 1
+            log.warning("update wish %s failed: %s", tid, exc)
+    downloaded = 0
+    if cfg.queue_auto_approve:
+        downloaded = _queue_download(conn, cfg, _ns(all=True, ids=[], force=False))["downloaded"]
+    return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
+            "wishes": len(wishes), "failed": failed, "downloaded": downloaded,
+            **totals}
 
 
 # -- cli ----------------------------------------------------------------------
@@ -1522,11 +1712,13 @@ def build_parser() -> argparse.ArgumentParser:
     mrun.add_argument("-e", "--episode",  type=int, metavar="N",                                        help="episode number (required for --type series)")
     mrun.add_argument("-d", "--dry-run",  action="store_true",                                          help="compute matches but write nothing")
     mrun.add_argument("-m", "--min-conf", type=float, metavar="X",                                      help="min confidence to tag (default: config match_min_confidence)")
+    mrun.add_argument("-y", "--year-tolerance", type=int, metavar="N", dest="year_tolerance",           help="accepted production-year difference for movies (default: config match_year_tolerance)")
     msho.add_argument("-t", "--tmdb",     required=True, metavar="ID",                                  help="TMDB id to inspect (movie id, or series id for --type series)")
     msho.add_argument("-T", "--type",     default="movie", choices=["movie", "series"],                 help="media type (default movie)")
     msho.add_argument("-s", "--season",   type=int, metavar="N",                                        help="season number (required for --type series)")
     msho.add_argument("-e", "--episode",  type=int, metavar="N",                                        help="episode number (required for --type series)")
     msho.add_argument("-m", "--min-conf", type=float, metavar="X",                                      help="min confidence to list (default 0.0)")
+    msho.add_argument("-y", "--year-tolerance", type=int, metavar="N", dest="year_tolerance",           help="accepted production-year difference for movies (default: config match_year_tolerance)")
     msho.add_argument("-l", "--limit",    type=int, default=20, metavar="N",                            help="max candidates to list (default 20)")
 
     queuep = sub.add_parser("queue", help="stage and review the download queue", description="Stage downloads into the review queue by tmdb_id (deduplicated) or mediathek_id (direct), and manage them. DB-only: nothing here touches the filesystem.")
@@ -1584,9 +1776,25 @@ def build_parser() -> argparse.ArgumentParser:
     fmv.add_argument("-o", "--out",   required=True, metavar="PATH",                 help="destination file path")
     fmv.add_argument("-f", "--force", action="store_true",                           help="overwrite an existing destination")
 
-    _set_default_action(parser, "enrich", csub, "run")
-    _set_default_action(parser, "match",  msub, "run")
-    _set_default_action(parser, "queue",  qsub, "list")
+    libp = sub.add_parser("library", help="manage the wishlist (TMDB ids to acquire)", description="Manage the wishlist: TMDB movie ids to acquire automatically. Entries are status 'W' (wish) until a finished download records them as 'L' (in library). DB-only: nothing here touches the filesystem.")
+    lsub = libp.add_subparsers(dest="library_cmd", required=True, metavar="action")
+    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id or title",  description="Add movie wishes (status 'W'): give TMDB ids directly via --tmdb, or resolve a title via --title (with a tolerant --year). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured.")
+    llst = lsub.add_parser("list",   help="list library entries (default)", description="List library entries, oldest creation first. Filter by lifecycle state with --status.")
+    lrem = lsub.add_parser("remove", help="remove library entries",         description="Delete library entries by exactly one selector: given tmdb_ids or --all.")
+    ladd.add_argument("-t", "--tmdb",            action="append", metavar="ID",    help="TMDB movie id to wish for (repeatable)")
+    ladd.add_argument(      "--title",           metavar="TITLE",                  help="movie title to resolve to a TMDB id via search (instead of --tmdb)")
+    ladd.add_argument("-y", "--year",            type=int, metavar="YEAR",         help="release year to disambiguate --title (may be off by --year-tolerance)")
+    ladd.add_argument(      "--year-tolerance",  type=int, metavar="N", dest="year_tolerance", help="accepted year difference for --title (default: config match_year_tolerance)")
+    llst.add_argument("-s", "--status", choices=list(LIBRARY_STATUS), metavar="STATE", help="filter by state: " + ", ".join(LIBRARY_STATUS))
+    lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
+    lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")
+
+    sub.add_parser("update", help="run the wishlist pipeline end to end", description="One unattended pass: fetch + enrich the mirror, then for every open wish ('W') match the TMDB id and stage the deduplicated download set. With queue_auto_approve set, the approved entries are downloaded straight away (recording each finished wish as 'L'); otherwise the run stops at the approval gate. A failing wish does not abort the pass. Progress is printed to stderr.")
+
+    _set_default_action(parser, "enrich",  csub, "run")
+    _set_default_action(parser, "match",   msub, "run")
+    _set_default_action(parser, "queue",   qsub, "list")
+    _set_default_action(parser, "library", lsub, "list")
     return parser
 
 
@@ -1674,6 +1882,14 @@ def main(argv=None) -> int:
             case "queue":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_queue(conn, cfg, args)
+                finally: conn.close()
+            case "library":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_library(conn, cfg, args)
+                finally: conn.close()
+            case "update":
+                conn = db_connect(cfg.db_path)
+                try:     result = cmd_update(conn, cfg, args)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 

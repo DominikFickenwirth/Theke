@@ -115,6 +115,15 @@ def test_score_year_more_than_two_off_is_rejected():
     assert s["confidence"] == 0.0
 
 
+def test_score_year_tolerance_override_widens_gate():
+    # delta 4 is rejected at the default 2, accepted at tolerance 5:
+    # title 1.0 * year_factor(1-0.03*4=0.88) * runtime 1.0 = 0.88
+    s = score_match(BOOT, row(year=1985), year_tolerance=5)
+    assert s["rejected"] is False
+    assert s["confidence"] == 0.88
+    assert s["year_delta"] == 4
+
+
 def test_score_missing_year_caps_confidence():
     # no year gate -> NO_YEAR_FACTOR 0.85; runtime exact -> 1.0
     s = score_match(BOOT, row(year=None))
@@ -228,6 +237,18 @@ def test_find_matches_respects_min_conf(tmp_path):
         conn.close()
 
 
+def test_find_matches_year_tolerance_override(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1985, 8940)   # delta 4 from BOOT's 1981
+        assert find_matches(conn, BOOT, min_conf=0.6) == []        # default 2 rejects
+        matches = find_matches(conn, BOOT, min_conf=0.6, year_tolerance=5)
+        assert [m["mediathek_id"] for m in matches] == ["m1"]
+        assert matches[0]["confidence"] == 0.88   # 1-0.03*4
+    finally:
+        conn.close()
+
+
 def test_find_matches_excludes_trailers(tmp_path):
     conn = open_db(tmp_path)
     try:
@@ -261,9 +282,10 @@ CFG = Config(tmdb_api_key="KEY")
 
 
 def margs(match_cmd="run", tmdb="1234", type="movie", dry_run=False,
-          min_conf=None, limit=20, json=False):
+          min_conf=None, limit=20, json=False, year_tolerance=None):
     return SimpleNamespace(match_cmd=match_cmd, tmdb=tmdb, type=type,
-                           dry_run=dry_run, min_conf=min_conf, limit=limit, json=json)
+                           dry_run=dry_run, min_conf=min_conf, limit=limit,
+                           json=json, year_tolerance=year_tolerance)
 
 
 def boot_db(tmp_path, monkeypatch):
@@ -335,6 +357,20 @@ def test_cmd_match_run_min_conf_override(tmp_path, monkeypatch):
         result = cmd_match(conn, CFG, margs(min_conf=0.99))
         assert result == {"tmdb_id": "1234", "title": "Das Boot",
                           "candidates": 1, "written": 1, "arte_linked": 0}
+    finally:
+        conn.close()
+
+
+def test_cmd_match_run_year_tolerance_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(theke.core, "http_get",
+                        lambda url, timeout=None: json.dumps(TMDB_BOOT).encode("utf-8"))
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1985, 8940)   # delta 4, beyond default 2
+        assert cmd_match(conn, CFG, margs())["candidates"] == 0      # default rejects
+        result = cmd_match(conn, CFG, margs(year_tolerance=5))
+        assert result["candidates"] == 1 and result["written"] == 1
+        assert tmdb_of(conn, "m1")["tmdb_id"] == "1234"
     finally:
         conn.close()
 
@@ -423,10 +459,11 @@ def test_cmd_match_requires_api_key(tmp_path, monkeypatch):
 # -- cmd_match (series episodes) ---------------------------------------------
 
 def tv_margs(match_cmd="run", tmdb="55", season=2, episode=6, dry_run=False,
-             min_conf=None, limit=20, json=False):
+             min_conf=None, limit=20, json=False, year_tolerance=None):
     return SimpleNamespace(match_cmd=match_cmd, tmdb=tmdb, type="series",
                            season=season, episode=episode, dry_run=dry_run,
-                           min_conf=min_conf, limit=limit, json=json)
+                           min_conf=min_conf, limit=limit, json=json,
+                           year_tolerance=year_tolerance)
 
 
 def tv_db(tmp_path, monkeypatch):

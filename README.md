@@ -303,6 +303,7 @@ Serientitel zusätzlich in `series`.
 | `-e`, `--episode N`  | Folgennummer (Pflicht bei `--type series`).                   |
 | `-d`, `--dry-run`    | Treffer berechnen, nichts schreiben.                          |
 | `-m`, `--min-conf X` | Mindest-Confidence zum Markieren (Standard: Config).          |
+| `-y`, `--year-tolerance N` | Erlaubte Jahresdifferenz bei Filmen (Standard: Config `match_year_tolerance`). |
 
 ```powershell
 theke --db build/theke.db match run --tmdb 1474601   # candidates/written/arte_linked
@@ -323,6 +324,7 @@ alles, was nicht verworfen wurde -- zum Justieren der Match-Heuristik.
 | `-s`, `--season N`   | Staffelnummer (Pflicht bei `--type series`).                |
 | `-e`, `--episode N`  | Folgennummer (Pflicht bei `--type series`).                 |
 | `-m`, `--min-conf X` | Mindest-Confidence zum Listen (Standard 0.0).               |
+| `-y`, `--year-tolerance N` | Erlaubte Jahresdifferenz bei Filmen (Standard: Config `match_year_tolerance`). |
 | `-l`, `--limit N`    | Maximale Kandidatenzahl (Standard 20).                      |
 
 ```powershell
@@ -360,9 +362,10 @@ daneben `cancelled` (`C`) und `failed` (`F`). Jede Zeile ist **selbsttragend**:
 sie enthält alles, was `download` braucht, ohne erneut in die `mediathek`-Tabelle
 oder die Konfiguration zu schauen -- `language`,
 `resolution` (`HD`/`SD`/`LQ`), `remux` (`A` = nur Audio, `V` = nur Video,
-`AV` = beides), `url` (Quell-Medien-URL), `url_subtitle` (optional) und `path`
-(vollständiges Zielverzeichnis in der Bibliothek). Alle drei werden beim `add`
-aufgelöst und sind dort per CLI überschreibbar.
+`AV` = beides), `url` (Quell-Medien-URL), `url_subtitle` (optional), `path`
+(vollständiges Zielverzeichnis in der Bibliothek) und `year` (Erscheinungsjahr,
+für die Bibliotheks-Akte). Sie werden beim `add` aufgelöst; `url`/`url_subtitle`/
+`path` sind dort per CLI überschreibbar.
 
 **Konfiguration** (in `theke.json`):
 
@@ -400,10 +403,11 @@ nicht. Beide Optionen sind wiederholbar. `deduplicated` meldet die dabei
 zusammengefassten/herausgefilterten Quellzeilen.
 
 Dabei werden zugleich die download-relevanten Spalten aufgelöst: `url` aus der
-zur `resolution` passenden Medien-URL, `url_subtitle` aus der Quellzeile und
-`path` aus `library_path` (mit TMDB-Titel/-Jahr, sonst `clean_title`/`year`).
-Jede dieser Spalten lässt sich per Option überschreiben (Escape-Hatch, z. B. ein
-manueller Zielpfad).
+zur `resolution` passenden Medien-URL, `url_subtitle` aus der Quellzeile, `path`
+aus `library_path` (mit TMDB-Titel/-Jahr, sonst `clean_title`/`year`) und `year`
+(TMDB-Jahr bei gematchten Picks, sonst das angereicherte `year`) -- letzteres
+landet beim Download in der Bibliotheks-Akte. `url`/`url_subtitle`/`path` lassen
+sich per Option überschreiben (Escape-Hatch, z. B. ein manueller Zielpfad).
 
 | Option                    | Wirkung                                                  |
 | ------------------------- | -------------------------------------------------------- |
@@ -507,6 +511,14 @@ rein, SRT/ASS/TTML raus, ffmpeg-frei; ein nicht erkanntes Format wird
 Eintrags gelöscht. Nur `approved`-Zeilen sind berechtigt; eine fehlgeschlagene
 Zeile wird `failed` (mit Fehlertext) markiert und bricht den Lauf nicht ab --
 zum Wiederholen erneut `approve` (`--force`). Gibt `downloaded`/`failed` aus.
+
+Nach erfolgreichem Move wird der Film in der Bibliothek vermerkt: trägt die Zeile
+eine `tmdb_id`, wird der zugehörige `library`-Eintrag auf `L` (in Bibliothek)
+gesetzt und sein `path` auf den Zielordner sowie `year` aus der Queue-Zeile
+übernommen (ein bereits beim Wunsch erfasstes Jahr bleibt erhalten) -- ein offener
+Wunsch (`W`) kippt damit auf `L`, sonst wird ein neuer `L`-Eintrag angelegt (siehe
+`theke library`). So lädt ein erneutes `theke update` einen bereits geholten
+Wunsch nicht noch einmal.
 
 | Option          | Wirkung                                          |
 | --------------- | ------------------------------------------------ |
@@ -621,4 +633,100 @@ vorhandenes Ziel ist ein Fehler, außer mit `--force` (dann wird es ersetzt).
 
 ```powershell
 theke file move --in build/film.mp4 --out "M:/Filme/Film (2020)/Film (2020).mp4"
+```
+
+## `theke library`
+
+Stufe 9: verwaltet die **Wunschliste** -- TMDB-Film-IDs, die automatisch
+beschafft werden sollen. Die Tabelle `library` ist Wunschliste und Bibliotheks-
+Akte in einem (Schlüssel `tmdb_id`); die Spalte `status` (ein Zeichen) ist `W`
+(Wunsch), `M` (fehlende Folge, später) oder `L` (in Bibliothek). Daneben hält der
+Eintrag das TMDB-Erscheinungsjahr `year` (beim Hinzufügen erfasst) und nach dem
+Download den `path` zum Bibliotheksordner, in dem die Video-Datei(en) liegen.
+Reine DB-Operation; nichts hier berührt das Dateisystem. Ohne Aktion läuft der
+Default `list`, d. h. `theke library` entspricht `theke library list`.
+
+Ein Wunsch verlässt `W` erst, wenn sein Download tatsächlich fertig ist: dann
+vermerkt `theke queue download` ihn als `L` und trägt seinen Bibliotheksordner als
+`path` ein. `theke update` arbeitet nur offene Wünsche (`W`) ab.
+
+### `library add`
+
+Fügt Filmwünsche (`W`) hinzu -- entweder über TMDB-IDs direkt (`--tmdb`) oder
+über einen Titel (`--title`), der per TMDB-Suche (`/search/movie`) in eine ID
+aufgelöst wird. Das Jahr (`--year`) darf dabei -- wie in `theke match` -- um ein
+paar Jahre danebenliegen: Aus den Treffern wird der mit der kleinsten
+Jahresdifferenz innerhalb der Toleranz gewählt (bei Gleichstand der populärste);
+ohne `--year` der populärste Treffer. Die erlaubte Differenz steuert
+`--year-tolerance` (Default: Config `match_year_tolerance`, ab Werk `2`). `--tmdb`
+und `--title` schließen sich aus.
+
+**Idempotent**: eine bereits vorhandene ID bleibt unangetastet (zählt als
+`skipped`, wird nie von `L` zurück auf `W` gesetzt). Ist ein TMDB-Key
+konfiguriert, werden Filmtitel und Erscheinungsjahr (`year`) als Label erfasst
+(bei `--title` aus dem gefundenen Treffer; bei `--tmdb` per Abruf, der nur der
+Anzeige dient -- ein Fehlschlag lässt Titel/Jahr leer). `--title` erfordert einen
+TMDB-Key. Gibt `added`/`skipped` aus.
+
+| Option                  | Wirkung                                                  |
+| ----------------------- | -------------------------------------------------------- |
+| `-t`, `--tmdb ID`       | TMDB-Film-ID als Wunsch (wiederholbar).                  |
+| `--title TITLE`         | Filmtitel, per Suche in eine TMDB-ID aufgelöst.          |
+| `-y`, `--year YEAR`     | Erscheinungsjahr zur Disambiguierung von `--title`.      |
+| `--year-tolerance N`    | Erlaubte Jahresdifferenz (Default: `match_year_tolerance`). |
+
+```powershell
+theke --db build/theke.db library add --tmdb 1474601
+theke --db build/theke.db library add --title "Die Klapperschlange" --year 1981
+```
+
+### `library list`
+
+Listet Einträge (älteste Erstellung zuerst), optional nach Zustand gefiltert.
+`--json` gibt die Zeilen zurück, sonst eine Tabelle auf stdout.
+
+| Option                 | Wirkung                                          |
+| ---------------------- | ------------------------------------------------ |
+| `-s`, `--status STATE` | Nur diesen Zustand: `wish`, `missing`, `library`. |
+
+```powershell
+theke --db build/theke.db library list
+theke --db build/theke.db --json library list --status wish
+```
+
+### `library remove`
+
+Löscht Einträge über genau einen Selektor: angegebene `tmdb_id`s oder `--all`.
+Gibt `removed = N` aus.
+
+| Option            | Wirkung                                     |
+| ----------------- | ------------------------------------------- |
+| `-t`, `--tmdb ID` | Zu entfernende `tmdb_id` (wiederholbar).    |
+| `-a`, `--all`     | Alle Einträge entfernen.                    |
+
+```powershell
+theke --db build/theke.db library remove --tmdb 1474601
+theke --db build/theke.db library remove --all
+```
+
+## `theke update`
+
+Stufe 9: **ein unbeaufsichtigter Durchlauf** der gesamten Pipeline für die
+Wunschliste. Der Reihe nach: `fetch` (Filmliste aktualisieren), `enrich`
+(Metadaten extrahieren), dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen
+und passende `mediathek`-Zeilen taggen) und `queue add` (deduplizierte
+Download-Menge einreihen). Ist `queue_auto_approve` gesetzt, werden die
+genehmigten Einträge anschließend gleich heruntergeladen (jeder fertige Wunsch
+wird dabei als `L` vermerkt); sonst endet der Lauf am Genehmigungs-Tor mit
+`proposed`-Einträgen. Ein einzelner fehlschlagender Wunsch (z. B. ein TMDB-
+Fehler) bricht den Durchlauf nicht ab, sondern zählt nur in `failed`. Fortschritt
+geht nach stderr; das Ergebnis fasst `fetch`/`enriched`/`wishes`/`queued`/
+`skipped`/`deduplicated`/`failed`/`downloaded` zusammen.
+
+Erfordert einen TMDB-Key (`tmdb_api_key`) für `match` und `queue add`. Der Befehl
+hat keine eigenen Optionen.
+
+```powershell
+theke --db build/theke.db update
+theke --db build/theke.db --json update
 ```

@@ -43,8 +43,11 @@ download from liste.mediathekview.de).
 6. **Download** (done) -- plain HTTP download of approved items.
 7. **Remux** (done) -- FFmpeg pipeline, extracting audio and converting containers to mp4.
 8. **Move** (done) -- Move into movie library. **Manual path complete here.**
-9. **Wishlist** -- entries by TMDB ID, auto availability checks feeding the same
-   queue. Pure automation on earlier phases.
+9. **Wishlist** (done) -- `theke library` keeps wishes by TMDB ID in the
+   `library` table (status 'W'); `theke update` runs the whole pipeline for every
+   open wish (fetch -> enrich -> match -> queue add -> download when
+   auto-approved). A finished download records the film as 'L' (in library), so a
+   satisfied wish is never re-acquired. Movies only; series follow in phase 13.
 10. **Scheduler** -- in-app scheduler; runs unattended.
 11. **Docker + NAS deployment** -- containerize, deploy (smoke test, manual).
 12. **Library indexer** -- cache current library by parsing nfo files and reading

@@ -105,17 +105,18 @@ def _runtime_factor(runtime, duration):
     return factor, delta, False
 
 
-def score_match(tmdb_meta, row) -> dict:
+def score_match(tmdb_meta, row, year_tolerance=YEAR_TOLERANCE) -> dict:
     """Score one mediathek row against TMDB metadata. Deterministic and
-    explainable: title is the gate, year a near-hard gate, runtime a soft
-    confirmer. Returns confidence + the breakdown that fed it."""
+    explainable: title is the gate, year a near-hard gate (within
+    year_tolerance years), runtime a soft confirmer. Returns confidence + the
+    breakdown that fed it."""
     title_sim = title_similarity(tmdb_meta["titles"], row["clean_title"])
     rejected = title_sim < TITLE_FLOOR
 
     my, ry = row["year"], tmdb_meta.get("year")
     if my is not None and ry is not None:
         year_delta = abs(my - ry)
-        if year_delta > YEAR_TOLERANCE:
+        if year_delta > year_tolerance:
             rejected = True
             year_factor = 0.0
         else:
@@ -179,6 +180,43 @@ def tmdb_movie(cfg, tmdb_id) -> dict:
             "original_language": data.get("original_language")}
 
 
+def tmdb_search(cfg, title) -> list:
+    """Search TMDB movies by title, popularity-ordered, as {tmdb_id, title,
+    year} candidates. The wanted year is NOT sent to the API (we want a tolerant
+    local match); pick_by_year refines the pick afterwards."""
+    params = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
+                        "query": title})
+    url = f"{cfg.tmdb_api_url}/search/movie?{params}"
+    data = json.loads(core.http_get(url, cfg.download_timeout).decode("utf-8"))
+    out = []
+    for r in data.get("results", []):
+        rel = r.get("release_date") or ""
+        year = int(rel[:4]) if rel[:4].isdigit() else None
+        out.append({"tmdb_id": str(r["id"]), "title": r.get("title") or "",
+                    "year": year})
+    return out
+
+
+def pick_by_year(candidates, year, tolerance):
+    """Pick the best search candidate for a wanted year: within tolerance, the
+    smallest year distance, ties keeping TMDB's popularity order. With no wanted
+    year, take the most popular result. None when nothing qualifies (candidates
+    without a year are skipped once a year is wanted)."""
+    if not candidates:
+        return None
+    if year is None:
+        return candidates[0]
+    best, best_delta = None, None
+    for c in candidates:
+        if c["year"] is None:
+            continue
+        delta = abs(c["year"] - year)
+        if delta > tolerance or (best_delta is not None and delta >= best_delta):
+            continue
+        best, best_delta = c, delta
+    return best
+
+
 def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
     """Fetch a TMDB series' metadata for episode matching, in two calls: the
     series (name + original + DE alternative titles, the gate) and the episode
@@ -217,16 +255,17 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
 
 # -- candidate search --------------------------------------------------------
 
-def find_matches(conn, tmdb_meta, min_conf) -> list:
-    """Scan the movie subset, score each row, return the matches (confidence >=
-    min_conf, not rejected) sorted by confidence desc, then mediathek_id."""
+def find_matches(conn, tmdb_meta, min_conf, year_tolerance=YEAR_TOLERANCE) -> list:
+    """Scan the movie subset, score each row (accepting years within
+    year_tolerance), return the matches (confidence >= min_conf, not rejected)
+    sorted by confidence desc, then mediathek_id."""
     rows = conn.execute("SELECT mediathek_id, clean_title, year, duration, flags "
                         "FROM mediathek WHERE category='Movie' AND status='1'")
     out = []
     for r in rows:
         if r["flags"] and "T" in r["flags"]:   # trailers are never the wanted film
             continue
-        s = score_match(tmdb_meta, r)
+        s = score_match(tmdb_meta, r, year_tolerance)
         if s["rejected"] or s["confidence"] < min_conf:
             continue
         out.append({"mediathek_id": r["mediathek_id"], "clean_title": r["clean_title"],

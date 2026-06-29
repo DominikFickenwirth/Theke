@@ -39,6 +39,7 @@ class Config:
     tmdb_api_url:         str   = "https://api.themoviedb.org/3"
     tmdb_language:        str   = "de-DE"
     match_min_confidence: float = 0.6
+    match_year_tolerance: int   = 2
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     fiction_topics:       list  = dataclasses.field(default_factory=list)
@@ -180,6 +181,27 @@ MIGRATIONS: list[tuple[str, ...]] = [
     (  # drop the redundant filename stem: the same title/year info already lives
        # in `path` (the full library destination), so `name` carried nothing new.
         "ALTER TABLE queue DROP COLUMN name",
+    ),
+    (  # phase 9: the wishlist + library record in one, keyed by tmdb_id. status
+       # 'W' wish / 'M' missing episode / 'L' in library; a finished download
+       # records its tmdb_id here as 'L' (flipping a wish or inserting fresh).
+        """CREATE TABLE library (
+            tmdb_id    TEXT PRIMARY KEY,
+            status     TEXT NOT NULL,
+            title      TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+    ),
+    (  # phase 9: capture the release year (from TMDB at wish time) and the
+       # library folder (the directory a finished download landed in).
+        "ALTER TABLE library ADD COLUMN year INTEGER",
+        "ALTER TABLE library ADD COLUMN path TEXT",
+    ),
+    (  # phase 9: carry the release year on the queue row (resolved at add time,
+       # like path) so a finished download records it in the library even without
+       # a prior wish.
+        "ALTER TABLE queue ADD COLUMN year INTEGER",
     ),
 ]
 

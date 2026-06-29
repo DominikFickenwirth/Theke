@@ -790,7 +790,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 7   # +drop redundant queue.name column
+        assert user_version(conn) == 10   # +phase 9 library (+year/path) +queue.year
     finally:
         conn.close()
 
@@ -798,7 +798,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
 QUEUE_COLS = {
     "id", "status", "mediathek_id", "tmdb_id", "language",
     "resolution", "remux", "error", "created_at", "updated_at",
-    "url", "url_subtitle", "path",
+    "url", "url_subtitle", "path", "year",
 }
 
 
