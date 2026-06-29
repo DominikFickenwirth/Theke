@@ -9,7 +9,8 @@ import pytest
 
 import theke
 from theke import *
-from theke import cmd_library, cmd_queue, cmd_update, db_connect, main
+from theke import (cmd_library, cmd_queue, cmd_update, db_connect, main,
+                   tmdb_search, pick_by_year)
 
 
 # -- helpers -----------------------------------------------------------------
@@ -21,6 +22,12 @@ TMDB = {"title": "Mein Film", "original_title": "My Film",
 
 CFG = Config(tmdb_api_key="KEY", languages=["de"])
 
+# A /search/movie response: popularity-ordered, the wanted film first.
+SEARCH = {"results": [
+    {"id": 9268, "title": "Die Klapperschlange", "release_date": "1981-04-22"},
+    {"id": 999,  "title": "Escape Remake",       "release_date": "2013-01-01"},
+]}
+
 
 def open_db(tmp_path):
     return db_connect(str(tmp_path / "theke.db"))
@@ -29,6 +36,11 @@ def open_db(tmp_path):
 def stub_tmdb(monkeypatch):
     monkeypatch.setattr(theke.core, "http_get",
                         lambda url, timeout=None: json.dumps(TMDB).encode("utf-8"))
+
+
+def stub_search(monkeypatch, payload=SEARCH):
+    monkeypatch.setattr(theke.core, "http_get",
+                        lambda url, timeout=None: json.dumps(payload).encode("utf-8"))
 
 
 def insert_movie(conn, mediathek_id, tmdb_id="100", language="de", duration=6000,
@@ -47,9 +59,11 @@ def library_rows(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM library ORDER BY tmdb_id")]
 
 
-def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False):
+def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False,
+            title=None, year=None, year_tolerance=None):
     return SimpleNamespace(library_cmd=library_cmd, tmdb=tmdb, all=all,
-                           status=status, json=json)
+                           status=status, json=json, title=title, year=year,
+                           year_tolerance=year_tolerance)
 
 
 def qargs(queue_cmd, **kw):
@@ -183,6 +197,138 @@ def test_library_list_filters_by_status(tmp_path, monkeypatch):
         result = cmd_library(conn, CFG, libargs("list", status="wish", json=True))
         assert result["count"] == 1
         assert result["library"][0]["tmdb_id"] == "100"
+    finally:
+        conn.close()
+
+
+# -- tmdb_search / pick_by_year (title -> tmdb_id resolution) ----------------
+
+def test_tmdb_search_parses_results(monkeypatch):
+    captured = {}
+    def fake(url, timeout=None):
+        captured["url"] = url
+        return json.dumps(SEARCH).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    res = tmdb_search(CFG, "Die Klapperschlange")
+    assert res == [
+        {"tmdb_id": "9268", "title": "Die Klapperschlange", "year": 1981},
+        {"tmdb_id": "999",  "title": "Escape Remake",       "year": 2013},
+    ]
+    assert "/search/movie?" in captured["url"]
+    assert "query=Die+Klapperschlange" in captured["url"]
+
+
+# year, popularity order: A 2010, B 1981, C 1983 (B before C).
+CANDS = [{"tmdb_id": "1", "title": "A", "year": 2010},
+         {"tmdb_id": "2", "title": "B", "year": 1981},
+         {"tmdb_id": "3", "title": "C", "year": 1983}]
+
+
+def test_pick_by_year_closest_within_tolerance():
+    assert pick_by_year(CANDS, 1981, 5)["tmdb_id"] == "2"   # delta 0
+
+
+def test_pick_by_year_ties_keep_popularity_order():
+    # 1982: B and C are both delta 1; B is more popular (earlier) -> "2".
+    assert pick_by_year(CANDS, 1982, 2)["tmdb_id"] == "2"
+
+
+def test_pick_by_year_none_when_all_out_of_tolerance():
+    assert pick_by_year(CANDS, 1990, 2) is None   # deltas 20/9/7
+
+
+def test_pick_by_year_no_year_takes_most_popular():
+    assert pick_by_year(CANDS, None, 2)["tmdb_id"] == "1"
+
+
+def test_pick_by_year_skips_candidates_without_year():
+    cands = [{"tmdb_id": "1", "title": "A", "year": None},
+             {"tmdb_id": "2", "title": "B", "year": 1981}]
+    assert pick_by_year(cands, 1981, 2)["tmdb_id"] == "2"
+
+
+def test_pick_by_year_empty():
+    assert pick_by_year([], 1981, 2) is None
+
+
+# -- cmd_library add by title ------------------------------------------------
+
+def test_library_add_by_title_resolves_tmdb_id(tmp_path, monkeypatch):
+    stub_search(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG,
+                             libargs("add", title="Die Klapperschlange", year=1981))
+        assert result == {"added": 1, "skipped": 0}
+        rows = library_rows(conn)
+        assert (rows[0]["tmdb_id"], rows[0]["status"], rows[0]["title"]) == \
+               ("9268", "W", "Die Klapperschlange")
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_year_within_tolerance(tmp_path, monkeypatch):
+    # film is 1981, the wish says 1979 -- inside the default tolerance of 2.
+    stub_search(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG,
+                             libargs("add", title="Die Klapperschlange", year=1979))
+        assert result == {"added": 1, "skipped": 0}
+        assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_year_outside_tolerance_raises(tmp_path, monkeypatch):
+    # 1981 vs 1975 is 6 years -- beyond the default tolerance of 2.
+    stub_search(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            cmd_library(conn, CFG,
+                        libargs("add", title="Die Klapperschlange", year=1975))
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_year_tolerance_override(tmp_path, monkeypatch):
+    stub_search(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs(
+            "add", title="Die Klapperschlange", year=1975, year_tolerance=10))
+        assert result == {"added": 1, "skipped": 0}
+        assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_no_results_raises(tmp_path, monkeypatch):
+    stub_search(monkeypatch, payload={"results": []})
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            cmd_library(conn, CFG, libargs("add", title="Nonexistent", year=2000))
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_without_key_raises(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ConfigError):
+            cmd_library(conn, Config(), libargs("add", title="Anything"))
+    finally:
+        conn.close()
+
+
+def test_library_add_title_and_tmdb_together_raises(tmp_path, monkeypatch):
+    stub_search(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            cmd_library(conn, CFG, libargs("add", tmdb=["100"], title="X"))
     finally:
         conn.close()
 
@@ -328,6 +474,23 @@ def test_library_cli_add_and_default_list(tmp_path, monkeypatch, capsys):
     assert main(["--json", "--config", str(cfgpath), "library"]) == 0   # default list
     out = json.loads(capsys.readouterr().out)
     assert out["count"] == 1 and out["library"][0]["tmdb_id"] == "100"
+
+
+def test_library_cli_add_by_title(tmp_path, monkeypatch, capsys):
+    stub_search(monkeypatch)
+    db = str(tmp_path / "theke.db")
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY"}),
+                       encoding="utf-8")
+    assert main(["--json", "--config", str(cfgpath), "library", "add",
+                 "--title", "Die Klapperschlange", "--year", "1981"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"added": 1, "skipped": 0}
+    conn = db_connect(db)
+    try:
+        assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
 
 
 def test_update_cli_runs(tmp_path, monkeypatch, capsys):
