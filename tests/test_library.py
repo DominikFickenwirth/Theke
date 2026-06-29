@@ -148,6 +148,21 @@ def test_library_add_idempotent(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_library_add_invalid_tmdb_id_raises(tmp_path, monkeypatch):
+    # An invalid id makes TMDB answer 404 -> http_get raises; add must propagate
+    # it (not silently insert a bogus wish) and leave the table untouched.
+    def boom(url, timeout=None):
+        raise RuntimeError("404 Not Found")
+    monkeypatch.setattr(theke.core, "http_get", boom)
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(RuntimeError):
+            cmd_library(conn, CFG, libargs("add", tmdb=["999999"]))
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
+
+
 def test_library_add_without_key_leaves_title_empty(tmp_path):
     conn = open_db(tmp_path)
     try:
