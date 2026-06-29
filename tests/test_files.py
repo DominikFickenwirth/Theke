@@ -1109,7 +1109,7 @@ def test_run_ffmpeg_missing_binary_raises(tmp_path):
 def test_remux_rejects_truncated_source(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"short")
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
@@ -1123,7 +1123,7 @@ def test_remux_rejects_truncated_source(tmp_path, monkeypatch):
 def test_remux_accepts_matching_duration(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"full")
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
@@ -1136,7 +1136,7 @@ def test_remux_accepts_matching_duration(tmp_path, monkeypatch):
 def test_remux_skips_check_when_duration_unknown(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"x")
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
@@ -1153,10 +1153,12 @@ def test_probe_duration_parses_ffmpeg_stderr(monkeypatch):
 
 
 class FakePopen:
-    """Fake subprocess.Popen for run_ffmpeg: serves stderr_text as the process
-    stderr stream and returns returncode from wait()."""
+    """Fake subprocess.Popen for run_ffmpeg: serves stdout_text as the -progress
+    key=value stream and stderr_text as the diagnostics stream, returning
+    returncode from wait()."""
 
-    def __init__(self, stderr_text, returncode):
+    def __init__(self, stdout_text="", stderr_text="", returncode=0):
+        self.stdout = io.StringIO(stdout_text)
         self.stderr = io.StringIO(stderr_text)
         self._rc = returncode
 
@@ -1166,28 +1168,39 @@ class FakePopen:
 
 def test_run_ffmpeg_nonzero_exit_raises(monkeypatch):
     monkeypatch.setattr(files.subprocess, "Popen",
-                        lambda *a, **k: FakePopen("boom line 1\nboom line 2\n", 1))
+                        lambda *a, **k: FakePopen(stderr_text="boom line 1\nboom line 2\n",
+                                                  returncode=1))
     with pytest.raises(RuntimeError, match="ffmpeg failed"):
         run_ffmpeg(["ffmpeg", "-i", "x"])
 
 
-# ffmpeg writes its live stat lines with a carriage return (no newline) until the
-# run ends; the Duration line comes once up front. 40 s total, time= every 4 s.
-FFMPEG_STDERR = (
-    "ffmpeg version 6.0\n"
-    "  Duration: 00:00:40.00, start: 0.000000, bitrate: 1000 kb/s\n"
-    "frame=  100 q=-1.0 size=    1kB time=00:00:04.00 bitrate=2.0kbits/s\r"
-    "frame=  200 q=-1.0 size=    2kB time=00:00:08.00 bitrate=2.0kbits/s\r"
-    "frame=  300 q=-1.0 size=    3kB time=00:00:12.00 bitrate=2.0kbits/s\r"
-    "frame= 1000 q=-1.0 size=   10kB time=00:00:40.00 bitrate=2.0kbits/s\r"
-    "\n")
+def test_run_ffmpeg_injects_progress_flags(monkeypatch):
+    seen = {}
+    def fake_popen(args, **k):
+        seen["args"] = list(args)
+        return FakePopen()
+    monkeypatch.setattr(files.subprocess, "Popen", fake_popen)
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])
+    assert "-progress" in seen["args"] and "pipe:1" in seen["args"]
+    assert "-nostats" in seen["args"]
+    assert seen["args"][0] == "ffmpeg" and seen["args"][-1] == "out.mp4"
 
 
-def test_run_ffmpeg_logs_progress_from_duration_and_time(monkeypatch, caplog):
+# ffmpeg's -progress stream is newline-terminated key=value blocks, each ending in
+# progress=continue (progress=end on the last). 40 s total, a block every 4 s of
+# media time; out_time_us is the elapsed position in microseconds.
+FFMPEG_PROGRESS = (
+    "frame=100\nout_time_us=4000000\nprogress=continue\n"
+    "frame=200\nout_time_us=8000000\nprogress=continue\n"
+    "frame=300\nout_time_us=12000000\nprogress=continue\n"
+    "frame=1000\nout_time_us=40000000\nprogress=end\n")
+
+
+def test_run_ffmpeg_logs_progress_from_progress_stream(monkeypatch, caplog):
     monkeypatch.setattr(files.subprocess, "Popen",
-                        lambda *a, **k: FakePopen(FFMPEG_STDERR, 0))
+                        lambda *a, **k: FakePopen(stdout_text=FFMPEG_PROGRESS))
     caplog.set_level(logging.INFO, logger="theke")
-    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])           # label = out.mp4
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"], duration=40.0)   # label = out.mp4
     # 40 s total -> 10% step is 4 s; times 4/8/12/40 s -> 10/20/30/100 percent
     msgs = [r.getMessage() for r in caplog.records if "%" in r.getMessage()]
     assert msgs == [
@@ -1198,12 +1211,10 @@ def test_run_ffmpeg_logs_progress_from_duration_and_time(monkeypatch, caplog):
 
 
 def test_run_ffmpeg_without_duration_logs_no_progress(monkeypatch, caplog):
-    stderr = ("frame=  100 time=00:00:04.00 bitrate=2.0kbits/s\r"
-              "frame=  200 time=00:00:08.00 bitrate=2.0kbits/s\r\n")
     monkeypatch.setattr(files.subprocess, "Popen",
-                        lambda *a, **k: FakePopen(stderr, 0))
+                        lambda *a, **k: FakePopen(stdout_text=FFMPEG_PROGRESS))
     caplog.set_level(logging.INFO, logger="theke")
-    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])              # no duration -> silent
     assert [r.getMessage() for r in caplog.records if "%" in r.getMessage()] == []
 
 
