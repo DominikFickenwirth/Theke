@@ -60,10 +60,35 @@ def library_rows(conn):
 
 
 def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False,
-            title=None, year=None, year_tolerance=None):
+            title=None, year=None, year_tolerance=None, path=None, format=None,
+            mode="auto"):
     return SimpleNamespace(library_cmd=library_cmd, tmdb=tmdb, all=all,
                            status=status, json=json, title=title, year=year,
-                           year_tolerance=year_tolerance)
+                           year_tolerance=year_tolerance, path=path,
+                           format=format, mode=mode)
+
+
+def write_file(tmp_path, name, content):
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return str(p)
+
+
+def stub_import(monkeypatch):
+    """http_get branching by URL for import resolution: /movie/999 is unknown
+    (404 -> raises), any other /movie/<id> is the valid TMDB film (title "Mein
+    Film", year 2020), and /search/movie yields SEARCH (first hit id 9268, 1981)
+    unless the query mentions 'Nonexistent' (then no results)."""
+    def fake(url, timeout=None):
+        if "/movie/999" in url:
+            raise RuntimeError("404 Not Found")
+        if "/movie/" in url:
+            return json.dumps(TMDB).encode("utf-8")
+        if "/search/movie" in url:
+            payload = {"results": []} if "Nonexistent" in url else SEARCH
+            return json.dumps(payload).encode("utf-8")
+        raise AssertionError(f"unexpected url {url}")
+    monkeypatch.setattr(theke.core, "http_get", fake)
 
 
 def qargs(queue_cmd, **kw):
@@ -492,6 +517,122 @@ def test_library_add_title_and_tmdb_together_raises(tmp_path, monkeypatch):
     try:
         with pytest.raises(ValueError):
             cmd_library(conn, CFG, libargs("add", tmdb=["100"], title="X"))
+    finally:
+        conn.close()
+
+
+# -- cmd_library import ------------------------------------------------------
+
+def test_import_txt_auto_adds_wishes(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100\nDie Klapperschlange (1981)\n")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result == {"added": 2, "skipped": 0, "failed": 0, "errors": []}
+        assert {r["tmdb_id"] for r in library_rows(conn)} == {"100", "9268"}
+    finally:
+        conn.close()
+
+
+def test_import_unresolved_title_goes_to_error_log(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "Nonexistent Film (2000)\n100")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1
+        assert result["failed"] == 1
+        assert result["errors"][0]["line"] == 1
+        assert result["errors"][0]["input"] == "Nonexistent Film (2000)"
+        assert [r["tmdb_id"] for r in library_rows(conn)] == ["100"]
+    finally:
+        conn.close()
+
+
+def test_import_invalid_tmdb_id_goes_to_error_log(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "999")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 0 and result["failed"] == 1
+        assert result["errors"][0]["input"] == "999"
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
+
+
+def test_import_idempotent_skips_existing(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100")
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result == {"added": 0, "skipped": 1, "failed": 0, "errors": []}
+    finally:
+        conn.close()
+
+
+def test_import_csv_resolves_id_and_title(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.csv",
+                      "tmdb_id,title,year\n100,,\n,Die Klapperschlange,1981\n")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 2 and result["failed"] == 0
+        assert {r["tmdb_id"] for r in library_rows(conn)} == {"100", "9268"}
+    finally:
+        conn.close()
+
+
+def test_import_csv_bad_year_row_in_error_log(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.csv",
+                      "title,year\nDie Klapperschlange,1981\nHeat,abc")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 1
+        assert result["errors"][0]["line"] == 3
+    finally:
+        conn.close()
+
+
+def test_import_format_override(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.dat", "100")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG,
+                             libargs("import", path=path, format="txt", json=True))
+        assert result["added"] == 1
+    finally:
+        conn.close()
+
+
+def test_import_without_key_raises(tmp_path):
+    path = write_file(tmp_path, "wishes.txt", "100")
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ConfigError):
+            cmd_library(conn, Config(), libargs("import", path=path))
+    finally:
+        conn.close()
+
+
+def test_import_human_output_lists_errors(tmp_path, monkeypatch, capsys):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "Nonexistent (2000)")
+    conn = open_db(tmp_path)
+    try:
+        capsys.readouterr()
+        cmd_library(conn, CFG, libargs("import", path=path))   # not --json
+        out = capsys.readouterr().out
+        assert "0 added, 0 skipped, 1 failed" in out
+        assert "line 1:" in out
     finally:
         conn.close()
 
