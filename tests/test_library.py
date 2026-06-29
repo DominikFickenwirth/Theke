@@ -295,6 +295,124 @@ def test_pick_by_year_empty():
     assert pick_by_year([], 1981, 2) is None
 
 
+# -- import: format detection ------------------------------------------------
+
+def test_detect_format_by_extension():
+    assert theke._import_detect_format("wishes.csv", None) == "csv"
+    assert theke._import_detect_format("wishes.txt", None) == "txt"
+
+
+def test_detect_format_extension_case_insensitive():
+    assert theke._import_detect_format("WISHES.CSV", None) == "csv"
+
+
+def test_detect_format_override_wins():
+    assert theke._import_detect_format("data.dat", "csv") == "csv"
+    assert theke._import_detect_format("wishes.csv", "txt") == "txt"
+
+
+def test_detect_format_unknown_extension_raises():
+    with pytest.raises(ValueError):
+        theke._import_detect_format("data.dat", None)
+
+
+# -- import: title (year) parsing --------------------------------------------
+
+def test_parse_title_with_year():
+    assert theke._parse_title("Der Pate (1972)") == ("Der Pate", 1972)
+
+
+def test_parse_title_without_year():
+    assert theke._parse_title("Heat") == ("Heat", None)
+
+
+def test_parse_title_non_four_digit_paren_is_not_a_year():
+    assert theke._parse_title("Foo (12)") == ("Foo (12)", None)
+
+
+def test_parse_title_trailing_number_without_paren_is_part_of_title():
+    assert theke._parse_title("Blade Runner 2049") == ("Blade Runner 2049", None)
+
+
+# -- import: txt parsing -----------------------------------------------------
+
+def test_parse_txt_auto_classifies_and_skips_blanks():
+    text = "12345\nDer Pate (1972)\n\n  \nHeat\n"
+    assert theke._parse_txt(text, "auto") == [
+        (1, "12345", {"kind": "id", "id": "12345"}),
+        (2, "Der Pate (1972)", {"kind": "title", "title": "Der Pate", "year": 1972}),
+        (5, "Heat", {"kind": "title", "title": "Heat", "year": None}),
+    ]
+
+
+def test_parse_txt_id_mode_takes_whole_line_as_id():
+    text = "12345\nDer Pate (1972)"
+    assert theke._parse_txt(text, "id") == [
+        (1, "12345", {"kind": "id", "id": "12345"}),
+        (2, "Der Pate (1972)", {"kind": "id", "id": "Der Pate (1972)"}),
+    ]
+
+
+def test_parse_txt_title_mode_takes_digits_as_a_title():
+    assert theke._parse_txt("12345", "title") == [
+        (1, "12345", {"kind": "title", "title": "12345", "year": None}),
+    ]
+
+
+# -- import: csv parsing -----------------------------------------------------
+
+def test_parse_csv_tmdb_id_only():
+    assert theke._parse_csv("tmdb_id\n100\n200") == [
+        (2, "100", {"kind": "id", "id": "100"}),
+        (3, "200", {"kind": "id", "id": "200"}),
+    ]
+
+
+def test_parse_csv_title_and_year():
+    assert theke._parse_csv("title,year\nDer Pate,1972\nHeat,") == [
+        (2, "Der Pate,1972", {"kind": "title", "title": "Der Pate", "year": 1972}),
+        (3, "Heat,", {"kind": "title", "title": "Heat", "year": None}),
+    ]
+
+
+def test_parse_csv_all_columns_prefers_id_then_title_and_ignores_dummy():
+    text = "tmdb_id,title,year,dummy\n100,,,x\n,Heat,1995,y"
+    assert theke._parse_csv(text) == [
+        (2, "100,,,x", {"kind": "id", "id": "100"}),
+        (3, ",Heat,1995,y", {"kind": "title", "title": "Heat", "year": 1995}),
+    ]
+
+
+def test_parse_csv_unknown_column_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("foo\n1")
+
+
+def test_parse_csv_title_without_year_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("title\nHeat")
+
+
+def test_parse_csv_year_without_title_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("year\n1995")
+
+
+def test_parse_csv_no_id_or_title_column_raises():
+    with pytest.raises(ValueError):
+        theke._parse_csv("dummy\nx")
+
+
+def test_parse_csv_bad_year_is_a_row_error():
+    rows = theke._parse_csv("title,year\nHeat,abc")
+    assert rows[0][0] == 2 and rows[0][2]["kind"] == "error"
+
+
+def test_parse_csv_empty_row_is_a_row_error():
+    rows = theke._parse_csv("tmdb_id,title,year\n,,")
+    assert rows[0][0] == 2 and rows[0][2]["kind"] == "error"
+
+
 # -- cmd_library add by title ------------------------------------------------
 
 def test_library_add_by_title_resolves_tmdb_id(tmp_path, monkeypatch):
