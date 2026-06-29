@@ -1512,7 +1512,8 @@ def _print_library(rows):
     """One header line + one line per entry to stdout (the result)."""
     print(f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
     for r in rows:
-        print(f'  [{r["status"]}] {r["tmdb_id"]:>8}  {r["title"]!r}')
+        year = f' ({r["year"]})' if r["year"] else ""
+        print(f'  [{r["status"]}] {r["tmdb_id"]:>8}  {r["title"]!r}{year}')
 
 
 def _library_record(conn, tmdb_id, path, year):
