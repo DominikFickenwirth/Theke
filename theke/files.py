@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -291,7 +292,6 @@ def _discard(path) -> None:
 # -- ffmpeg seam --------------------------------------------------------------
 
 _DURATION_RX = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
-_TIME_RX     = re.compile(r"\btime=\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
 
 
 def _hms(h, m, s) -> float:
@@ -325,47 +325,54 @@ class _FfmpegProgress:
             self.next += self.step
 
 
-def _iter_ffmpeg_lines(stream):
-    """Yield ffmpeg's stderr as logical lines, splitting on both newline and the
-    carriage returns it uses for its live stat updates."""
-    buf = ""
-    while True:
-        chunk = stream.read(256)
-        if not chunk:
-            break
-        buf = (buf + chunk).replace("\r", "\n")
-        *lines, buf = buf.split("\n")
-        for line in lines:
-            if line:
-                yield line
-    if buf:
-        yield buf
+def _iter_progress(stream):
+    """Yield (key, value) pairs from ffmpeg's -progress output: one newline-
+    terminated key=value per line, blank/malformed lines skipped."""
+    for line in stream:
+        key, sep, value = line.strip().partition("=")
+        if sep:
+            yield key, value
 
 
-def run_ffmpeg(args) -> None:
-    """Run ffmpeg (args[0] is the binary), streaming its progress to the log;
-    raise on a missing binary or non-zero exit, surfacing the stderr tail. The
-    subprocess seam -- monkeypatched in tests."""
+def _drain_tail(stream, tail) -> None:
+    """Collect ffmpeg's stderr lines into a bounded tail (kept for the error
+    message), draining the pipe so it can never block the process."""
+    for line in stream:
+        line = line.strip()
+        if line:
+            tail.append(line)
+
+
+def run_ffmpeg(args, duration=None) -> float | None:
+    """Run ffmpeg (args[0] is the binary), reporting progress to the log; raise on
+    a missing binary or non-zero exit, surfacing the stderr tail. Progress is read
+    from ffmpeg's own -progress key=value stream (injected here on stdout) rather
+    than parsed out of its human-readable stderr; given a known media duration the
+    reporter logs percent milestones, otherwise it stays silent. Return the final
+    out_time (seconds) -- the true length written to the output, used to detect a
+    silently-truncated copy -- or None if no progress was seen. The subprocess seam
+    -- monkeypatched in tests."""
+    args = args[:1] + ["-progress", "pipe:1", "-nostats"] + args[1:]
     try:
-        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
     except FileNotFoundError:
         raise RuntimeError(f"ffmpeg not found: {args[0]} (set ffmpeg_path)") from None
-    label = os.path.basename(args[-1])
     tail = collections.deque(maxlen=3)
-    progress = None
-    for line in _iter_ffmpeg_lines(proc.stderr):
-        tail.append(line)
-        if progress is None:
-            m = _DURATION_RX.search(line)
-            if m:
-                progress = _FfmpegProgress(label, _hms(*m.groups()))
-        m = _TIME_RX.search(line)
-        if m and progress:
-            progress.update(_hms(*m.groups()))
+    drain = threading.Thread(target=_drain_tail, args=(proc.stderr, tail), daemon=True)
+    drain.start()
+    progress = _FfmpegProgress(os.path.basename(args[-1]), duration) if duration else None
+    out_time = None
+    for key, value in _iter_progress(proc.stdout):
+        if key == "out_time_us" and value.isdigit():
+            out_time = int(value) / 1_000_000
+            if progress:
+                progress.update(out_time)
     code = proc.wait()
+    drain.join()
     if code != 0:
         raise RuntimeError(f"ffmpeg failed (exit {code}): {'; '.join(tail)}")
+    return out_time
 
 
 def expand_ffmpeg_path(ffmpeg_path) -> str:
@@ -428,9 +435,11 @@ _REMUX_DURATION_TOLERANCE = 1.0   # seconds the output may legitimately fall sho
 
 
 def probe_duration(ffmpeg_path, path) -> float | None:
-    """The container duration (seconds) ffmpeg reports for `path`, or None when it
-    cannot be determined (unparseable, or ffmpeg missing). Reads the header only
-    (ffmpeg -i, whose non-zero 'no output' exit is expected and ignored)."""
+    """The declared container duration (seconds) ffmpeg reads from `path`'s header,
+    or None when it cannot be determined (unparseable, or ffmpeg missing). Reads the
+    header only (ffmpeg -i, whose non-zero 'no output' exit is expected and ignored).
+    Used on the remux SOURCE: a truncated source still declares its full length here,
+    which is the reference the truncation check holds the written output against."""
     try:
         proc = subprocess.run([ffmpeg_path, "-i", path], capture_output=True, text=True)
     except FileNotFoundError:
@@ -439,13 +448,13 @@ def probe_duration(ffmpeg_path, path) -> float | None:
     return _hms(*m.groups()) if m else None
 
 
-def _verify_not_truncated(ffmpeg_path, in_path, out_path) -> None:
-    """Guard against a silently-truncated source ffmpeg copied without error: if
-    the output falls materially short of the source duration the input was
-    incomplete -- raise. Skipped when either duration is unknown, so it never fails
-    a healthy remux on a probe that cannot read a stub (or absent ffmpeg)."""
-    src = probe_duration(ffmpeg_path, in_path)
-    out = probe_duration(ffmpeg_path, out_path)
+def _verify_not_truncated(in_path, src, out) -> None:
+    """Guard against a silently-truncated source ffmpeg copied without error: if the
+    written output `out` (ffmpeg's -progress out_time) falls materially short of the
+    source's declared duration `src`, the input was incomplete -- raise. The output
+    is never re-probed: a raw-stream container (.aac) reports no duration and ffmpeg
+    would estimate it short from bitrate, falsely failing a healthy remux. Skipped
+    when either duration is unknown."""
     if src and out and out < src - _REMUX_DURATION_TOLERANCE:
         raise RuntimeError(
             f"truncated source: remux {out:.0f}s < source {src:.0f}s "
@@ -454,14 +463,17 @@ def _verify_not_truncated(ffmpeg_path, in_path, out_path) -> None:
 
 def run_remux(ffmpeg_path, in_path, mode, out_path, language=None) -> int:
     """Remux in_path into out_path (stream copy, no transcode); return the output
-    size in bytes. A source whose duration the output falls short of (a truncation
-    ffmpeg copied silently) is rejected."""
+    size in bytes. A source whose declared duration the written output falls short of
+    (a truncation ffmpeg copied silently) is rejected. The source duration is probed
+    once up front (it also drives the progress reporter); the written length comes
+    from ffmpeg's -progress stream."""
     log.info("remuxing %s -> %s (%s)", os.path.basename(in_path),
              os.path.basename(out_path), mode)
     _ensure_parent(out_path)
+    src = probe_duration(ffmpeg_path, in_path)
     try:
-        run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language))
-        _verify_not_truncated(ffmpeg_path, in_path, out_path)
+        out = run_ffmpeg(ffmpeg_args(ffmpeg_path, in_path, mode, out_path, language), src)
+        _verify_not_truncated(in_path, src, out)
     except Exception:
         if os.path.exists(out_path):   # drop the partial/faulty target ffmpeg left
             os.remove(out_path)

@@ -1043,7 +1043,7 @@ def test_run_remux_invokes_ffmpeg_with_built_args(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
     seen = {}
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         seen["args"] = args
         with open(args[-1], "wb") as fh:
             fh.write(b"muxed")
@@ -1057,7 +1057,7 @@ def test_run_remux_invokes_ffmpeg_with_built_args(tmp_path, monkeypatch):
 def test_run_remux_creates_missing_parent_dirs(tmp_path, monkeypatch):
     out = str(tmp_path / "new" / "sub" / "out.mp4")    # parents do not exist yet
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"muxed")
 
@@ -1070,7 +1070,7 @@ def test_run_remux_creates_missing_parent_dirs(tmp_path, monkeypatch):
 def test_run_remux_removes_faulty_output_on_failure(tmp_path, monkeypatch):
     out = tmp_path / "out.mp4"
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:        # ffmpeg writes a partial file...
             fh.write(b"partial garbage")
         raise RuntimeError("ffmpeg failed (exit 1): boom")   # ...then dies
@@ -1084,7 +1084,7 @@ def test_run_remux_removes_faulty_output_on_failure(tmp_path, monkeypatch):
 def test_run_remux_failure_without_output_is_fine(tmp_path, monkeypatch):
     out = tmp_path / "out.mp4"
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         raise RuntimeError("ffmpeg failed (exit 1): no output written")
 
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
@@ -1109,12 +1109,12 @@ def test_run_ffmpeg_missing_binary_raises(tmp_path):
 def test_remux_rejects_truncated_source(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"short")
+        return 12.0                                # -progress: only 12 s written
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
-    durations = {"in.ts": 3600.0, out: 12.0}      # output far shorter than source
-    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: 3600.0)  # source 1 h
     with pytest.raises(RuntimeError, match="truncated"):
         run_remux("ffmpeg", "in.ts", "AV", out)
     assert not os.path.exists(out)                 # short output dropped, not kept
@@ -1123,25 +1123,46 @@ def test_remux_rejects_truncated_source(tmp_path, monkeypatch):
 def test_remux_accepts_matching_duration(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"full")
+        return 3600.0                              # -progress: full length written
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
-    durations = {"in.ts": 3600.0, out: 3600.0}
-    monkeypatch.setattr(files, "probe_duration", lambda ff, path: durations.get(path))
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: 3600.0)
     n = run_remux("ffmpeg", "in.ts", "AV", out)
     assert n == 4                                  # accepted (len b"full")
 
 
-def test_remux_skips_check_when_duration_unknown(tmp_path, monkeypatch):
+def test_remux_uses_progress_duration_not_output_container(tmp_path, monkeypatch):
+    # The .aac regression: a raw-stream output reports no container duration, so
+    # ffmpeg estimates it from bitrate -- materially short of the truth. The check
+    # must trust ffmpeg's -progress out_time (run_ffmpeg's return), never re-probe
+    # the output container, or every audio-only remux would be falsely rejected.
+    out = str(tmp_path / "out.aac")
+
+    def fake_ffmpeg(args, duration=None):
+        with open(args[-1], "wb") as fh:
+            fh.write(b"full audio")
+        return 5412.0                              # -progress: true written length
+    monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
+    # probe_duration reads the SOURCE header; a re-probe of the output would yield
+    # the short bitrate estimate (5183) and wrongly fail the remux.
+    monkeypatch.setattr(files, "probe_duration",
+                        lambda ff, path: 5413.0 if path == "in.ts" else 5183.0)
+    n = run_remux("ffmpeg", "in.ts", "A", out)
+    assert n == len(b"full audio")                 # accepted, not mistaken for truncation
+
+
+def test_remux_skips_check_when_source_duration_unknown(tmp_path, monkeypatch):
     out = str(tmp_path / "out.mp4")
 
-    def fake_ffmpeg(args):
+    def fake_ffmpeg(args, duration=None):
         with open(args[-1], "wb") as fh:
             fh.write(b"x")
+        return 1.0
     monkeypatch.setattr(files, "run_ffmpeg", fake_ffmpeg)
-    monkeypatch.setattr(files, "probe_duration", lambda ff, path: None)
-    n = run_remux("ffmpeg", "in.ts", "AV", out)    # unknown duration -> no guard
+    monkeypatch.setattr(files, "probe_duration", lambda ff, path: None)  # source unknown
+    n = run_remux("ffmpeg", "in.ts", "AV", out)    # no reference -> no guard
     assert n == 1
 
 
@@ -1153,10 +1174,12 @@ def test_probe_duration_parses_ffmpeg_stderr(monkeypatch):
 
 
 class FakePopen:
-    """Fake subprocess.Popen for run_ffmpeg: serves stderr_text as the process
-    stderr stream and returns returncode from wait()."""
+    """Fake subprocess.Popen for run_ffmpeg: serves stdout_text as the -progress
+    key=value stream and stderr_text as the diagnostics stream, returning
+    returncode from wait()."""
 
-    def __init__(self, stderr_text, returncode):
+    def __init__(self, stdout_text="", stderr_text="", returncode=0):
+        self.stdout = io.StringIO(stdout_text)
         self.stderr = io.StringIO(stderr_text)
         self._rc = returncode
 
@@ -1166,28 +1189,39 @@ class FakePopen:
 
 def test_run_ffmpeg_nonzero_exit_raises(monkeypatch):
     monkeypatch.setattr(files.subprocess, "Popen",
-                        lambda *a, **k: FakePopen("boom line 1\nboom line 2\n", 1))
+                        lambda *a, **k: FakePopen(stderr_text="boom line 1\nboom line 2\n",
+                                                  returncode=1))
     with pytest.raises(RuntimeError, match="ffmpeg failed"):
         run_ffmpeg(["ffmpeg", "-i", "x"])
 
 
-# ffmpeg writes its live stat lines with a carriage return (no newline) until the
-# run ends; the Duration line comes once up front. 40 s total, time= every 4 s.
-FFMPEG_STDERR = (
-    "ffmpeg version 6.0\n"
-    "  Duration: 00:00:40.00, start: 0.000000, bitrate: 1000 kb/s\n"
-    "frame=  100 q=-1.0 size=    1kB time=00:00:04.00 bitrate=2.0kbits/s\r"
-    "frame=  200 q=-1.0 size=    2kB time=00:00:08.00 bitrate=2.0kbits/s\r"
-    "frame=  300 q=-1.0 size=    3kB time=00:00:12.00 bitrate=2.0kbits/s\r"
-    "frame= 1000 q=-1.0 size=   10kB time=00:00:40.00 bitrate=2.0kbits/s\r"
-    "\n")
+def test_run_ffmpeg_injects_progress_flags(monkeypatch):
+    seen = {}
+    def fake_popen(args, **k):
+        seen["args"] = list(args)
+        return FakePopen()
+    monkeypatch.setattr(files.subprocess, "Popen", fake_popen)
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])
+    assert "-progress" in seen["args"] and "pipe:1" in seen["args"]
+    assert "-nostats" in seen["args"]
+    assert seen["args"][0] == "ffmpeg" and seen["args"][-1] == "out.mp4"
 
 
-def test_run_ffmpeg_logs_progress_from_duration_and_time(monkeypatch, caplog):
+# ffmpeg's -progress stream is newline-terminated key=value blocks, each ending in
+# progress=continue (progress=end on the last). 40 s total, a block every 4 s of
+# media time; out_time_us is the elapsed position in microseconds.
+FFMPEG_PROGRESS = (
+    "frame=100\nout_time_us=4000000\nprogress=continue\n"
+    "frame=200\nout_time_us=8000000\nprogress=continue\n"
+    "frame=300\nout_time_us=12000000\nprogress=continue\n"
+    "frame=1000\nout_time_us=40000000\nprogress=end\n")
+
+
+def test_run_ffmpeg_logs_progress_from_progress_stream(monkeypatch, caplog):
     monkeypatch.setattr(files.subprocess, "Popen",
-                        lambda *a, **k: FakePopen(FFMPEG_STDERR, 0))
+                        lambda *a, **k: FakePopen(stdout_text=FFMPEG_PROGRESS))
     caplog.set_level(logging.INFO, logger="theke")
-    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])           # label = out.mp4
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"], duration=40.0)   # label = out.mp4
     # 40 s total -> 10% step is 4 s; times 4/8/12/40 s -> 10/20/30/100 percent
     msgs = [r.getMessage() for r in caplog.records if "%" in r.getMessage()]
     assert msgs == [
@@ -1198,13 +1232,24 @@ def test_run_ffmpeg_logs_progress_from_duration_and_time(monkeypatch, caplog):
 
 
 def test_run_ffmpeg_without_duration_logs_no_progress(monkeypatch, caplog):
-    stderr = ("frame=  100 time=00:00:04.00 bitrate=2.0kbits/s\r"
-              "frame=  200 time=00:00:08.00 bitrate=2.0kbits/s\r\n")
     monkeypatch.setattr(files.subprocess, "Popen",
-                        lambda *a, **k: FakePopen(stderr, 0))
+                        lambda *a, **k: FakePopen(stdout_text=FFMPEG_PROGRESS))
     caplog.set_level(logging.INFO, logger="theke")
-    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])
+    run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"])              # no duration -> silent
     assert [r.getMessage() for r in caplog.records if "%" in r.getMessage()] == []
+
+
+def test_run_ffmpeg_returns_final_output_duration(monkeypatch):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(stdout_text=FFMPEG_PROGRESS))
+    # final out_time_us is 40000000 us -> 40.0 s, the true written length
+    assert run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"]) == 40.0
+
+
+def test_run_ffmpeg_returns_none_without_progress(monkeypatch):
+    monkeypatch.setattr(files.subprocess, "Popen",
+                        lambda *a, **k: FakePopen(stdout_text=""))   # no progress emitted
+    assert run_ffmpeg(["ffmpeg", "-i", "in.ts", "out.mp4"]) is None
 
 
 # -- check-ffmpeg (probe the configured binary via -version) -------------------
@@ -1266,7 +1311,7 @@ def test_cli_file_remux_check_ffmpeg_missing_binary_errors(capsys, monkeypatch):
 def test_cli_file_remux_json(tmp_path, capsys, monkeypatch):
     out = str(tmp_path / "out.mp4")
     monkeypatch.setattr(files, "run_ffmpeg",
-                        lambda args: open(args[-1], "wb").write(b"ok"))
+                        lambda args, duration=None: open(args[-1], "wb").write(b"ok"))
     rc = main(["--json", "file", "remux", "--in", "in.ts", "--mode", "AV",
                "--out", out])
     assert rc == 0
