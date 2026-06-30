@@ -699,28 +699,35 @@ theke --db build/theke.db library add --tmdb-list 8334221
 
 Fügt **mehrere** Filmwünsche aus einer Datei hinzu (Massen-Import). Jeder Eintrag
 wird auf eine `tmdb_id` aufgelöst -- direkt angegeben oder per Titel/Jahr-Suche
-(wie bei `add --title`, inkl. Jahres-Toleranz). Einträge, die sich nicht auflösen
-lassen, landen in einem **Fehlerprotokoll**, statt den Import abzubrechen; der
-Rest wird angelegt (`W`, idempotent). Erfordert einen TMDB-Key.
+(inkl. Jahres-Toleranz). Einträge, die sich nicht auflösen lassen, landen in einem
+**Fehlerprotokoll**, statt den Import abzubrechen; der Rest wird angelegt (`W`,
+idempotent). Erfordert einen TMDB-Key.
+
+Eine Titel-Zeile braucht **immer ein Jahr** (anders als interaktiv bei
+`add --title`): ohne Jahr ist ein Titel zu mehrdeutig, daher wird er nicht auf
+den populärsten Treffer geraten, sondern als Fehler `year missing` protokolliert.
 
 Das Format ergibt sich aus der Endung (`.txt`/`.csv`), `--format` überschreibt:
 
 - **txt**: eine Zeile je Eintrag, entweder `Titel (Jahr)` oder eine `tmdb_id`;
   Leerzeilen werden übersprungen. `--mode` steuert die Deutung: `auto` (Default --
   reine Ziffern = `tmdb_id`, sonst Titel), `id` (alles als IDs) oder `title`
-  (alles als Titel).
+  (alles als Titel). Eine Titel-Zeile ohne `(Jahr)` ist ein Fehler.
 - **csv**: Kopfzeile aus den Spalten `tmdb_id`, `title`, `year` (jede darf
   fehlen). `title` und `year` müssen **beide** oder **keine** vorhanden sein;
   Spalten namens `dummy` werden ignoriert, andere Namen sind ein Fehler. Pro
-  Zeile gewinnt eine gefüllte `tmdb_id`, sonst der Titel (+ optionales Jahr); eine
-  Zeile ohne beides oder mit ungültigem Jahr kommt ins Fehlerprotokoll. Der
-  Trenner (`,` oder `;`) wird aus der Kopfzeile erkannt; die Datei darf UTF-8
-  (auch mit BOM) **oder** ANSI/CP-1252 sein.
+  Zeile gewinnt eine gefüllte `tmdb_id`, sonst der Titel; eine Zeile ohne beides,
+  mit ungültigem oder mit fehlendem Jahr (bei vorhandenem Titel) kommt ins
+  Fehlerprotokoll. Der Trenner (`,` oder `;`) wird aus der Kopfzeile erkannt; die
+  Datei darf UTF-8 (auch mit BOM) **oder** ANSI/CP-1252 sein.
 
 Direkt angegebene IDs werden gegen TMDB geprüft (eine ungültige ID landet im
-Fehlerprotokoll). Gibt `added`/`skipped`/`failed` und die `errors`-Liste
-(`line`, `input`, `reason`) aus; mit `--json` als Objekt, sonst als Bericht auf
-stdout.
+Fehlerprotokoll). Während des Imports meldet jede Zeile ihren Fortschritt
+(`[n/total]`) auf stderr, damit ein langer Import sichtbar bleibt. Eine Titel-
+Suche ohne Treffer nennt den Grund: gar kein Titel-Treffer vs. Treffer, deren
+Jahre alle außerhalb der Toleranz liegen (mit Auflistung der gefundenen Jahre).
+Am Ende kommen `added`/`skipped`/`failed` und die `errors`-Liste (`line`,
+`input`, `reason`) auf stdout; mit `--json` als Objekt, sonst als Bericht.
 
 | Option                       | Wirkung                                            |
 | ---------------------------- | -------------------------------------------------- |
