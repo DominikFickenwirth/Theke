@@ -1407,6 +1407,38 @@ def test_scan_flags_duplicate_keeps_existing(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_scan_logs_each_outcome_to_stderr(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    stub_ffprobe(monkeypatch)
+    added = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)         # -> added
+    junk = make_movie(tmp_path, "Random Junk")                          # -> unresolved
+    make_movie(tmp_path, "Parodie", files=("p.mp4", ".thekeignore"))    # -> ignored
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("added 100") and added in m for m in msgs)
+    assert any(m.startswith("unresolved:") and junk in m for m in msgs)
+    assert any(m.startswith("ignored:") and "Parodie" in m for m in msgs)
+
+
+def test_scan_logs_move_with_both_paths(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    stub_ffprobe(monkeypatch)
+    new = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    old = str(tmp_path / "old place (2020)")
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=old)   # gone from disk
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("moved 100") and old in m and new in m for m in msgs)
+
+
 def test_scan_hard_guard_missing_root_raises_no_sweep(tmp_path):
     conn = open_db(tmp_path)
     try:
