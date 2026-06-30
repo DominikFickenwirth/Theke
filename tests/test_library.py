@@ -1,6 +1,6 @@
 """Tests for the wishlist / library stage (phase 9): the library table,
 cmd_library (add/list/remove), download -> library recording, and the
-cmd_update orchestrator."""
+single pipeline pass (_run_pass, the body the scheduler loops)."""
 
 import json
 from types import SimpleNamespace
@@ -9,7 +9,7 @@ import pytest
 
 import theke
 from theke import *
-from theke import (cmd_library, cmd_queue, cmd_update, db_connect, main,
+from theke import (cmd_library, cmd_queue, _run_pass, db_connect, main,
                    tmdb_search, pick_by_year)
 
 
@@ -139,7 +139,7 @@ def stub_files(monkeypatch):
 
 
 def stub_stages(monkeypatch):
-    """No-op fetch + enrich so cmd_update exercises only the wish loop."""
+    """No-op fetch + enrich so _run_pass exercises only the wish loop."""
     monkeypatch.setattr(theke, "cmd_fetch", lambda conn, cfg, args: {"action": "skip"})
     monkeypatch.setattr(theke, "_enrich_run", lambda conn, cfg, args: {"enriched": 0})
 
@@ -803,7 +803,7 @@ def test_download_without_tmdb_records_nothing(tmp_path, monkeypatch):
         conn.close()
 
 
-# -- cmd_update orchestrator -------------------------------------------------
+# -- _run_pass (one pipeline pass) -------------------------------------------
 
 def test_update_auto_approve_downloads_and_marks_library(tmp_path, monkeypatch):
     stub_tmdb(monkeypatch)
@@ -814,7 +814,7 @@ def test_update_auto_approve_downloads_and_marks_library(tmp_path, monkeypatch):
         cfg = download_cfg(tmp_path, queue_auto_approve=True)
         insert_movie(conn, "m_de", tmdb_id="", status="1")   # not matched yet
         cmd_library(conn, cfg, libargs("add", tmdb=["100"]))
-        result = cmd_update(conn, cfg, SimpleNamespace())
+        result = _run_pass(conn, cfg)
         assert result["queued"] == 1
         assert result["downloaded"] == 1
         assert library_rows(conn)[0]["status"] == "L"
@@ -831,7 +831,7 @@ def test_update_without_auto_approve_stops_at_proposed(tmp_path, monkeypatch):
         cfg = download_cfg(tmp_path, queue_auto_approve=False)
         insert_movie(conn, "m_de", tmdb_id="", status="1")
         cmd_library(conn, cfg, libargs("add", tmdb=["100"]))
-        result = cmd_update(conn, cfg, SimpleNamespace())
+        result = _run_pass(conn, cfg)
         assert result["queued"] == 1
         assert result["downloaded"] == 0
         q = conn.execute("SELECT status FROM queue").fetchone()
@@ -853,7 +853,7 @@ def test_update_skips_already_satisfied_wish(tmp_path, monkeypatch):
         conn.execute("INSERT INTO library (tmdb_id, status, title, created_at, "
                      "updated_at) VALUES ('100','L','',?,?)",
                      (theke._now(), theke._now()))
-        result = cmd_update(conn, cfg, SimpleNamespace())
+        result = _run_pass(conn, cfg)
         assert result["wishes"] == 0
         assert result["queued"] == 0
         assert conn.execute("SELECT count(*) c FROM queue").fetchone()["c"] == 0
@@ -872,7 +872,7 @@ def test_update_wish_failure_does_not_abort(tmp_path, monkeypatch):
         conn.execute("INSERT INTO library (tmdb_id, status, title, created_at, "
                      "updated_at) VALUES ('100','W','',?,?)",
                      (theke._now(), theke._now()))
-        result = cmd_update(conn, cfg, SimpleNamespace())
+        result = _run_pass(conn, cfg)
         assert result["failed"] == 1
         assert result["queued"] == 0
         assert library_rows(conn)[0]["status"] == "W"
@@ -907,7 +907,7 @@ def test_update_imports_configured_list(tmp_path, monkeypatch):
     try:
         cfg = download_cfg(tmp_path, queue_auto_approve=True, tmdb_lists=["7"])
         insert_movie(conn, "m_de", tmdb_id="", status="1")
-        result = cmd_update(conn, cfg, SimpleNamespace())
+        result = _run_pass(conn, cfg)
         assert result["list_added"] == 1
         assert result["wishes"] == 1            # imported wish entered the loop
         assert result["downloaded"] == 1
@@ -925,7 +925,7 @@ def test_update_list_failure_does_not_abort(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         cfg = download_cfg(tmp_path, queue_auto_approve=False, tmdb_lists=["7"])
-        result = cmd_update(conn, cfg, SimpleNamespace())
+        result = _run_pass(conn, cfg)
         assert result["list_added"] == 0
         assert result["wishes"] == 0
     finally:
@@ -1007,13 +1007,13 @@ def test_import_cli_format_override(tmp_path, monkeypatch, capsys):
     assert out["added"] == 1
 
 
-def test_update_cli_runs(tmp_path, monkeypatch, capsys):
+def test_run_once_cli_runs(tmp_path, monkeypatch, capsys):
     stub_tmdb(monkeypatch)
     stub_stages(monkeypatch)
     db = str(tmp_path / "theke.db")
     cfgpath = tmp_path / "theke.json"
     cfgpath.write_text(json.dumps({"db_path": db, "tmdb_api_key": "KEY"}),
                        encoding="utf-8")
-    assert main(["--json", "--config", str(cfgpath), "update"]) == 0
+    assert main(["--json", "--config", str(cfgpath), "run", "--once"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["queued"] == 0   # no wishes
