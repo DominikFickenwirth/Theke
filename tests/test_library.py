@@ -64,12 +64,13 @@ def library_rows(conn):
 
 def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False,
             title=None, year=None, year_tolerance=None, path=None, format=None,
-            mode="auto", tmdb_list=None, allow_empty=False, deleted=False):
+            mode="auto", tmdb_list=None, allow_empty=False, deleted=False,
+            root=None):
     return SimpleNamespace(library_cmd=library_cmd, tmdb=tmdb, all=all,
                            status=status, json=json, title=title, year=year,
                            year_tolerance=year_tolerance, path=path,
                            format=format, mode=mode, tmdb_list=tmdb_list,
-                           allow_empty=allow_empty, deleted=deleted)
+                           allow_empty=allow_empty, deleted=deleted, root=root)
 
 
 def write_file(tmp_path, name, content):
@@ -1435,6 +1436,35 @@ def test_scan_soft_guard_empty_root(tmp_path):
         conn.close()
 
 
+def test_scan_root_arg_overrides_config(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    real = tmp_path / "real"
+    real.mkdir()
+    make_movie(real, "Mein Film (2020)", nfo=NFO100)
+    cfg = dataclasses.replace(CFG, library_root=str(tmp_path / "wrong"),
+                              ffprobe_path="ffprobe")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, cfg, libargs("scan", root=str(real)))
+        assert result["scanned"] == 1 and result["added"] == 1
+    finally:
+        conn.close()
+
+
+def test_scan_root_arg_lets_config_root_be_empty(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    real = tmp_path / "real"
+    real.mkdir()
+    make_movie(real, "Mein Film (2020)", nfo=NFO100)
+    cfg = dataclasses.replace(CFG, library_root="", ffprobe_path="ffprobe")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, cfg, libargs("scan", root=str(real)))
+        assert result["scanned"] == 1
+    finally:
+        conn.close()
+
+
 def test_scan_skips_ffprobe_for_unchanged_file(tmp_path, monkeypatch):
     calls = stub_ffprobe(monkeypatch)
     folder = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
@@ -1520,6 +1550,16 @@ def test_library_scan_cli(tmp_path, capsys):
     root.mkdir()
     cfgpath = _cfg_file(tmp_path, library_root=str(root))
     assert main(["--json", "--config", cfgpath, "library", "scan"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["scanned"] == 0 and out["deleted"] == 0
+
+
+def test_library_scan_root_flag_cli(tmp_path, capsys):
+    root = tmp_path / "elsewhere"
+    root.mkdir()
+    cfgpath = _cfg_file(tmp_path)   # no library_root in config
+    assert main(["--json", "--config", cfgpath,
+                 "library", "scan", "--root", str(root)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["scanned"] == 0 and out["deleted"] == 0
 
