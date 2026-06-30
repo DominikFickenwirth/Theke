@@ -1433,11 +1433,18 @@ def _wish_meta(cfg, tmdb_id) -> tuple:
 def _search_title(cfg, title, year, tol) -> tuple:
     """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
     year tolerant by `tol` years (smallest distance wins, ties keep popularity).
-    Raises ValueError when nothing qualifies. The pure-input core shared by
-    `library add --title` and `library import`."""
-    cand = pick_by_year(tmdb_search(cfg, title), year, tol)
+    Raises ValueError when nothing qualifies, naming the cause: no title hit at
+    all vs. hits whose years all miss the tolerance (listing the years found).
+    The pure-input core shared by `library add --title` and `library import`."""
+    cands = tmdb_search(cfg, title)
+    if not cands:
+        raise ValueError(f"no TMDB title matches {title!r}")
+    cand = pick_by_year(cands, year, tol)
     if cand is None:
-        raise ValueError(f"no TMDB movie for {title!r} (year {year}, +-{tol})")
+        years = sorted({c["year"] for c in cands if c["year"] is not None})
+        found = ", ".join(map(str, years)) if years else "none dated"
+        raise ValueError(f"{len(cands)} TMDB title match(es) for {title!r}, but "
+                         f"none within {year} +-{tol} years (found: {found})")
     return cand["tmdb_id"], cand["title"], cand["year"]
 
 
@@ -1717,10 +1724,14 @@ def _read_import_file(path):
 
 def _resolve_entry(cfg, entry, tol) -> tuple:
     """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
-    id is verified via TMDB (a bad id propagates as 404); a title is searched."""
+    id is verified via TMDB (a bad id propagates as 404); a title is searched, but
+    only with a year -- a yearless title is too ambiguous to import, so it raises
+    rather than guessing the most popular hit (unlike interactive `add --title`)."""
     if entry["kind"] == "id":
         meta = tmdb_movie(cfg, entry["id"])
         return str(entry["id"]), meta["title"] or "", meta["year"]
+    if entry["year"] is None:
+        raise ValueError(f"year missing for title {entry['title']!r}")
     return _search_title(cfg, entry["title"], entry["year"], tol)
 
 
@@ -1737,13 +1748,17 @@ def _library_import(conn, cfg, args) -> dict:
     entries = _parse_txt(text, args.mode) if fmt == "txt" else _parse_csv(text)
     tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
     resolved, errors = [], []
-    for lineno, raw, entry in entries:
+    total = len(entries)
+    for n, (lineno, raw, entry) in enumerate(entries, 1):
+        log.info("[%d/%d] line %d: %s", n, total, lineno, raw)
         if entry["kind"] == "error":
+            log.warning("  line %d skipped: %s", lineno, entry["reason"])
             errors.append({"line": lineno, "input": raw, "reason": entry["reason"]})
             continue
         try:
             resolved.append(_resolve_entry(cfg, entry, tol))
         except Exception as exc:
+            log.warning("  line %d failed: %s", lineno, exc)
             errors.append({"line": lineno, "input": raw, "reason": str(exc)})
     result = {**_insert_wishes(conn, resolved), "failed": len(errors), "errors": errors}
     if args.json:
