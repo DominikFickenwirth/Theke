@@ -104,9 +104,21 @@ def next_run(now: datetime, triggers: list) -> datetime:
     return min(_fire(t, now) for t in triggers)
 
 
-def _wait_until(nxt: datetime, stop: threading.Event):
-    """Block until `nxt` or until `stop` is set (whichever first)."""
-    stop.wait(max(0.0, (nxt - datetime.now()).total_seconds()))
+# Poll granularity for _wait_until: a long wait is sliced into pieces of this
+# many seconds so a stop set by a signal is honored within one slice. On Windows
+# the SIGINT handler runs only between waits (not while the main thread blocks in
+# the wait's C lock), so one big wait would swallow Ctrl+C until it elapsed.
+_WAIT_SLICE = 1.0
+
+
+def _wait_until(nxt: datetime, stop: threading.Event, *, now_fn=datetime.now):
+    """Block until `nxt` or until `stop` is set (whichever first), waking at most
+    every _WAIT_SLICE seconds so a signal-set stop is seen promptly."""
+    while not stop.is_set():
+        remaining = (nxt - now_fn()).total_seconds()
+        if remaining <= 0:
+            return
+        stop.wait(min(remaining, _WAIT_SLICE))
 
 
 def run_loop(pass_fn, on_result, schedule, *, wait_fn=None, now_fn=None,
