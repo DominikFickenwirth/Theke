@@ -659,7 +659,10 @@ Jahr (`--year`) -- wie in `theke match` -- um ein paar Jahre danebenliegen: Aus 
 Treffern wird der mit der kleinsten Jahresdifferenz innerhalb der Toleranz gewählt
 (bei Gleichstand der populärste); ohne `--year` der populärste Treffer. Die erlaubte
 Differenz steuert `--year-tolerance` (Default: Config `match_year_tolerance`, ab
-Werk `2`). `--tmdb`, `--title` und `--tmdb-list` schließen sich gegenseitig aus.
+Werk `2`). Liefert die Suche zum vollen Titel nichts und beginnt er mit einem
+Artikel (`der`/`die`/`das`/`ein`/`eine`/`the`/`a`/`an`), wird einmal ohne den Artikel
+nachgesucht (z. B. `Der Pate` -> `Pate`) -- gilt ebenso für `library import`.
+`--tmdb`, `--title` und `--tmdb-list` schließen sich gegenseitig aus.
 
 **Listen-Import** (`--tmdb-list ID`): liest den v3-Endpoint `/list/{id}` und legt
 alle enthaltenen **Filme** als Wünsche an. Titel und Jahr stammen direkt aus der
