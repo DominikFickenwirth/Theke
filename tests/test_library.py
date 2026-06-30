@@ -719,6 +719,21 @@ def test_library_add_by_title_logs_before_after(tmp_path, monkeypatch, caplog):
         conn.close()
 
 
+def test_library_add_skip_logs_which_id(tmp_path, monkeypatch, caplog):
+    # Re-adding an existing wish logs *which* id was skipped to stderr, not just
+    # a bare "skipped" count.
+    stub_tmdb(monkeypatch)   # id 100 resolves to "Mein Film" (2020)
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, CFG, libargs("add", tmdb=["100"]))   # first add
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("add", tmdb=["100"]))   # now skipped
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "skip" in msgs and "100" in msgs and "already" in msgs
+    finally:
+        conn.close()
+
+
 def test_library_add_title_and_tmdb_together_raises(tmp_path, monkeypatch):
     stub_search(monkeypatch)
     conn = open_db(tmp_path)

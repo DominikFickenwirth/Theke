@@ -1506,8 +1506,9 @@ def _library_add(conn, cfg, args) -> dict:
 
 def _insert_wishes(conn, wishes) -> dict:
     """Insert (tmdb_id, title, year) wishes as status 'W' in one transaction.
-    Idempotent: an existing tmdb_id is left untouched (counted as skipped, never
-    reset from 'L' back to 'W'). Returns the added/skipped counts."""
+    Idempotent: an existing tmdb_id is left untouched (counted as skipped and
+    logged to stderr by id, never reset from 'L' back to 'W'). Returns the
+    added/skipped counts."""
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
@@ -1517,7 +1518,11 @@ def _insert_wishes(conn, wishes) -> dict:
                 "INSERT INTO library (tmdb_id, status, title, year, created_at, updated_at) "
                 "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
                 (tid, title, year, ts, ts))
-            totals["added" if cur.rowcount else "skipped"] += 1
+            if cur.rowcount:
+                totals["added"] += 1
+            else:
+                totals["skipped"] += 1
+                log.info("skip %s: already in library", _resolved_label(tid, title, year))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
