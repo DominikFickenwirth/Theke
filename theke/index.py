@@ -54,3 +54,52 @@ def is_lang_variant(filename) -> bool:
     stem = os.path.splitext(os.path.basename(filename))[0]
     head, dot, tail = stem.rpartition(".")
     return bool(dot) and len(tail) == 2 and tail.isalpha()
+
+
+# -- ffprobe ------------------------------------------------------------------
+
+# ISO 639-2 (and a few /B variants) -> the 2-letter codes mediathek/queue use, so
+# library languages read the same way; an unknown tag passes through unchanged.
+_ISO2 = {"deu": "de", "ger": "de", "eng": "en", "fra": "fr", "fre": "fr",
+         "spa": "es", "ita": "it", "nld": "nl", "dut": "nl", "pol": "pl",
+         "rus": "ru", "tur": "tr", "ara": "ar", "por": "pt"}
+
+
+def run_ffprobe(ffprobe_path, path) -> dict:
+    """Probe `path` with ffprobe and return the parsed -print_format json dict
+    (streams + format). Raises on a missing binary or non-zero exit. The subprocess
+    seam -- monkeypatched in tests."""
+    args = [ffprobe_path, "-v", "quiet", "-show_streams", "-show_format",
+            "-print_format", "json", path]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(f"ffprobe not found: {ffprobe_path} (set ffprobe_path)") from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe failed (exit {proc.returncode}): {path}")
+    return json.loads(proc.stdout or "{}")
+
+
+def probe_attrs(data) -> dict:
+    """Physical attributes from a run_ffprobe dict: resolution 'WxH' (first video
+    stream), duration in whole seconds (format.duration), and the comma-joined audio
+    languages (normalized to 2-letter, deduped, in stream order). Each is None when
+    the source carries no such information."""
+    streams = data.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    resolution = f"{video['width']}x{video['height']}" if video and video.get("width") else None
+    duration = data.get("format", {}).get("duration")
+    try:
+        duration = int(float(duration))
+    except (TypeError, ValueError):
+        duration = None
+    langs = []
+    for s in streams:
+        if s.get("codec_type") != "audio":
+            continue
+        code = (s.get("tags") or {}).get("language", "").lower()
+        code = _ISO2.get(code, code)
+        if code and code != "und" and code not in langs:
+            langs.append(code)
+    return {"resolution": resolution, "duration": duration,
+            "languages": ",".join(langs) or None}
