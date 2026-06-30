@@ -36,8 +36,10 @@ class Config:
     filmliste_diff_url: str = "https://liste.mediathekview.de/Filmliste-diff.xz"
     filmliste_id_url:   str = "https://liste.mediathekview.de/filmliste.id"
     tmdb_api_key:         str   = ""
+    tmdb_read_token:      str   = ""
     tmdb_api_url:         str   = "https://api.themoviedb.org/3"
     tmdb_language:        str   = "de-DE"
+    tmdb_lists:           list  = dataclasses.field(default_factory=list)
     match_min_confidence: float = 0.6
     match_year_tolerance: int   = 2
     queue_auto_approve:   bool  = False
@@ -273,10 +275,11 @@ def db_set_meta(conn, key, value):
 USER_AGENT = "theke"
 
 
-def http_get(url: str, timeout=None) -> bytes:
+def http_get(url: str, timeout=None, headers=None) -> bytes:
     """Fetch a URL and return the raw response bytes. `timeout` (seconds) bounds
     each blocking socket operation, so a dropped connection fails instead of
-    hanging forever (None = no timeout)."""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    hanging forever (None = no timeout). `headers` are merged over the default
+    User-Agent (e.g. an Authorization bearer for TMDB)."""
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
