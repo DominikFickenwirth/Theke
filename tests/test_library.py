@@ -3,6 +3,7 @@ cmd_library (add/list/remove), download -> library recording, and the
 single pipeline pass (_run_pass, the body the scheduler loops)."""
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -812,6 +813,73 @@ def test_import_human_output_lists_errors(tmp_path, monkeypatch, capsys):
         out = capsys.readouterr().out
         assert "0 added, 0 skipped, 1 failed" in out
         assert "line 1:" in out
+    finally:
+        conn.close()
+
+
+# -- import: informative resolution failures ---------------------------------
+
+def test_search_title_no_results_says_no_match(monkeypatch):
+    # 0 candidates -> the message must name the title and "no ... match".
+    stub_search(monkeypatch, payload={"results": []})
+    with pytest.raises(ValueError) as exc:
+        theke._search_title(CFG, "Ghostfilm", 2000, 2)
+    msg = str(exc.value)
+    assert "no" in msg.lower() and "match" in msg.lower() and "Ghostfilm" in msg
+
+
+def test_search_title_wrong_year_lists_found_years(monkeypatch):
+    # SEARCH has two candidates (1981, 2013); wanting 2000 +-2 excludes both.
+    stub_search(monkeypatch)
+    with pytest.raises(ValueError) as exc:
+        theke._search_title(CFG, "Die Klapperschlange", 2000, 2)
+    msg = str(exc.value)
+    assert msg.startswith("2 ")          # the candidate count is reported
+    assert "1981" in msg and "2013" in msg   # the years that were found
+    assert "2000" in msg                 # the wanted year
+
+
+def test_import_title_without_year_is_error(tmp_path, monkeypatch):
+    # A txt title line with no "(YYYY)" must fail (no guessing without a year).
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "Heat\n100")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 1
+        assert result["errors"][0]["line"] == 1
+        assert result["errors"][0]["input"] == "Heat"
+        assert "year" in result["errors"][0]["reason"].lower()
+        assert [r["tmdb_id"] for r in library_rows(conn)] == ["100"]
+    finally:
+        conn.close()
+
+
+def test_import_csv_title_without_year_is_error(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.csv",
+                      "title,year\nDie Klapperschlange,1981\nHeat,")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 1
+        assert result["errors"][0]["line"] == 3
+        assert "year" in result["errors"][0]["reason"].lower()
+    finally:
+        conn.close()
+
+
+def test_import_logs_progress_per_entry(tmp_path, monkeypatch, caplog):
+    # Each entry emits a live "[n/total]" progress line (to stderr via logging).
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100\nDie Klapperschlange (1981)")
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("1/2" in m for m in msgs)
+        assert any("2/2" in m for m in msgs)
     finally:
         conn.close()
 
