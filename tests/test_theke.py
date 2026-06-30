@@ -372,6 +372,21 @@ def test_db_lock_is_released_on_close(tmp_path):
     conn.close()
 
 
+def test_db_allows_concurrent_readers_while_writer_holds(tmp_path):
+    # the single-writer guard must NOT lock out read-only openers (DBBrowser, the
+    # web UI): a second connection can still read while we hold the DB.
+    db = str(tmp_path / "t.db")
+    conn = db_connect(db, migrations=DUMMY_MIGRATIONS)
+    try:
+        reader = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            assert reader.execute("PRAGMA user_version").fetchone()[0] == 2
+        finally:
+            reader.close()
+    finally:
+        conn.close()
+
+
 # -- cli ---------------------------------------------------------------------
 
 def test_cli_config_human_output(tmp_path, capsys):

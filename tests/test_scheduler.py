@@ -152,6 +152,50 @@ def test_run_loop_start_only_runs_once_and_never_waits():
     assert wait.seen == []      # no recurring trigger -> loop exits, no wait
 
 
+class FakeStop:
+    """Event stand-in for _wait_until: records each wait() timeout and trips
+    itself once it has been waited on `set_after` times."""
+    def __init__(self, set_after):
+        self.set_after = set_after
+        self.waited = []
+        self._set = False
+
+    def is_set(self):
+        return self._set
+
+    def wait(self, timeout):
+        self.waited.append(timeout)
+        if len(self.waited) >= self.set_after:
+            self._set = True
+
+
+def test_wait_until_polls_in_one_second_slices_until_stopped():
+    # a far-future deadline is waited in <=1s slices, so a stop set by a signal
+    # (seen only between waits, esp. on Windows) is honored within one slice.
+    stop = FakeStop(set_after=3)
+    scheduler._wait_until(datetime(2026, 6, 30, 11, 0, 0), stop,
+                          now_fn=lambda: datetime(2026, 6, 30, 10, 0, 0))
+    assert stop.waited == [1.0, 1.0, 1.0]
+
+
+def test_wait_until_returns_immediately_when_already_stopped():
+    stop = FakeStop(set_after=1)
+    stop._set = True
+    scheduler._wait_until(datetime(2026, 6, 30, 11, 0, 0), stop,
+                          now_fn=lambda: datetime(2026, 6, 30, 10, 0, 0))
+    assert stop.waited == []
+
+
+def test_wait_until_caps_the_last_slice_and_stops_at_the_deadline():
+    # 0.4 s left -> one 0.4 s wait, then the deadline has passed -> return.
+    times = iter([datetime(2026, 6, 30, 10, 0, 0),
+                  datetime(2026, 6, 30, 10, 0, 1)])
+    stop = FakeStop(set_after=99)
+    scheduler._wait_until(datetime(2026, 6, 30, 10, 0, 0, 400000), stop,
+                          now_fn=lambda: next(times))
+    assert stop.waited == [0.4]
+
+
 def test_run_loop_guards_a_failing_pass():
     results = []
     wait = FakeWait(stop_after=1)
