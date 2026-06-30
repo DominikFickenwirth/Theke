@@ -1448,3 +1448,59 @@ def test_scan_skips_ffprobe_for_unchanged_file(tmp_path, monkeypatch):
         assert len(calls) == 1   # unchanged file -> ffprobe not re-run
     finally:
         conn.close()
+
+
+# -- D-entry management (rewish / purge) -------------------------------------
+
+def test_add_tmdb_rewishes_a_deleted_entry(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="D", path=str(tmp_path / "old"))
+        result = cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
+        assert result == {"added": 1, "skipped": 0}   # D -> W counts as added
+        row = lib_get(conn, "100")
+        assert row["status"] == "W"
+        assert row["path"] is None   # stale scan attributes cleared
+    finally:
+        conn.close()
+
+
+def test_add_tmdb_skips_a_library_entry(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="L", path=str(tmp_path / "film"))
+        result = cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
+        assert result == {"added": 0, "skipped": 1}
+        assert lib_get(conn, "100")["status"] == "L"   # never reset from 'L'
+    finally:
+        conn.close()
+
+
+def test_add_deleted_rewishes_all(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="D", path="a")
+        insert_lib(conn, "200", status="D", path="b")
+        insert_lib(conn, "300", status="L", path="c")
+        result = cmd_library(conn, CFG, libargs("add", deleted=True))
+        assert result == {"rewished": 2}
+        assert lib_get(conn, "100")["status"] == "W"
+        assert lib_get(conn, "200")["status"] == "W"
+        assert lib_get(conn, "300")["status"] == "L"
+    finally:
+        conn.close()
+
+
+def test_remove_deleted_purges_only_d(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="D", path="a")
+        insert_lib(conn, "200", status="L", path="b")
+        result = cmd_library(conn, CFG, libargs("remove", deleted=True))
+        assert result == {"removed": 1}
+        assert lib_get(conn, "100") is None
+        assert lib_get(conn, "200")["status"] == "L"
+    finally:
+        conn.close()
