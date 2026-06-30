@@ -1674,12 +1674,25 @@ def _csv_entry(row, idx):
         return {"kind": "error", "reason": f"invalid year {year_cell!r}"}
 
 
+_CSV_DELIMS = (",", ";", "\t")   # candidates; comma first so it wins ties (incl. none)
+
+
+def _sniff_delimiter(header):
+    """Pick the field delimiter by counting candidates in the header line; comma
+    wins on a tie or when none occur. Avoids csv.Sniffer's guesswork for the only
+    formats these lists come in (German ';' exports vs plain ',')."""
+    return max(_CSV_DELIMS, key=header.count)
+
+
 def _parse_csv(text):
-    """Parse a csv wishlist into (lineno, raw, entry) tuples. The header is
-    validated (structural errors raise); per-row data problems become 'error'
-    entries. Fully blank lines are skipped; line numbers track the source file."""
+    """Parse a csv wishlist into (lineno, raw, entry) tuples. The delimiter is
+    sniffed from the header (';' or ','); the header is then validated (structural
+    errors raise); per-row data problems become 'error' entries. Fully blank lines
+    are skipped; line numbers track the source file."""
     lines = text.splitlines()
-    rows = list(csv.reader(lines))
+    if not lines:
+        return []
+    rows = list(csv.reader(lines, delimiter=_sniff_delimiter(lines[0])))
     if not rows:
         return []
     idx = _csv_header(rows[0])
