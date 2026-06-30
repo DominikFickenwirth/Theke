@@ -1484,8 +1484,13 @@ def _library_add(conn, cfg, args) -> dict:
     via --tmdb, by a title/year lookup via --title, or in bulk from a TMDB list via
     --tmdb-list (movies only; series skipped). Idempotent: an existing tmdb_id is
     left untouched (counted as skipped, never reset from 'L' back to 'W'). Each
-    resolution is logged to stderr (what the id/title resolved to)."""
+    resolution is logged to stderr (what the id/title resolved to). --deleted
+    re-wishes every 'D' (deleted) entry back to 'W' in bulk (no TMDB lookup)."""
     lists = getattr(args, "tmdb_list", None)
+    if getattr(args, "deleted", False):
+        if args.title or args.tmdb or lists:
+            raise ValueError("give --deleted alone, not with --tmdb/--title/--tmdb-list")
+        return _rewish_deleted(conn)
     if sum(map(bool, (args.title, args.tmdb, lists))) > 1:
         raise ValueError("give only one of --tmdb, --title or --tmdb-list")
     if lists:
@@ -1508,9 +1513,9 @@ def _library_add(conn, cfg, args) -> dict:
 
 def _insert_wishes(conn, wishes) -> dict:
     """Insert (tmdb_id, title, year) wishes as status 'W' in one transaction.
-    Idempotent: an existing tmdb_id is left untouched (counted as skipped and
-    logged to stderr by id, never reset from 'L' back to 'W'). Returns the
-    added/skipped counts."""
+    Idempotent: a 'W'/'M'/'L' tmdb_id is left untouched (counted as skipped, never
+    reset from 'L'); a 'D' (deleted) entry is re-wished back to 'W' with its stale
+    scan attributes cleared, counted as added. Returns the added/skipped counts."""
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
@@ -1518,10 +1523,15 @@ def _insert_wishes(conn, wishes) -> dict:
             ts = _now()
             cur = conn.execute(
                 "INSERT INTO library (tmdb_id, status, title, year, created_at, updated_at) "
-                "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
+                "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
+                "status='W', title=excluded.title, "
+                "year=COALESCE(library.year, excluded.year), "
+                "path=NULL, resolution=NULL, languages=NULL, duration=NULL, "
+                "file_size=NULL, indexed_at=NULL, source=NULL, "
+                "updated_at=excluded.updated_at WHERE library.status='D'",
                 (tid, title, year, ts, ts))
             if cur.rowcount:
-                totals["added"] += 1
+                totals["added"] += 1   # fresh insert or a 'D' -> 'W' re-wish
             else:
                 totals["skipped"] += 1
                 log.info("skip %s: already in library", _resolved_label(tid, title, year))
@@ -1530,6 +1540,22 @@ def _insert_wishes(conn, wishes) -> dict:
         conn.execute("ROLLBACK")
         raise
     return totals
+
+
+def _rewish_deleted(conn) -> dict:
+    """Re-wish every 'D' (deleted) entry back to 'W' in one transaction, clearing
+    the stale scan attributes (a re-acquired film is re-indexed). Returns the count."""
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(
+            "UPDATE library SET status='W', path=NULL, resolution=NULL, "
+            "languages=NULL, duration=NULL, file_size=NULL, indexed_at=NULL, "
+            "source=NULL, updated_at=? WHERE status='D'", (_now(),)).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"rewished": n}
 
 
 def _add_list_wishes(conn, cfg, list_id) -> dict:
@@ -1568,13 +1594,15 @@ def _library_list(conn, args) -> dict:
 
 
 def _library_remove(conn, args) -> dict:
-    """Delete library entries by exactly one selector: given tmdb_ids or --all."""
-    if args.all and args.tmdb:
-        raise ValueError("give --tmdb or --all, not both")
-    if not args.all and not args.tmdb:
-        raise ValueError("give --tmdb or --all")
+    """Delete library entries by exactly one selector: given tmdb_ids, every entry
+    (--all), or every 'D' (deleted) entry (--deleted)."""
+    deleted = getattr(args, "deleted", False)
+    if sum((bool(args.tmdb), args.all, deleted)) != 1:
+        raise ValueError("give --tmdb, --all or --deleted (exactly one)")
     if args.all:
         sql, params = "DELETE FROM library", ()
+    elif deleted:
+        sql, params = "DELETE FROM library WHERE status='D'", ()
     else:
         ids = [str(t) for t in args.tmdb]
         sql = "DELETE FROM library WHERE tmdb_id IN (" + ",".join("?" * len(ids)) + ")"
