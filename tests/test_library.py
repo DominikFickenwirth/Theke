@@ -1504,3 +1504,33 @@ def test_remove_deleted_purges_only_d(tmp_path):
         assert lib_get(conn, "200")["status"] == "L"
     finally:
         conn.close()
+
+
+# -- CLI wiring (argparse) ---------------------------------------------------
+
+def _cfg_file(tmp_path, **extra):
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": str(tmp_path / "theke.db"), **extra}),
+                       encoding="utf-8")
+    return str(cfgpath)
+
+
+def test_library_scan_cli(tmp_path, capsys):
+    root = tmp_path / "lib"
+    root.mkdir()
+    cfgpath = _cfg_file(tmp_path, library_root=str(root))
+    assert main(["--json", "--config", cfgpath, "library", "scan"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["scanned"] == 0 and out["deleted"] == 0
+
+
+def test_library_add_deleted_cli(tmp_path, capsys):
+    cfgpath = _cfg_file(tmp_path)
+    assert main(["--json", "--config", cfgpath, "library", "add", "--deleted"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"rewished": 0}
+
+
+def test_library_remove_deleted_cli(tmp_path, capsys):
+    cfgpath = _cfg_file(tmp_path)
+    assert main(["--json", "--config", cfgpath, "library", "remove", "--deleted"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"removed": 0}
