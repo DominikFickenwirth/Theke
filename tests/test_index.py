@@ -7,7 +7,14 @@ import os
 import pytest
 
 from theke.index import (parse_folder_title, nfo_tmdb_id, is_lang_variant,
-                         probe_attrs, run_ffprobe)
+                         probe_attrs, run_ffprobe, pick_anchor, walk_library)
+
+
+def make_video(path, size=10):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(b"\0" * size)
+    return path
 
 
 # -- folder-name parser ------------------------------------------------------
@@ -99,3 +106,39 @@ def test_run_ffprobe_missing_binary(monkeypatch):
     monkeypatch.setattr(subprocess, "run", boom)
     with pytest.raises(RuntimeError):
         run_ffprobe("ffprobe", "x.mp4")
+
+
+# -- anchor selection --------------------------------------------------------
+
+def test_pick_anchor_prefers_primary_over_larger_variant(tmp_path):
+    primary = make_video(str(tmp_path / "Film (2020).mp4"), size=100)
+    variant = make_video(str(tmp_path / "Film (2020).en.mp4"), size=500)
+    assert pick_anchor([primary, variant]) == primary   # primary wins despite size
+
+
+def test_pick_anchor_largest_among_primaries(tmp_path):
+    small = make_video(str(tmp_path / "small.mp4"), size=10)
+    big = make_video(str(tmp_path / "big.mkv"), size=900)
+    assert pick_anchor([small, big]) == big
+
+
+# -- walker ------------------------------------------------------------------
+
+def collect(root):
+    return sorted((kind, os.path.basename(d)) for kind, d, _ in walk_library(root))
+
+
+def test_walk_finds_movie_folders_and_skips_extras(tmp_path):
+    make_video(str(tmp_path / "Film A (2020)" / "film.mp4"))
+    make_video(str(tmp_path / "Film A (2020)" / "behind the scenes" / "bts.mp4"))
+    make_video(str(tmp_path / "Action" / "Film B (1999)" / "film.mkv"))
+    # Film A + Film B are movies; the extras subfolder is never its own movie.
+    assert collect(str(tmp_path)) == [("movie", "Film A (2020)"),
+                                      ("movie", "Film B (1999)")]
+
+
+def test_walk_ignore_marker_skips_subtree(tmp_path):
+    folder = tmp_path / "Parodie (2021)"
+    make_video(str(folder / "film.mp4"))
+    (folder / ".thekeignore").write_text("", encoding="utf-8")
+    assert collect(str(tmp_path)) == [("ignored", "Parodie (2021)")]
