@@ -32,7 +32,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
-                         pick_by_year)
+                         pick_by_year, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import subtitle
@@ -1430,6 +1430,14 @@ def _wish_meta(cfg, tmdb_id) -> tuple:
     return meta["title"] or "", meta["year"]
 
 
+def _drop_leading_article(title) -> str:
+    """Drop a single leading article word from a raw title (case preserved, unlike
+    match.strip_articles which works on normalized text); unchanged when there is
+    no leading article or it is the only word."""
+    head, _, rest = title.partition(" ")
+    return rest if rest and head.casefold() in ARTICLES else title
+
+
 def _search_title(cfg, title, year, tol) -> tuple:
     """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
     year tolerant by `tol` years (smallest distance wins, ties keep popularity).
@@ -1437,6 +1445,10 @@ def _search_title(cfg, title, year, tol) -> tuple:
     all vs. hits whose years all miss the tolerance (listing the years found).
     The pure-input core shared by `library add --title` and `library import`."""
     cands = tmdb_search(cfg, title)
+    if not cands:
+        stripped = _drop_leading_article(title)
+        if stripped != title:
+            cands = tmdb_search(cfg, stripped)
     if not cands:
         raise ValueError(f"no TMDB title matches {title!r}")
     cand = pick_by_year(cands, year, tol)
