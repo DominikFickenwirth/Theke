@@ -54,6 +54,8 @@ class Config:
     video_ext:            str   = "mp4"
     audio_ext:            str   = "aac"
     library_path:         str   = "movies/{Title} ({Year})/{Title} ({Year}).mp4"
+    library_root:         str   = ""        # phase 12: the dir `library scan` walks
+    ffprobe_path:         str   = "ffprobe" # phase 12: ffmpeg's sibling, for stream probing
     run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
 
 
