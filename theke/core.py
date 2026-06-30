@@ -54,6 +54,7 @@ class Config:
     video_ext:            str   = "mp4"
     audio_ext:            str   = "aac"
     library_path:         str   = "movies/{Title} ({Year})/{Title} ({Year}).mp4"
+    run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
