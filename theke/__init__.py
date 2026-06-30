@@ -32,7 +32,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
-                         pick_by_year)
+                         pick_by_year, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import subtitle
@@ -1430,14 +1430,33 @@ def _wish_meta(cfg, tmdb_id) -> tuple:
     return meta["title"] or "", meta["year"]
 
 
+def _drop_leading_article(title) -> str:
+    """Drop a single leading article word from a raw title (case preserved, unlike
+    match.strip_articles which works on normalized text); unchanged when there is
+    no leading article or it is the only word."""
+    head, _, rest = title.partition(" ")
+    return rest if rest and head.casefold() in ARTICLES else title
+
+
 def _search_title(cfg, title, year, tol) -> tuple:
     """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
     year tolerant by `tol` years (smallest distance wins, ties keep popularity).
-    Raises ValueError when nothing qualifies. The pure-input core shared by
-    `library add --title` and `library import`."""
-    cand = pick_by_year(tmdb_search(cfg, title), year, tol)
+    Raises ValueError when nothing qualifies, naming the cause: no title hit at
+    all vs. hits whose years all miss the tolerance (listing the years found).
+    The pure-input core shared by `library add --title` and `library import`."""
+    cands = tmdb_search(cfg, title)
+    if not cands:
+        stripped = _drop_leading_article(title)
+        if stripped != title:
+            cands = tmdb_search(cfg, stripped)
+    if not cands:
+        raise ValueError(f"no TMDB title matches {title!r}")
+    cand = pick_by_year(cands, year, tol)
     if cand is None:
-        raise ValueError(f"no TMDB movie for {title!r} (year {year}, +-{tol})")
+        years = sorted({c["year"] for c in cands if c["year"] is not None})
+        found = ", ".join(map(str, years)) if years else "none dated"
+        raise ValueError(f"{len(cands)} TMDB title match(es) for {title!r}, but "
+                         f"none within {year} +-{tol} years (found: {found})")
     return cand["tmdb_id"], cand["title"], cand["year"]
 
 
@@ -1451,11 +1470,19 @@ def _resolve_title(cfg, args) -> tuple:
     return _search_title(cfg, args.title, args.year, tol)
 
 
+def _resolved_label(tid, title, year) -> str:
+    """A wish's resolution as one line for the stderr log: the tmdb_id and the
+    TMDB title (+ year when known). Lets the user confirm what an id stands for or
+    what a title search picked, without parsing the result."""
+    return f"{tid}  {title!r} ({year})" if year else f"{tid}  {title!r}"
+
+
 def _library_add(conn, cfg, args) -> dict:
     """Add wishes as status 'W'. Each wish resolves to a tmdb_id: given directly
     via --tmdb, by a title/year lookup via --title, or in bulk from a TMDB list via
     --tmdb-list (movies only; series skipped). Idempotent: an existing tmdb_id is
-    left untouched (counted as skipped, never reset from 'L' back to 'W')."""
+    left untouched (counted as skipped, never reset from 'L' back to 'W'). Each
+    resolution is logged to stderr (what the id/title resolved to)."""
     lists = getattr(args, "tmdb_list", None)
     if sum(map(bool, (args.title, args.tmdb, lists))) > 1:
         raise ValueError("give only one of --tmdb, --title or --tmdb-list")
@@ -1464,9 +1491,14 @@ def _library_add(conn, cfg, args) -> dict:
         return {k: sum(p[k] for p in parts)
                 for k in ("added", "skipped", "series_skipped")}
     if args.title:
-        wishes = [_resolve_title(cfg, args)]
+        tid, title, year = _resolve_title(cfg, args)
+        log.info("%r (%s) -> %s", args.title, args.year or "?",
+                 _resolved_label(tid, title, year))   # before -> after
+        wishes = [(tid, title, year)]
     elif args.tmdb:
         wishes = [(str(t), *_wish_meta(cfg, t)) for t in args.tmdb]
+        for tid, title, year in wishes:
+            log.info("%s", _resolved_label(tid, title, year))
     else:
         raise ValueError("library add needs --tmdb, --title or --tmdb-list")
     return _insert_wishes(conn, wishes)
@@ -1474,8 +1506,9 @@ def _library_add(conn, cfg, args) -> dict:
 
 def _insert_wishes(conn, wishes) -> dict:
     """Insert (tmdb_id, title, year) wishes as status 'W' in one transaction.
-    Idempotent: an existing tmdb_id is left untouched (counted as skipped, never
-    reset from 'L' back to 'W'). Returns the added/skipped counts."""
+    Idempotent: an existing tmdb_id is left untouched (counted as skipped and
+    logged to stderr by id, never reset from 'L' back to 'W'). Returns the
+    added/skipped counts."""
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
@@ -1485,7 +1518,11 @@ def _insert_wishes(conn, wishes) -> dict:
                 "INSERT INTO library (tmdb_id, status, title, year, created_at, updated_at) "
                 "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
                 (tid, title, year, ts, ts))
-            totals["added" if cur.rowcount else "skipped"] += 1
+            if cur.rowcount:
+                totals["added"] += 1
+            else:
+                totals["skipped"] += 1
+                log.info("skip %s: already in library", _resolved_label(tid, title, year))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -1504,6 +1541,8 @@ def _add_list_wishes(conn, cfg, list_id) -> dict:
     items = tmdb_list(cfg, list_id)
     movies = [(it["tmdb_id"], it["title"], it["year"])
               for it in items if it["media_type"] == "movie"]
+    for tid, title, year in movies:
+        log.info("%s", _resolved_label(tid, title, year))
     series = len(items) - len(movies)
     if series:
         log.warning("list %s: %d series skipped (movies only)", list_id, series)
@@ -1674,12 +1713,25 @@ def _csv_entry(row, idx):
         return {"kind": "error", "reason": f"invalid year {year_cell!r}"}
 
 
+_CSV_DELIMS = (",", ";", "\t")   # candidates; comma first so it wins ties (incl. none)
+
+
+def _sniff_delimiter(header):
+    """Pick the field delimiter by counting candidates in the header line; comma
+    wins on a tie or when none occur. Avoids csv.Sniffer's guesswork for the only
+    formats these lists come in (German ';' exports vs plain ',')."""
+    return max(_CSV_DELIMS, key=header.count)
+
+
 def _parse_csv(text):
-    """Parse a csv wishlist into (lineno, raw, entry) tuples. The header is
-    validated (structural errors raise); per-row data problems become 'error'
-    entries. Fully blank lines are skipped; line numbers track the source file."""
+    """Parse a csv wishlist into (lineno, raw, entry) tuples. The delimiter is
+    sniffed from the header (';' or ','); the header is then validated (structural
+    errors raise); per-row data problems become 'error' entries. Fully blank lines
+    are skipped; line numbers track the source file."""
     lines = text.splitlines()
-    rows = list(csv.reader(lines))
+    if not lines:
+        return []
+    rows = list(csv.reader(lines, delimiter=_sniff_delimiter(lines[0])))
     if not rows:
         return []
     idx = _csv_header(rows[0])
@@ -1690,12 +1742,28 @@ def _parse_csv(text):
     return out
 
 
+def _read_import_file(path):
+    """Read a wishlist file as text: decode utf-8 (BOM-aware) when the bytes are
+    valid utf-8, else fall back to cp1252, the other encoding these lists come in.
+    cp1252 decodes nearly any byte, so it is a safe last resort."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252")
+
+
 def _resolve_entry(cfg, entry, tol) -> tuple:
     """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
-    id is verified via TMDB (a bad id propagates as 404); a title is searched."""
+    id is verified via TMDB (a bad id propagates as 404); a title is searched, but
+    only with a year -- a yearless title is too ambiguous to import, so it raises
+    rather than guessing the most popular hit (unlike interactive `add --title`)."""
     if entry["kind"] == "id":
         meta = tmdb_movie(cfg, entry["id"])
         return str(entry["id"]), meta["title"] or "", meta["year"]
+    if entry["year"] is None:
+        raise ValueError(f"year missing for title {entry['title']!r}")
     return _search_title(cfg, entry["title"], entry["year"], tol)
 
 
@@ -1708,18 +1776,23 @@ def _library_import(conn, cfg, args) -> dict:
     if not cfg.tmdb_api_key:
         raise ConfigError("library import needs a TMDB API key (set tmdb_api_key)")
     fmt = _import_detect_format(args.path, args.format)
-    with open(args.path, encoding="utf-8-sig") as fh:
-        text = fh.read()
+    text = _read_import_file(args.path)
     entries = _parse_txt(text, args.mode) if fmt == "txt" else _parse_csv(text)
     tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
     resolved, errors = [], []
-    for lineno, raw, entry in entries:
+    total = len(entries)
+    for n, (lineno, raw, entry) in enumerate(entries, 1):
+        log.info("[%d/%d] line %d: %s", n, total, lineno, raw)
         if entry["kind"] == "error":
+            log.warning("  line %d skipped: %s", lineno, entry["reason"])
             errors.append({"line": lineno, "input": raw, "reason": entry["reason"]})
             continue
         try:
-            resolved.append(_resolve_entry(cfg, entry, tol))
+            tid, title, year = _resolve_entry(cfg, entry, tol)
+            log.info("  -> %s", _resolved_label(tid, title, year))   # what it resolved to
+            resolved.append((tid, title, year))
         except Exception as exc:
+            log.warning("  line %d failed: %s", lineno, exc)
             errors.append({"line": lineno, "input": raw, "reason": str(exc)})
     result = {**_insert_wishes(conn, resolved), "failed": len(errors), "errors": errors}
     if args.json:

@@ -3,6 +3,7 @@ cmd_library (add/list/remove), download -> library recording, and the
 single pipeline pass (_run_pass, the body the scheduler loops)."""
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -548,6 +549,75 @@ def test_parse_csv_empty_row_is_a_row_error():
     assert rows[0][0] == 2 and rows[0][2]["kind"] == "error"
 
 
+# -- import: delimiter sniffing ----------------------------------------------
+
+def test_sniff_delimiter_semicolon():
+    assert theke._sniff_delimiter("title;year") == ";"
+
+
+def test_sniff_delimiter_comma():
+    assert theke._sniff_delimiter("tmdb_id,title,year") == ","
+
+
+def test_sniff_delimiter_tab():
+    assert theke._sniff_delimiter("title\tyear") == "\t"
+
+
+def test_sniff_delimiter_defaults_to_comma_when_none():
+    assert theke._sniff_delimiter("title") == ","
+
+
+def test_sniff_delimiter_picks_the_more_frequent():
+    # one comma inside a title, two semicolons as real separators -> ";".
+    assert theke._sniff_delimiter("tmdb_id;title;year") == ";"
+
+
+def test_parse_csv_semicolon_delimited():
+    assert theke._parse_csv("title;year\nDer Pate;1972\nHeat;") == [
+        (2, "Der Pate;1972", {"kind": "title", "title": "Der Pate", "year": 1972}),
+        (3, "Heat;", {"kind": "title", "title": "Heat", "year": None}),
+    ]
+
+
+# -- import: file reading / encoding -----------------------------------------
+
+def test_read_import_file_utf8(tmp_path):
+    p = tmp_path / "u.csv"
+    p.write_bytes("Gruesse Grüße".encode("utf-8"))  # umlauts as utf-8
+    assert theke._read_import_file(str(p)) == "Gruesse Grüße"
+
+
+def test_read_import_file_cp1252_fallback(tmp_path):
+    p = tmp_path / "c.csv"
+    p.write_bytes(b"Gruesse Gr\xfc\xdfe")  # "Gruesse Gruesse" with cp1252 ue/sz
+    assert theke._read_import_file(str(p)) == "Gruesse Grüße"
+
+
+def test_import_csv_cp1252_file_resolves_title(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    p = tmp_path / "wishes.csv"
+    p.write_bytes("title,year\nGrüße,1981\n".encode("cp1252"))  # SEARCH hit is 1981
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=str(p), json=True))
+        assert result["added"] == 1 and result["failed"] == 0
+    finally:
+        conn.close()
+
+
+def test_import_csv_semicolon_cp1252_file(tmp_path, monkeypatch):
+    # The real lfi2.csv case: cp1252 bytes AND a ';' separator.
+    stub_import(monkeypatch)
+    p = tmp_path / "wishes.csv"
+    p.write_bytes("title;year\nGrüße;1981\n".encode("cp1252"))
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=str(p), json=True))
+        assert result["added"] == 1 and result["failed"] == 0
+    finally:
+        conn.close()
+
+
 # -- cmd_library add by title ------------------------------------------------
 
 def test_library_add_by_title_resolves_tmdb_id(tmp_path, monkeypatch):
@@ -617,6 +687,49 @@ def test_library_add_by_title_without_key_raises(tmp_path):
     try:
         with pytest.raises(ConfigError):
             cmd_library(conn, Config(), libargs("add", title="Anything"))
+    finally:
+        conn.close()
+
+
+def test_library_add_by_tmdb_logs_resolution(tmp_path, monkeypatch, caplog):
+    # --tmdb logs what the id stands for (title + year) to stderr.
+    stub_tmdb(monkeypatch)   # id resolves to "Mein Film" (2020)
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "100" in msgs and "Mein Film" in msgs and "2020" in msgs
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_logs_before_after(tmp_path, monkeypatch, caplog):
+    # --title logs the searched title (before) and the resolved hit (after).
+    stub_search(monkeypatch)   # resolves to 9268 "Die Klapperschlange" (1981)
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("add", title="Snake Movie", year=1981))
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "Snake Movie" in msgs           # the searched title (before)
+        assert "Die Klapperschlange" in msgs   # the resolved title (after)
+        assert "9268" in msgs                  # the resolved id
+    finally:
+        conn.close()
+
+
+def test_library_add_skip_logs_which_id(tmp_path, monkeypatch, caplog):
+    # Re-adding an existing wish logs *which* id was skipped to stderr, not just
+    # a bare "skipped" count.
+    stub_tmdb(monkeypatch)   # id 100 resolves to "Mein Film" (2020)
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, CFG, libargs("add", tmdb=["100"]))   # first add
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("add", tmdb=["100"]))   # now skipped
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "skip" in msgs and "100" in msgs and "already" in msgs
     finally:
         conn.close()
 
@@ -743,6 +856,116 @@ def test_import_human_output_lists_errors(tmp_path, monkeypatch, capsys):
         out = capsys.readouterr().out
         assert "0 added, 0 skipped, 1 failed" in out
         assert "line 1:" in out
+    finally:
+        conn.close()
+
+
+# -- import: informative resolution failures ---------------------------------
+
+def test_search_title_no_results_says_no_match(monkeypatch):
+    # 0 candidates -> the message must name the title and "no ... match".
+    stub_search(monkeypatch, payload={"results": []})
+    with pytest.raises(ValueError) as exc:
+        theke._search_title(CFG, "Ghostfilm", 2000, 2)
+    msg = str(exc.value)
+    assert "no" in msg.lower() and "match" in msg.lower() and "Ghostfilm" in msg
+
+
+def test_search_title_wrong_year_lists_found_years(monkeypatch):
+    # SEARCH has two candidates (1981, 2013); wanting 2000 +-2 excludes both.
+    stub_search(monkeypatch)
+    with pytest.raises(ValueError) as exc:
+        theke._search_title(CFG, "Die Klapperschlange", 2000, 2)
+    msg = str(exc.value)
+    assert msg.startswith("2 ")          # the candidate count is reported
+    assert "1981" in msg and "2013" in msg   # the years that were found
+    assert "2000" in msg                 # the wanted year
+
+
+def test_search_title_retries_without_leading_article(monkeypatch):
+    # "Der Pate" yields nothing; the retry drops the article ("Pate") and hits.
+    calls = []
+    def fake(url, timeout=None):
+        calls.append(url)
+        payload = {"results": []} if "query=Der" in url else SEARCH
+        return json.dumps(payload).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    tid, title, year = theke._search_title(CFG, "Der Pate", 1981, 2)
+    assert tid == "9268"                     # SEARCH's first hit (id 9268, 1981)
+    assert len(calls) == 2                    # full title, then stripped retry
+    assert "query=Der+Pate" in calls[0]
+    assert "query=Pate" in calls[1]
+
+
+def test_search_title_no_article_does_not_retry(monkeypatch):
+    # No leading article -> no second query; 0 results stays a no-match error.
+    calls = []
+    def fake(url, timeout=None):
+        calls.append(url)
+        return json.dumps({"results": []}).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    with pytest.raises(ValueError):
+        theke._search_title(CFG, "Ghostfilm", 2000, 2)
+    assert len(calls) == 1
+
+
+def test_import_title_without_year_is_error(tmp_path, monkeypatch):
+    # A txt title line with no "(YYYY)" must fail (no guessing without a year).
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "Heat\n100")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 1
+        assert result["errors"][0]["line"] == 1
+        assert result["errors"][0]["input"] == "Heat"
+        assert "year" in result["errors"][0]["reason"].lower()
+        assert [r["tmdb_id"] for r in library_rows(conn)] == ["100"]
+    finally:
+        conn.close()
+
+
+def test_import_csv_title_without_year_is_error(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.csv",
+                      "title,year\nDie Klapperschlange,1981\nHeat,")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 1
+        assert result["errors"][0]["line"] == 3
+        assert "year" in result["errors"][0]["reason"].lower()
+    finally:
+        conn.close()
+
+
+def test_import_logs_progress_per_entry(tmp_path, monkeypatch, caplog):
+    # Each entry emits a live "[n/total]" progress line (to stderr via logging).
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100\nDie Klapperschlange (1981)")
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("1/2" in m for m in msgs)
+        assert any("2/2" in m for m in msgs)
+    finally:
+        conn.close()
+
+
+def test_import_logs_resolved_title(tmp_path, monkeypatch, caplog):
+    # each resolved entry logs the TMDB title + year it resolved to (stderr).
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100\nDie Klapperschlange (1981)")
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "Mein Film" in msgs            # id 100 -> "Mein Film" (2020)
+        assert "Die Klapperschlange" in msgs  # title -> resolved hit
+        assert "9268" in msgs
     finally:
         conn.close()
 
