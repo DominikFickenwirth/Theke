@@ -103,3 +103,33 @@ def probe_attrs(data) -> dict:
             langs.append(code)
     return {"resolution": resolution, "duration": duration,
             "languages": ",".join(langs) or None}
+
+
+# -- walking ------------------------------------------------------------------
+
+def pick_anchor(paths):
+    """The anchor video among a folder's files: the largest non-language-variant
+    (the primary copy _library_path wrote without a '.<lang>' infix), or -- when
+    every file is a language variant -- the largest of those. Reads file sizes."""
+    primaries = [p for p in paths if not is_lang_variant(p)]
+    return max(primaries or list(paths), key=os.path.getsize)
+
+
+def walk_library(root):
+    """Walk `root` and yield (kind, dirpath, videos) per relevant folder: 'movie'
+    for a folder that directly holds video files (its subfolders are treated as
+    extras and not descended into), 'ignored' for a folder carrying IGNORE_MARKER
+    (its whole subtree is skipped). Extras-named subfolders of a video-less folder
+    are pruned so they never surface as their own film."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        if IGNORE_MARKER in filenames:
+            dirnames[:] = []
+            yield ("ignored", dirpath, [])
+            continue
+        videos = sorted(os.path.join(dirpath, f) for f in filenames
+                        if os.path.splitext(f)[1].lower() in VIDEO_EXTS)
+        if videos:
+            dirnames[:] = []   # a movie folder; deeper folders are extras
+            yield ("movie", dirpath, videos)
+        else:
+            dirnames[:] = [d for d in dirnames if d.lower() not in EXTRAS_DIRS]
