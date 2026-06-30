@@ -832,16 +832,18 @@ Findet der Durchlauf **gar keinen** Film, während die Bibliothek nicht leer ist
 bleibt der Bestand unangetastet (Ergebnis `library_empty`) -- eine absichtlich
 geleerte Bibliothek erzwingt man mit `--allow-empty`.
 
-Braucht `library_root` (Wurzelverzeichnis der Bibliothek) und ein `ffprobe`
-(`ffprobe_path`, ab Werk `ffprobe`). Gibt die Zähler `scanned`, `added`, `updated`,
-`moved`, `duplicates`, `unresolved`, `ignored`, `deleted` aus.
+Braucht `library_root` (Wurzelverzeichnis der Bibliothek, per `--root` überschreibbar)
+und ein `ffprobe` (`ffprobe_path`, ab Werk `ffprobe`). Gibt die Zähler `scanned`,
+`added`, `updated`, `moved`, `duplicates`, `unresolved`, `ignored`, `deleted` aus.
 
 | Option          | Wirkung                                                       |
 | --------------- | ------------------------------------------------------------ |
+| `--root PATH`   | Zu durchlaufendes Verzeichnis, überschreibt `library_root` aus der Config. |
 | `--allow-empty` | Auch dann aufräumen (sweepen), wenn der Durchlauf keinen Film findet. |
 
 ```powershell
 theke --db build/theke.db library scan
+theke --db build/theke.db library scan --root D:\Filme
 theke --db build/theke.db --json library scan
 ```
 

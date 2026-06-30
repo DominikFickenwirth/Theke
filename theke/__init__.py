@@ -1659,13 +1659,13 @@ def _library_record(conn, tmdb_id, path, year):
 # theke.index. The DB is the authority -- the media server is never read as one.
 
 def _library_scan(conn, cfg, args) -> dict:
-    """Index the on-disk library under cfg.library_root into the `library` table.
+    """Index the on-disk library under args.root or cfg.library_root into `library`.
     The whole scan is one transaction (atomic, and self-writes are visible to the
     duplicate/move checks). Returns the per-category counts (+ the unresolved and
     duplicate paths)."""
-    root = cfg.library_root
+    root = args.root or cfg.library_root
     if not root:
-        raise ConfigError("library scan needs library_root (set it in the config)")
+        raise ConfigError("library scan needs library_root (set it in the config or pass --root)")
     if not os.path.isdir(root):
         raise ConfigError(f"library_root is not a readable directory: {root}")
     scan_start = _now()
@@ -2329,6 +2329,7 @@ def build_parser() -> argparse.ArgumentParser:
     lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
     lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")
     lrem.add_argument(      "--deleted", action="store_true",                          help="remove every 'D' (deleted) entry")
+    lscn.add_argument(      "--root",        metavar="PATH",                         help="directory to walk, overriding library_root from the config")
     lscn.add_argument(      "--allow-empty", action="store_true", dest="allow_empty",  help="sweep even when the walk finds no film (an intentional empty library)")
 
     runp = sub.add_parser("run", help="run the wishlist pipeline, once or on a schedule", description="Loop the whole wishlist pipeline on the configured schedule (run_schedule). One pass: fetch + enrich the mirror, import any configured tmdb_lists into the library (movies only, additive), then for every open wish ('W') match the TMDB id and stage the deduplicated download set; with queue_auto_approve the approved entries are downloaded straight away (recording each finished wish as 'L'), else the pass stops at the approval gate. A failing wish or list does not abort the pass, and a failing pass does not abort the loop. The process holds the single DB writer for its lifetime (a future in-process web UI shares it); SIGINT/SIGTERM stop it cleanly after the current pass. In --json each pass prints one JSON object (JSONL); progress goes to stderr. --once runs a single pass and exits.")
