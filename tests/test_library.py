@@ -691,6 +691,34 @@ def test_library_add_by_title_without_key_raises(tmp_path):
         conn.close()
 
 
+def test_library_add_by_tmdb_logs_resolution(tmp_path, monkeypatch, caplog):
+    # --tmdb logs what the id stands for (title + year) to stderr.
+    stub_tmdb(monkeypatch)   # id resolves to "Mein Film" (2020)
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "100" in msgs and "Mein Film" in msgs and "2020" in msgs
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_logs_before_after(tmp_path, monkeypatch, caplog):
+    # --title logs the searched title (before) and the resolved hit (after).
+    stub_search(monkeypatch)   # resolves to 9268 "Die Klapperschlange" (1981)
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("add", title="Snake Movie", year=1981))
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "Snake Movie" in msgs           # the searched title (before)
+        assert "Die Klapperschlange" in msgs   # the resolved title (after)
+        assert "9268" in msgs                  # the resolved id
+    finally:
+        conn.close()
+
+
 def test_library_add_title_and_tmdb_together_raises(tmp_path, monkeypatch):
     stub_search(monkeypatch)
     conn = open_db(tmp_path)
@@ -907,6 +935,22 @@ def test_import_logs_progress_per_entry(tmp_path, monkeypatch, caplog):
         msgs = [r.getMessage() for r in caplog.records]
         assert any("1/2" in m for m in msgs)
         assert any("2/2" in m for m in msgs)
+    finally:
+        conn.close()
+
+
+def test_import_logs_resolved_title(tmp_path, monkeypatch, caplog):
+    # each resolved entry logs the TMDB title + year it resolved to (stderr).
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "wishes.txt", "100\nDie Klapperschlange (1981)")
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "Mein Film" in msgs            # id 100 -> "Mein Film" (2020)
+        assert "Die Klapperschlange" in msgs  # title -> resolved hit
+        assert "9268" in msgs
     finally:
         conn.close()
 
