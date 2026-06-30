@@ -6,7 +6,8 @@ import os
 
 import pytest
 
-from theke.index import parse_folder_title, nfo_tmdb_id, is_lang_variant
+from theke.index import (parse_folder_title, nfo_tmdb_id, is_lang_variant,
+                         probe_attrs, run_ffprobe)
 
 
 # -- folder-name parser ------------------------------------------------------
@@ -51,3 +52,50 @@ def test_is_lang_variant_true():
 
 def test_is_lang_variant_false_for_primary():
     assert is_lang_variant("Mein Film (2020).mp4") is False
+
+
+# -- ffprobe attribute parser ------------------------------------------------
+
+PROBE = {
+    "streams": [
+        {"codec_type": "video", "width": 1920, "height": 1080},
+        {"codec_type": "audio", "tags": {"language": "deu"}},
+        {"codec_type": "audio", "tags": {"language": "eng"}},
+    ],
+    "format": {"duration": "5400.000000"},
+}
+
+
+def test_probe_attrs_full():
+    # 5400.0 s -> 5400; deu/eng normalized to de/en.
+    assert probe_attrs(PROBE) == {"resolution": "1920x1080",
+                                  "duration": 5400, "languages": "de,en"}
+
+
+def test_probe_attrs_dedup_languages():
+    data = {"streams": [{"codec_type": "audio", "tags": {"language": "deu"}},
+                        {"codec_type": "audio", "tags": {"language": "ger"}}],
+            "format": {}}
+    assert probe_attrs(data)["languages"] == "de"   # deu and ger both -> de, deduped
+
+
+def test_probe_attrs_missing_fields_are_none():
+    assert probe_attrs({"streams": [], "format": {}}) == {
+        "resolution": None, "duration": None, "languages": None}
+
+
+def test_run_ffprobe_parses_json(monkeypatch):
+    import subprocess
+    out = json.dumps(PROBE)
+    monkeypatch.setattr(subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""))
+    assert run_ffprobe("ffprobe", "x.mp4") == PROBE
+
+
+def test_run_ffprobe_missing_binary(monkeypatch):
+    import subprocess
+    def boom(*a, **k):
+        raise FileNotFoundError()
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(RuntimeError):
+        run_ffprobe("ffprobe", "x.mp4")
