@@ -197,17 +197,22 @@ def test_config_pipeline_defaults(tmp_path, monkeypatch):
     assert cfg.video_ext == "mp4"
     assert cfg.audio_ext == "aac"
     assert cfg.library_path == "movies/{Title} ({Year})/{Title} ({Year}).mp4"
+    assert cfg.library_root == ""
+    assert cfg.ffprobe_path == "ffprobe"
 
 
 def test_config_pipeline_keys_from_file(tmp_path):
     path = tmp_path / "p.json"
     write_config(path, {"temp_path": "/scratch", "video_ext": "mkv",
-                        "audio_ext": "m4a", "library_path": "L/{title}.mp4"})
+                        "audio_ext": "m4a", "library_path": "L/{title}.mp4",
+                        "library_root": "/media/movies", "ffprobe_path": "/bin/ffprobe"})
     cfg = load_config(str(path))
     assert cfg.temp_path == "/scratch"
     assert cfg.video_ext == "mkv"
     assert cfg.audio_ext == "m4a"
     assert cfg.library_path == "L/{title}.mp4"
+    assert cfg.library_root == "/media/movies"
+    assert cfg.ffprobe_path == "/bin/ffprobe"
 
 
 def test_config_download_timeout_default(tmp_path, monkeypatch):
