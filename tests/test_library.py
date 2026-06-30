@@ -2,8 +2,10 @@
 cmd_library (add/list/remove), download -> library recording, and the
 single pipeline pass (_run_pass, the body the scheduler loops)."""
 
+import dataclasses
 import json
 import logging
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -62,11 +64,12 @@ def library_rows(conn):
 
 def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False,
             title=None, year=None, year_tolerance=None, path=None, format=None,
-            mode="auto", tmdb_list=None):
+            mode="auto", tmdb_list=None, allow_empty=False, deleted=False):
     return SimpleNamespace(library_cmd=library_cmd, tmdb=tmdb, all=all,
                            status=status, json=json, title=title, year=year,
                            year_tolerance=year_tolerance, path=path,
-                           format=format, mode=mode, tmdb_list=tmdb_list)
+                           format=format, mode=mode, tmdb_list=tmdb_list,
+                           allow_empty=allow_empty, deleted=deleted)
 
 
 def write_file(tmp_path, name, content):
@@ -1242,3 +1245,100 @@ def test_run_once_cli_runs(tmp_path, monkeypatch, capsys):
     assert main(["--json", "--config", str(cfgpath), "run", "--once"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["queued"] == 0   # no wishes
+
+
+# -- library scan (phase 12 indexer) -----------------------------------------
+
+# A run_ffprobe dict: 1920x1080, 5400 s (= 90 min), German + English audio.
+SCAN_PROBE = {
+    "streams": [{"codec_type": "video", "width": 1920, "height": 1080},
+                {"codec_type": "audio", "tags": {"language": "deu"}},
+                {"codec_type": "audio", "tags": {"language": "eng"}}],
+    "format": {"duration": "5400.000000"},
+}
+
+
+def stub_ffprobe(monkeypatch, data=SCAN_PROBE):
+    """Patch the ffprobe seam; return a list that records each probed path."""
+    calls = []
+    def fake(ffprobe_path, path):
+        calls.append(path)
+        return data
+    monkeypatch.setattr("theke.index.run_ffprobe", fake)
+    return calls
+
+
+def make_movie(root, folder, *, nfo=None, files=("film.mp4",)):
+    d = root / folder
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (d / f).write_bytes(b"\0" * 10)
+    if nfo is not None:
+        (d / "movie.nfo").write_text(nfo, encoding="utf-8")
+    return str(d)
+
+
+def scan_cfg(root):
+    return dataclasses.replace(CFG, library_root=str(root), ffprobe_path="ffprobe")
+
+
+def test_scan_inserts_from_nfo(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)   # no http_get stub: nfo must not call TMDB
+    folder = make_movie(tmp_path, "Mein Film (2020)",
+                        nfo='<movie><uniqueid type="tmdb">100</uniqueid></movie>')
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["added"] == 1
+        rows = library_rows(conn)
+        assert len(rows) == 1
+        r = rows[0]
+        assert (r["tmdb_id"], r["status"], r["path"]) == ("100", "L", folder)
+        assert r["resolution"] == "1920x1080"
+        assert r["duration"] == 5400
+        assert r["languages"] == "de,en"
+        assert r["year"] == 2020
+        assert r["source"] == "scan"
+        assert r["indexed_at"]
+    finally:
+        conn.close()
+
+
+def test_scan_resolves_by_name_via_tmdb(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    stub_search(monkeypatch)   # SEARCH: id 9268, "Die Klapperschlange" (1981)
+    make_movie(tmp_path, "Die Klapperschlange (1981)")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["added"] == 1
+        assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
+
+
+def test_scan_unresolved_when_no_year(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    folder = make_movie(tmp_path, "Random Junk")   # no (Year), no nfo -> no TMDB call
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["unresolved"] == [folder]
+        assert result["added"] == 0
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
+
+
+def test_scan_counts_ignored_folder(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    folder = make_movie(tmp_path, "Parodie (2021)")
+    (tmp_path / "Parodie (2021)" / ".thekeignore").write_text("", encoding="utf-8")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["ignored"] == 1
+        assert result["unresolved"] == []
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
