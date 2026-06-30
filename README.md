@@ -835,6 +835,9 @@ geleerte Bibliothek erzwingt man mit `--allow-empty`.
 Braucht `library_root` (Wurzelverzeichnis der Bibliothek, per `--root` überschreibbar)
 und ein `ffprobe` (`ffprobe_path`, ab Werk `ffprobe`). Gibt die Zähler `scanned`,
 `added`, `updated`, `moved`, `duplicates`, `unresolved`, `ignored`, `deleted` aus.
+Pro Ordner geht das Ergebnis (`added`/`updated`/`moved`/`duplicate`/`unresolved`/
+`ignored`) auf **stderr** -- so ist nachvollziehbar, woher jeder Zähler im stdout
+stammt (analog `library import`).
 
 | Option          | Wirkung                                                       |
 | --------------- | ------------------------------------------------------------ |
