@@ -713,7 +713,9 @@ Das Format ergibt sich aus der Endung (`.txt`/`.csv`), `--format` überschreibt:
   fehlen). `title` und `year` müssen **beide** oder **keine** vorhanden sein;
   Spalten namens `dummy` werden ignoriert, andere Namen sind ein Fehler. Pro
   Zeile gewinnt eine gefüllte `tmdb_id`, sonst der Titel (+ optionales Jahr); eine
-  Zeile ohne beides oder mit ungültigem Jahr kommt ins Fehlerprotokoll.
+  Zeile ohne beides oder mit ungültigem Jahr kommt ins Fehlerprotokoll. Der
+  Trenner (`,` oder `;`) wird aus der Kopfzeile erkannt; die Datei darf UTF-8
+  (auch mit BOM) **oder** ANSI/CP-1252 sein.
 
 Direkt angegebene IDs werden gegen TMDB geprüft (eine ungültige ID landet im
 Fehlerprotokoll). Gibt `added`/`skipped`/`failed` und die `errors`-Liste
