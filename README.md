@@ -684,6 +684,10 @@ Titel/Jahr leer (keine Prüfung möglich). `--title` und `--tmdb-list` erfordern
 einen TMDB-Key (oder `tmdb_read_token`). Gibt `added`/`skipped` aus (beim
 Listen-Import zusätzlich `series_skipped`).
 
+Jeder Wunsch meldet auf stderr, worauf er aufgelöst wurde (TMDB-ID + Titel +
+Jahr): bei `--tmdb`/`--tmdb-list` sieht man so, was hinter einer ID steckt, bei
+`--title` eine Gegenüberstellung gesuchter Titel (+ Jahr) `->` gefundener Treffer.
+
 | Option                  | Wirkung                                                  |
 | ----------------------- | -------------------------------------------------------- |
 | `-t`, `--tmdb ID`       | TMDB-Film-ID als Wunsch (wiederholbar).                  |
@@ -726,7 +730,9 @@ Das Format ergibt sich aus der Endung (`.txt`/`.csv`), `--format` überschreibt:
 
 Direkt angegebene IDs werden gegen TMDB geprüft (eine ungültige ID landet im
 Fehlerprotokoll). Während des Imports meldet jede Zeile ihren Fortschritt
-(`[n/total]`) auf stderr, damit ein langer Import sichtbar bleibt. Eine Titel-
+(`[n/total]`) auf stderr, damit ein langer Import sichtbar bleibt, gefolgt von
+ihrer Auflösung (TMDB-ID + Titel + Jahr) -- so sieht man je Zeile, was hinter
+einer ID steckt bzw. welchen Treffer eine Titel-Suche gewählt hat. Eine Titel-
 Suche ohne Treffer nennt den Grund: gar kein Titel-Treffer vs. Treffer, deren
 Jahre alle außerhalb der Toleranz liegen (mit Auflistung der gefundenen Jahre).
 Am Ende kommen `added`/`skipped`/`failed` und die `errors`-Liste (`line`,
