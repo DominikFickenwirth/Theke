@@ -1677,6 +1677,7 @@ def _library_scan(conn, cfg, args) -> dict:
         for kind, dirpath, videos in index.walk_library(root):
             if kind == "ignored":
                 totals["ignored"] += 1
+                log.info("ignored: %s", dirpath)
                 continue
             saw_movie = True
             totals["scanned"] += 1
@@ -1701,6 +1702,7 @@ def _scan_movie(conn, cfg, dirpath, videos, totals):
     identity = _scan_identify(conn, cfg, dirpath)
     if identity is None:
         totals["unresolved"].append(dirpath)
+        log.warning("unresolved: %s", dirpath)
         return
     existing = conn.execute("SELECT * FROM library WHERE tmdb_id=?",
                             (identity["tmdb_id"],)).fetchone()
@@ -1777,12 +1779,14 @@ def _scan_upsert(conn, identity, dirpath, attrs, existing, totals):
     duplicate (stored path still present and different) without overwriting it.
     Every touched row's indexed_at is stamped, sparing it from the sweep."""
     ts = _now()
+    label = _resolved_label(identity["tmdb_id"], identity["title"], identity["year"])
     if (existing and existing["status"] == "L" and existing["path"] != dirpath
             and existing["path"] and os.path.exists(existing["path"])):
         conn.execute("UPDATE library SET indexed_at=? WHERE tmdb_id=?",
                      (ts, identity["tmdb_id"]))
         totals["duplicates"].append({"tmdb_id": identity["tmdb_id"],
                                      "kept": existing["path"], "duplicate": dirpath})
+        log.warning("duplicate %s: %s (kept %s)", label, dirpath, existing["path"])
         return
     fields = {"tmdb_id": identity["tmdb_id"], "title": identity["title"] or "",
               "year": identity["year"], "path": dirpath, "source": "scan",
@@ -1794,6 +1798,7 @@ def _scan_upsert(conn, identity, dirpath, attrs, existing, totals):
         conn.execute(f"INSERT INTO library (status, {', '.join(cols)}) VALUES "
                      f"('L', {', '.join(':' + c for c in cols)})", fields)
         totals["added"] += 1
+        log.info("added %s <- %s", label, dirpath)
         return
     moved = existing["status"] == "L" and existing["path"] != dirpath
     conn.execute(
@@ -1802,6 +1807,10 @@ def _scan_upsert(conn, identity, dirpath, attrs, existing, totals):
         "year=COALESCE(year, :year), indexed_at=:indexed_at, source=:source, "
         "updated_at=:updated_at WHERE tmdb_id=:tmdb_id", fields)
     totals["moved" if moved else "updated"] += 1
+    if moved:
+        log.info("moved %s: %s -> %s", label, existing["path"], dirpath)
+    else:
+        log.info("updated %s <- %s", label, dirpath)
 
 
 def _scan_sweep(conn, scan_start, saw_movie, allow_empty, totals):
