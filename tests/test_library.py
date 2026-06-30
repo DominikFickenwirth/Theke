@@ -565,7 +565,7 @@ def test_read_import_file_cp1252_fallback(tmp_path):
 def test_import_csv_cp1252_file_resolves_title(tmp_path, monkeypatch):
     stub_import(monkeypatch)
     p = tmp_path / "wishes.csv"
-    p.write_bytes("title,year\nGrüße,2020\n".encode("cp1252"))
+    p.write_bytes("title,year\nGrüße,1981\n".encode("cp1252"))  # SEARCH hit is 1981
     conn = open_db(tmp_path)
     try:
         result = cmd_library(conn, CFG, libargs("import", path=str(p), json=True))

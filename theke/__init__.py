@@ -1690,6 +1690,18 @@ def _parse_csv(text):
     return out
 
 
+def _read_import_file(path):
+    """Read a wishlist file as text: decode utf-8 (BOM-aware) when the bytes are
+    valid utf-8, else fall back to cp1252, the other encoding these lists come in.
+    cp1252 decodes nearly any byte, so it is a safe last resort."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252")
+
+
 def _resolve_entry(cfg, entry, tol) -> tuple:
     """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
     id is verified via TMDB (a bad id propagates as 404); a title is searched."""
@@ -1708,8 +1720,7 @@ def _library_import(conn, cfg, args) -> dict:
     if not cfg.tmdb_api_key:
         raise ConfigError("library import needs a TMDB API key (set tmdb_api_key)")
     fmt = _import_detect_format(args.path, args.format)
-    with open(args.path, encoding="utf-8-sig") as fh:
-        text = fh.read()
+    text = _read_import_file(args.path)
     entries = _parse_txt(text, args.mode) if fmt == "txt" else _parse_csv(text)
     tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
     resolved, errors = [], []
