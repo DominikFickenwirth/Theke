@@ -35,6 +35,7 @@ from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches
                          pick_by_year, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
+from theke import index
 from theke import subtitle
 
 # Progress and diagnostics go to this logger; main() routes it to stderr so the
@@ -1416,6 +1417,7 @@ def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
         case "import": return _library_import(conn, cfg, args)
         case "list":   return _library_list(conn, args)
         case "remove": return _library_remove(conn, args)
+        case "scan":   return _library_scan(conn, cfg, args)
         case _: raise DbError(f"unhandled library action: {args.library_cmd}")
 
 
@@ -1616,6 +1618,176 @@ def _library_record(conn, tmdb_id, path, year):
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+# -- library scan (phase 12: the indexer) ------------------------------------
+# Walk library_root, identify each movie (known path / Kodi nfo / folder-name +
+# TMDB search), probe physical attributes (ffprobe, skipped for unchanged files),
+# and reconcile the `library` table: insert/refresh 'L' rows, follow moves, flag
+# duplicates, and mark vanished films 'D' (mark-and-sweep over indexed_at). Two
+# guards stop a dropped mount from wiping the catalogue: an unreadable root aborts
+# before any write, and a walk that finds no film leaves existing 'L' rows alone
+# unless --allow-empty. DB + TMDB access live here; pure walking/parsing is
+# theke.index. The DB is the authority -- the media server is never read as one.
+
+def _library_scan(conn, cfg, args) -> dict:
+    """Index the on-disk library under cfg.library_root into the `library` table.
+    The whole scan is one transaction (atomic, and self-writes are visible to the
+    duplicate/move checks). Returns the per-category counts (+ the unresolved and
+    duplicate paths)."""
+    root = cfg.library_root
+    if not root:
+        raise ConfigError("library scan needs library_root (set it in the config)")
+    if not os.path.isdir(root):
+        raise ConfigError(f"library_root is not a readable directory: {root}")
+    scan_start = _now()
+    totals = {"scanned": 0, "added": 0, "updated": 0, "moved": 0,
+              "duplicates": [], "unresolved": [], "ignored": 0, "deleted": 0}
+    saw_movie = False
+    conn.execute("BEGIN")
+    try:
+        for kind, dirpath, videos in index.walk_library(root):
+            if kind == "ignored":
+                totals["ignored"] += 1
+                continue
+            saw_movie = True
+            totals["scanned"] += 1
+            _scan_movie(conn, cfg, dirpath, videos, totals)
+        _scan_sweep(conn, scan_start, saw_movie, args.allow_empty, totals)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    log.info("scan: %d added, %d updated, %d moved, %d duplicate, %d unresolved, "
+             "%d ignored, %d deleted", totals["added"], totals["updated"],
+             totals["moved"], len(totals["duplicates"]), len(totals["unresolved"]),
+             totals["ignored"], totals["deleted"])
+    return totals
+
+
+def _scan_movie(conn, cfg, dirpath, videos, totals):
+    """Resolve one movie folder to a tmdb_id, probe its anchor file (or reuse cached
+    attributes), and upsert its library row. An unresolvable folder is recorded as
+    unresolved and left out of the DB."""
+    anchor = index.pick_anchor(videos)
+    identity = _scan_identify(conn, cfg, dirpath)
+    if identity is None:
+        totals["unresolved"].append(dirpath)
+        return
+    existing = conn.execute("SELECT * FROM library WHERE tmdb_id=?",
+                            (identity["tmdb_id"],)).fetchone()
+    attrs = _scan_probe(cfg, anchor, existing, dirpath)
+    _scan_upsert(conn, identity, dirpath, attrs, existing, totals)
+
+
+def _scan_identify(conn, cfg, dirpath):
+    """Resolve a movie folder to {tmdb_id, title, year}. A known 'L' row at this path
+    wins first -- so a film still on disk is never re-resolved and never swept,
+    regardless of whether nfo/name would resolve. Then a Kodi nfo uniqueid, then a
+    'Title (Year)' folder name + TMDB search. None when nothing identifies it."""
+    row = conn.execute("SELECT tmdb_id, title, year FROM library "
+                       "WHERE path=? AND status='L'", (dirpath,)).fetchone()
+    if row:
+        return {"tmdb_id": row["tmdb_id"], "title": row["title"], "year": row["year"]}
+    parsed = index.parse_folder_title(os.path.basename(dirpath))
+    title = parsed[0] if parsed else os.path.basename(dirpath)
+    year = parsed[1] if parsed else None
+    tid = _scan_nfo_id(dirpath)
+    if tid:
+        return {"tmdb_id": tid, "title": title, "year": year}
+    if parsed and cfg.tmdb_api_key:
+        try:
+            tid, title, year = _search_title(cfg, title, year, cfg.match_year_tolerance)
+            return {"tmdb_id": tid, "title": title, "year": year}
+        except (ValueError, ConfigError):
+            return None
+    return None
+
+
+def _scan_nfo_id(dirpath):
+    """The TMDB id from a Kodi nfo in the folder, or None. 'movie.nfo' and
+    '<folder>.nfo' are tried first, then any other .nfo; a parse miss falls through."""
+    base = os.path.basename(dirpath).lower()
+    names = sorted(f for f in os.listdir(dirpath) if f.lower().endswith(".nfo"))
+    names.sort(key=lambda n: (n.lower() != "movie.nfo", n.lower() != base + ".nfo"))
+    for name in names:
+        try:
+            with open(os.path.join(dirpath, name), encoding="utf-8", errors="ignore") as fh:
+                tid = index.nfo_tmdb_id(fh.read())
+        except OSError:
+            continue
+        if tid:
+            return tid
+    return None
+
+
+def _scan_probe(cfg, anchor, existing, dirpath):
+    """Physical attributes for the anchor file. Reuses the stored ones when the file
+    is unchanged since the last scan (same path, same size, mtime <= the row's
+    indexed_at), so ffprobe is not re-run across a large unchanged library."""
+    size = os.path.getsize(anchor)
+    if (existing and existing["path"] == dirpath and existing["indexed_at"]
+            and existing["file_size"] == size
+            and os.path.getmtime(anchor) <= _iso_epoch(existing["indexed_at"])):
+        return {"resolution": existing["resolution"], "duration": existing["duration"],
+                "languages": existing["languages"], "file_size": size}
+    attrs = index.probe_attrs(index.run_ffprobe(cfg.ffprobe_path, anchor))
+    attrs["file_size"] = size
+    return attrs
+
+
+def _iso_epoch(ts) -> float:
+    """Epoch seconds for an ISO-8601 'Z' timestamp (the _now() format)."""
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc).timestamp()
+
+
+def _scan_upsert(conn, identity, dirpath, attrs, existing, totals):
+    """Reconcile one resolved film into the library. New -> insert 'L'. An existing
+    wish/missing/deleted row -> flip to 'L' at this path. An existing 'L' row ->
+    refresh in place (same path), follow a move (stored path gone), or flag a
+    duplicate (stored path still present and different) without overwriting it.
+    Every touched row's indexed_at is stamped, sparing it from the sweep."""
+    ts = _now()
+    if (existing and existing["status"] == "L" and existing["path"] != dirpath
+            and existing["path"] and os.path.exists(existing["path"])):
+        conn.execute("UPDATE library SET indexed_at=? WHERE tmdb_id=?",
+                     (ts, identity["tmdb_id"]))
+        totals["duplicates"].append({"tmdb_id": identity["tmdb_id"],
+                                     "kept": existing["path"], "duplicate": dirpath})
+        return
+    fields = {"tmdb_id": identity["tmdb_id"], "title": identity["title"] or "",
+              "year": identity["year"], "path": dirpath, "source": "scan",
+              "indexed_at": ts, "created_at": ts, "updated_at": ts, **attrs}
+    if existing is None:
+        cols = ["tmdb_id", "title", "year", "path", "resolution", "languages",
+                "duration", "file_size", "indexed_at", "source",
+                "created_at", "updated_at"]
+        conn.execute(f"INSERT INTO library (status, {', '.join(cols)}) VALUES "
+                     f"('L', {', '.join(':' + c for c in cols)})", fields)
+        totals["added"] += 1
+        return
+    moved = existing["status"] == "L" and existing["path"] != dirpath
+    conn.execute(
+        "UPDATE library SET status='L', path=:path, resolution=:resolution, "
+        "languages=:languages, duration=:duration, file_size=:file_size, "
+        "year=COALESCE(year, :year), indexed_at=:indexed_at, source=:source, "
+        "updated_at=:updated_at WHERE tmdb_id=:tmdb_id", fields)
+    totals["moved" if moved else "updated"] += 1
+
+
+def _scan_sweep(conn, scan_start, saw_movie, allow_empty, totals):
+    """Mark every 'L' row not seen this scan (stale indexed_at) as 'D'. Skipped --
+    leaving the catalogue intact -- when the walk found no film and the library is
+    non-empty, unless allow_empty, so a vanished/unmounted root never mass-deletes."""
+    has_library = conn.execute(
+        "SELECT 1 FROM library WHERE status='L' LIMIT 1").fetchone()
+    if not saw_movie and has_library and not allow_empty:
+        totals["library_empty"] = True
+        return
+    totals["deleted"] = conn.execute(
+        "UPDATE library SET status='D', updated_at=? WHERE status='L' AND "
+        "(indexed_at IS NULL OR indexed_at < ?)", (_now(), scan_start)).rowcount
 
 
 # -- library import (phase 9: bulk wishes from a txt/csv file) ----------------
