@@ -1342,3 +1342,109 @@ def test_scan_counts_ignored_folder(tmp_path, monkeypatch):
         assert library_rows(conn) == []
     finally:
         conn.close()
+
+
+NFO100 = '<movie><uniqueid type="tmdb">100</uniqueid></movie>'
+
+
+def insert_lib(conn, tmdb_id, status="L", path="x",
+               indexed_at="2000-01-01T00:00:00Z", year=None):
+    ts = "2000-01-01T00:00:00Z"
+    conn.execute("INSERT INTO library (tmdb_id, status, title, year, path, "
+                 "indexed_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                 (tmdb_id, status, "", year, path, indexed_at, ts, ts))
+    conn.commit()
+
+
+def lib_get(conn, tmdb_id):
+    r = conn.execute("SELECT * FROM library WHERE tmdb_id=?", (tmdb_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def test_scan_sweeps_vanished_film_to_deleted(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "777", path=str(tmp_path / "gone (1999)"))   # path not on disk
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["deleted"] == 1
+        assert lib_get(conn, "777")["status"] == "D"
+        assert lib_get(conn, "100")["status"] == "L"
+    finally:
+        conn.close()
+
+
+def test_scan_follows_a_move(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    new = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=str(tmp_path / "old place (2020)"))  # gone
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["moved"] == 1
+        assert result["deleted"] == 0
+        row = lib_get(conn, "100")
+        assert row["status"] == "L" and row["path"] == new
+    finally:
+        conn.close()
+
+
+def test_scan_flags_duplicate_keeps_existing(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    a = make_movie(tmp_path, "Film A (2020)", nfo=NFO100)
+    b = make_movie(tmp_path, "Film B (2020)", nfo=NFO100)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=a)   # already at A (which exists on disk)
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert len(result["duplicates"]) == 1
+        dup = result["duplicates"][0]
+        assert dup["kept"] == a and dup["duplicate"] == b
+        assert lib_get(conn, "100")["path"] == a   # existing row untouched
+    finally:
+        conn.close()
+
+
+def test_scan_hard_guard_missing_root_raises_no_sweep(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=str(tmp_path / "whatever"))
+        cfg = dataclasses.replace(CFG, library_root=str(tmp_path / "nope"))
+        with pytest.raises(ConfigError):
+            cmd_library(conn, cfg, libargs("scan"))
+        assert lib_get(conn, "100")["status"] == "L"   # untouched
+    finally:
+        conn.close()
+
+
+def test_scan_soft_guard_empty_root(tmp_path):
+    empty = tmp_path / "lib"
+    empty.mkdir()
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=str(tmp_path / "gone"))
+        cfg = dataclasses.replace(CFG, library_root=str(empty))
+        result = cmd_library(conn, cfg, libargs("scan"))
+        assert result.get("library_empty") is True
+        assert result["deleted"] == 0
+        assert lib_get(conn, "100")["status"] == "L"   # spared without --allow-empty
+        result = cmd_library(conn, cfg, libargs("scan", allow_empty=True))
+        assert lib_get(conn, "100")["status"] == "D"   # forced sweep
+    finally:
+        conn.close()
+
+
+def test_scan_skips_ffprobe_for_unchanged_file(tmp_path, monkeypatch):
+    calls = stub_ffprobe(monkeypatch)
+    folder = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    anchor = os.path.join(folder, "film.mp4")
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert len(calls) == 1
+        os.utime(anchor, (1_000_000_000, 1_000_000_000))   # mtime well in the past
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert len(calls) == 1   # unchanged file -> ffprobe not re-run
+    finally:
+        conn.close()
