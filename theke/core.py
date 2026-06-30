@@ -35,9 +35,9 @@ class Config:
     filmliste_url:      str = "https://liste.mediathekview.de/Filmliste-akt.xz"
     filmliste_diff_url: str = "https://liste.mediathekview.de/Filmliste-diff.xz"
     filmliste_id_url:   str = "https://liste.mediathekview.de/filmliste.id"
+    tmdb_api_url:         str   = "https://api.themoviedb.org/3"
     tmdb_api_key:         str   = ""
     tmdb_read_token:      str   = ""
-    tmdb_api_url:         str   = "https://api.themoviedb.org/3"
     tmdb_language:        str   = "de-DE"
     tmdb_lists:           list  = dataclasses.field(default_factory=list)
     match_min_confidence: float = 0.6
@@ -45,17 +45,17 @@ class Config:
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     fiction_topics:       list  = dataclasses.field(default_factory=list)
-    subtitle_formats:     list  = dataclasses.field(default_factory=lambda: ["srt", "ass", "ttml"])
     ffmpeg_path:          str   = "ffmpeg"
+    ffprobe_path:         str   = "ffprobe"
     download_retries:     int   = 3
     download_timeout:     int   = 60
     download_stall_timeout: int = 120
+    library_root:         str   = "movies"  # phase 12: the dir `library scan` walks
+    library_path:         str   = "movies/{Title} ({Year})/{Title} ({Year}).mp4"
     temp_path:            str   = ""
     video_ext:            str   = "mp4"
     audio_ext:            str   = "aac"
-    library_path:         str   = "movies/{Title} ({Year})/{Title} ({Year}).mp4"
-    library_root:         str   = ""        # phase 12: the dir `library scan` walks
-    ffprobe_path:         str   = "ffprobe" # phase 12: ffmpeg's sibling, for stream probing
+    subtitle_formats:     list  = dataclasses.field(default_factory=lambda: ["srt", "ass", "ttml"])
     run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
 
 

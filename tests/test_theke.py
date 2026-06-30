@@ -197,7 +197,7 @@ def test_config_pipeline_defaults(tmp_path, monkeypatch):
     assert cfg.video_ext == "mp4"
     assert cfg.audio_ext == "aac"
     assert cfg.library_path == "movies/{Title} ({Year})/{Title} ({Year}).mp4"
-    assert cfg.library_root == ""
+    assert cfg.library_root == "movies"
     assert cfg.ffprobe_path == "ffprobe"
 
 
