@@ -1470,11 +1470,19 @@ def _resolve_title(cfg, args) -> tuple:
     return _search_title(cfg, args.title, args.year, tol)
 
 
+def _resolved_label(tid, title, year) -> str:
+    """A wish's resolution as one line for the stderr log: the tmdb_id and the
+    TMDB title (+ year when known). Lets the user confirm what an id stands for or
+    what a title search picked, without parsing the result."""
+    return f"{tid}  {title!r} ({year})" if year else f"{tid}  {title!r}"
+
+
 def _library_add(conn, cfg, args) -> dict:
     """Add wishes as status 'W'. Each wish resolves to a tmdb_id: given directly
     via --tmdb, by a title/year lookup via --title, or in bulk from a TMDB list via
     --tmdb-list (movies only; series skipped). Idempotent: an existing tmdb_id is
-    left untouched (counted as skipped, never reset from 'L' back to 'W')."""
+    left untouched (counted as skipped, never reset from 'L' back to 'W'). Each
+    resolution is logged to stderr (what the id/title resolved to)."""
     lists = getattr(args, "tmdb_list", None)
     if sum(map(bool, (args.title, args.tmdb, lists))) > 1:
         raise ValueError("give only one of --tmdb, --title or --tmdb-list")
@@ -1483,9 +1491,14 @@ def _library_add(conn, cfg, args) -> dict:
         return {k: sum(p[k] for p in parts)
                 for k in ("added", "skipped", "series_skipped")}
     if args.title:
-        wishes = [_resolve_title(cfg, args)]
+        tid, title, year = _resolve_title(cfg, args)
+        log.info("%r (%s) -> %s", args.title, args.year or "?",
+                 _resolved_label(tid, title, year))   # before -> after
+        wishes = [(tid, title, year)]
     elif args.tmdb:
         wishes = [(str(t), *_wish_meta(cfg, t)) for t in args.tmdb]
+        for tid, title, year in wishes:
+            log.info("%s", _resolved_label(tid, title, year))
     else:
         raise ValueError("library add needs --tmdb, --title or --tmdb-list")
     return _insert_wishes(conn, wishes)
@@ -1523,6 +1536,8 @@ def _add_list_wishes(conn, cfg, list_id) -> dict:
     items = tmdb_list(cfg, list_id)
     movies = [(it["tmdb_id"], it["title"], it["year"])
               for it in items if it["media_type"] == "movie"]
+    for tid, title, year in movies:
+        log.info("%s", _resolved_label(tid, title, year))
     series = len(items) - len(movies)
     if series:
         log.warning("list %s: %d series skipped (movies only)", list_id, series)
@@ -1768,7 +1783,9 @@ def _library_import(conn, cfg, args) -> dict:
             errors.append({"line": lineno, "input": raw, "reason": entry["reason"]})
             continue
         try:
-            resolved.append(_resolve_entry(cfg, entry, tol))
+            tid, title, year = _resolve_entry(cfg, entry, tol)
+            log.info("  -> %s", _resolved_label(tid, title, year))   # what it resolved to
+            resolved.append((tid, title, year))
         except Exception as exc:
             log.warning("  line %d failed: %s", lineno, exc)
             errors.append({"line": lineno, "input": raw, "reason": str(exc)})
