@@ -517,8 +517,8 @@ eine `tmdb_id`, wird der zugehörige `library`-Eintrag auf `L` (in Bibliothek)
 gesetzt und sein `path` auf den Zielordner sowie `year` aus der Queue-Zeile
 übernommen (ein bereits beim Wunsch erfasstes Jahr bleibt erhalten) -- ein offener
 Wunsch (`W`) kippt damit auf `L`, sonst wird ein neuer `L`-Eintrag angelegt (siehe
-`theke library`). So lädt ein erneutes `theke update` einen bereits geholten
-Wunsch nicht noch einmal.
+`theke library`). So lädt ein erneuter `theke run`-Durchlauf einen bereits
+geholten Wunsch nicht noch einmal.
 
 | Option          | Wirkung                                          |
 | --------------- | ------------------------------------------------ |
@@ -648,7 +648,7 @@ Default `list`, d. h. `theke library` entspricht `theke library list`.
 
 Ein Wunsch verlässt `W` erst, wenn sein Download tatsächlich fertig ist: dann
 vermerkt `theke queue download` ihn als `L` und trägt seinen Bibliotheksordner als
-`path` ein. `theke update` arbeitet nur offene Wünsche (`W`) ab.
+`path` ein. `theke run` arbeitet nur offene Wünsche (`W`) ab.
 
 ### `library add`
 
@@ -668,7 +668,7 @@ gemeldet (die Library ist bis Phase 13 reine Filmsache); ihre Zahl steht in
 `series_skipped`. Öffentliche Listen liest schon der `tmdb_api_key`; für **private**
 Listen wird ein `tmdb_read_token` (das "API Read Access Token" von TMDB, als
 Bearer-Header) benötigt. Die Listen-ID ist die Zahl in der Listen-URL
-(`themoviedb.org/list/{id}`). Konfigurierte Listen zieht `theke update`
+(`themoviedb.org/list/{id}`). Konfigurierte Listen zieht `theke run`
 automatisch nach (s. u.).
 
 **Idempotent**: eine bereits vorhandene ID bleibt unangetastet (zählt als
@@ -762,31 +762,60 @@ theke --db build/theke.db library remove --tmdb 1474601
 theke --db build/theke.db library remove --all
 ```
 
-## `theke update`
+## `theke run`
 
-Stufe 9: **ein unbeaufsichtigter Durchlauf** der gesamten Pipeline für die
-Wunschliste. Der Reihe nach: `fetch` (Filmliste aktualisieren), `enrich`
-(Metadaten extrahieren), dann -- sofern `tmdb_lists` konfiguriert ist -- jede
-**konfigurierte TMDB-Liste** additiv in die Library nachziehen (nur Filme, wie
-`library add --tmdb-list`; gezählt in `list_added`), dann je offenem Wunsch (`W`)
-`match` (TMDB-ID auflösen und passende `mediathek`-Zeilen taggen) und `queue add`
-(deduplizierte Download-Menge einreihen). Ist `queue_auto_approve` gesetzt, werden
-die genehmigten Einträge anschließend gleich heruntergeladen (jeder fertige Wunsch
-wird dabei als `L` vermerkt); sonst endet der Lauf am Genehmigungs-Tor mit
-`proposed`-Einträgen. Ein einzelner fehlschlagender Wunsch oder eine fehlschlagende
-Liste (z. B. ein TMDB-Fehler) bricht den Durchlauf nicht ab. Fortschritt geht nach
-stderr; das Ergebnis fasst `fetch`/`enriched`/`list_added`/`wishes`/`queued`/
-`skipped`/`deduplicated`/`failed`/`downloaded` zusammen.
+Stufe 9+10: **ein unbeaufsichtigter Durchlauf** der gesamten Pipeline für die
+Wunschliste -- einmalig (`--once`) oder **wiederholt nach einem Zeitplan** (der
+In-App-Scheduler). Ein Durchlauf (Pass) der Reihe nach: `fetch` (Filmliste
+aktualisieren), `enrich` (Metadaten extrahieren), dann -- sofern `tmdb_lists`
+konfiguriert ist -- jede **konfigurierte TMDB-Liste** additiv in die Library
+nachziehen (nur Filme, wie `library add --tmdb-list`; gezählt in `list_added`),
+dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen und passende
+`mediathek`-Zeilen taggen) und `queue add` (deduplizierte Download-Menge einreihen).
+Ist `queue_auto_approve` gesetzt, werden die genehmigten Einträge anschließend
+gleich heruntergeladen (jeder fertige Wunsch wird dabei als `L` vermerkt); sonst
+endet der Pass am Genehmigungs-Tor mit `proposed`-Einträgen. Ein einzelner
+fehlschlagender Wunsch oder eine fehlschlagende Liste (z. B. ein TMDB-Fehler)
+bricht den Pass nicht ab, und ein fehlschlagender Pass bricht die Schleife nicht
+ab. Das Pass-Ergebnis fasst `fetch`/`enriched`/`list_added`/`wishes`/`queued`/
+`skipped`/`deduplicated`/`failed`/`downloaded` zusammen; im Loop wird je Pass eine
+Zeile geschrieben (in `--json` ein JSON-Objekt pro Pass, JSONL), Fortschritt geht
+nach stderr.
 
 Der Listen-Abgleich ist **nur additiv**: aus einer Liste entfernte Filme werden
 **nicht** aus der Library gelöscht (die Library hat mehrere Quellen, und ein
 einmal gestarteter Wunsch soll nicht still verschwinden). Bereits geladene Filme
 (`L`) bleiben ohnehin unberührt.
 
+**Zeitplan (`run_schedule`).** Eine einzige Liste aus Triggern; der nächste Lauf
+ist der früheste über alle. Alle Trigger sind **fixed-rate** (an der Wanduhr
+ausgerichtet, nicht am Ende des letzten Passes). Einträge:
+
+| Eintrag         | Bedeutung                                                     |
+| --------------- | ------------------------------------------------------------- |
+| `"start"`       | ein Pass sofort beim Start des Prozesses                      |
+| `3600` (Zahl)   | alle N **Sekunden** (an Mitternacht verankert: `3600` = jede volle Stunde) |
+| `"03:00"`       | täglich um 03:00 (lokale Uhrzeit)                             |
+| `"Mon 20:00"`   | wöchentlich montags 20:00 (`Mon`..`Sun`)                     |
+
+Default: `["start", 3600]` (sofort, dann stündlich). Überrennt ein langer Pass
+mehrere Ticks, werden die verpassten zu **einem** Folgepass zusammengefasst
+(Überlappung ist ausgeschlossen -- der Loop ist Single-Thread).
+
+Der Prozess hält die **einzige DB-Schreibverbindung** für seine Laufzeit (eine
+spätere Web-UI im selben Prozess teilt sie sich); ein zweiter schreibender
+`theke`-Aufruf scheitert solange am DB-Lock. `SIGINT`/`SIGTERM` (Strg+C bzw.
+Docker-Stop) beenden ihn **sauber nach dem laufenden Pass**.
+
 Erfordert einen TMDB-Key (`tmdb_api_key`) für `match` und `queue add` (für private
-Listen zusätzlich `tmdb_read_token`). Der Befehl hat keine eigenen Optionen.
+Listen zusätzlich `tmdb_read_token`).
+
+| Option     | Wirkung                                              |
+| ---------- | ---------------------------------------------------- |
+| `--once`   | genau ein Pass, dann Ende (kein Scheduling).         |
 
 ```powershell
-theke --db build/theke.db update
-theke --db build/theke.db --json update
+theke --db build/theke.db run --once          # ein Durchlauf
+theke --db build/theke.db --json run --once
+theke --db build/theke.db run                 # Daemon nach run_schedule
 ```

@@ -44,11 +44,16 @@ download from liste.mediathekview.de).
 7. **Remux** (done) -- FFmpeg pipeline, extracting audio and converting containers to mp4.
 8. **Move** (done) -- Move into movie library. **Manual path complete here.**
 9. **Wishlist** (done) -- `theke library` keeps wishes by TMDB ID in the
-   `library` table (status 'W'); `theke update` runs the whole pipeline for every
-   open wish (fetch -> enrich -> match -> queue add -> download when
-   auto-approved). A finished download records the film as 'L' (in library), so a
-   satisfied wish is never re-acquired. Movies only; series follow in phase 13.
-10. **Scheduler** -- in-app scheduler; runs unattended.
+   `library` table (status 'W'); one pipeline pass (`_run_pass`) runs the whole
+   chain for every open wish (fetch -> enrich -> match -> queue add -> download
+   when auto-approved). A finished download records the film as 'L' (in library),
+   so a satisfied wish is never re-acquired. Movies only; series follow in phase 13.
+10. **Scheduler** (done) -- `theke run` loops one pipeline pass on the
+    `run_schedule` (a single list of `"start"` / interval-seconds / `"HH:MM"` /
+    `"Weekday HH:MM"` triggers, all fixed-rate). One process, one DB connection
+    (the single writer, shared by the future in-process web UI); clean
+    SIGINT/SIGTERM stop; one JSON summary per pass. `run --once` = one pass (the
+    former `update` command).
 11. **Docker + NAS deployment** -- containerize, deploy (smoke test, manual).
 12. **Library indexer** -- cache current library by parsing nfo files and reading
     MP4 file names and folder names. Needed for phase 13.
@@ -141,8 +146,16 @@ Subtitles are downloaded when present. Downloads resume automatically, failed
 downloads retry (a few times), status in DB, no silent loss. A partial,
 unfinishable download counts as a failure.
 
-**Scheduler (in-app, phase 10):** `theke run` loops the stages at configured
-intervals in pipeline order (fetch -> enrich -> match -> wishlist check -> ...).
+**Scheduler (in-app, phase 10):** `theke run` loops one whole pipeline pass
+(`_run_pass`: fetch -> enrich -> list sync -> per-wish match + queue -> download)
+on the `run_schedule`. That config is a single list of triggers, all fixed-rate:
+`"start"` (a pass at process start), an int (every N seconds, anchored to
+midnight), `"HH:MM"` (daily), `"Weekday HH:MM"` (weekly); the next run is the
+soonest across them. The pure scheduling core (parse/next-fire/loop with injected
+clock+wait seams) lives in `theke/scheduler.py`; `cmd_run` wires it to the single
+DB connection and a SIGINT/SIGTERM clean stop. A long pass that overruns ticks
+collapses the missed ones into one; the single-threaded loop rules out overlap.
+`run --once` runs exactly one pass and exits.
 
 ## Tech stack
 
@@ -179,6 +192,7 @@ Theke/
 |   +-- queue.py      download-queue dedup / selection
 |   +-- files.py      download / remux / move primitives
 |   +-- subtitle.py   subtitle download + conversion
+|   +-- scheduler.py  run_schedule parsing + the run loop (pure; seams injected)
 |   +-- ...           (more files as needed)
 +-- pyproject.toml    package + console-script `theke`, dependencies
 +-- tests/            pytest suite
