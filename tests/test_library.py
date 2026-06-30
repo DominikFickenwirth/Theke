@@ -548,6 +548,36 @@ def test_parse_csv_empty_row_is_a_row_error():
     assert rows[0][0] == 2 and rows[0][2]["kind"] == "error"
 
 
+# -- import: delimiter sniffing ----------------------------------------------
+
+def test_sniff_delimiter_semicolon():
+    assert theke._sniff_delimiter("title;year") == ";"
+
+
+def test_sniff_delimiter_comma():
+    assert theke._sniff_delimiter("tmdb_id,title,year") == ","
+
+
+def test_sniff_delimiter_tab():
+    assert theke._sniff_delimiter("title\tyear") == "\t"
+
+
+def test_sniff_delimiter_defaults_to_comma_when_none():
+    assert theke._sniff_delimiter("title") == ","
+
+
+def test_sniff_delimiter_picks_the_more_frequent():
+    # one comma inside a title, two semicolons as real separators -> ";".
+    assert theke._sniff_delimiter("tmdb_id;title;year") == ";"
+
+
+def test_parse_csv_semicolon_delimited():
+    assert theke._parse_csv("title;year\nDer Pate;1972\nHeat;") == [
+        (2, "Der Pate;1972", {"kind": "title", "title": "Der Pate", "year": 1972}),
+        (3, "Heat;", {"kind": "title", "title": "Heat", "year": None}),
+    ]
+
+
 # -- import: file reading / encoding -----------------------------------------
 
 def test_read_import_file_utf8(tmp_path):
@@ -566,6 +596,19 @@ def test_import_csv_cp1252_file_resolves_title(tmp_path, monkeypatch):
     stub_import(monkeypatch)
     p = tmp_path / "wishes.csv"
     p.write_bytes("title,year\nGrüße,1981\n".encode("cp1252"))  # SEARCH hit is 1981
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=str(p), json=True))
+        assert result["added"] == 1 and result["failed"] == 0
+    finally:
+        conn.close()
+
+
+def test_import_csv_semicolon_cp1252_file(tmp_path, monkeypatch):
+    # The real lfi2.csv case: cp1252 bytes AND a ';' separator.
+    stub_import(monkeypatch)
+    p = tmp_path / "wishes.csv"
+    p.write_bytes("title;year\nGrüße;1981\n".encode("cp1252"))
     conn = open_db(tmp_path)
     try:
         result = cmd_library(conn, CFG, libargs("import", path=str(p), json=True))
