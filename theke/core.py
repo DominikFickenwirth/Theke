@@ -212,6 +212,16 @@ MIGRATIONS: list[tuple[str, ...]] = [
        # a prior wish.
         "ALTER TABLE queue ADD COLUMN year INTEGER",
     ),
+    (  # phase 12: the library indexer caches each film's physical attributes
+       # (ffprobe) plus the last-scan timestamp that drives deletion detection
+       # (a stale indexed_at -> status 'D'). path/year already exist.
+        "ALTER TABLE library ADD COLUMN resolution TEXT",   # "1920x1080" (ffprobe)
+        "ALTER TABLE library ADD COLUMN languages  TEXT",   # audio tracks, e.g. "de,en"
+        "ALTER TABLE library ADD COLUMN duration   INTEGER",# seconds, like mediathek.duration
+        "ALTER TABLE library ADD COLUMN file_size  INTEGER",# bytes of the anchor file
+        "ALTER TABLE library ADD COLUMN indexed_at TEXT",   # last scan sighting (sweep watermark)
+        "ALTER TABLE library ADD COLUMN source     TEXT",   # provenance (e.g. "scan")
+    ),
 ]
 
 

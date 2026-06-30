@@ -1406,7 +1406,7 @@ def _print_queue(rows):
 # library. cmd_library manages wishes; a finished queue download records its
 # tmdb_id as 'L' via _library_record (called from _download_entry).
 
-LIBRARY_STATUS = {"wish": "W", "missing": "M", "library": "L"}
+LIBRARY_STATUS = {"wish": "W", "missing": "M", "library": "L", "deleted": "D"}
 
 
 def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
