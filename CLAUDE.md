@@ -13,9 +13,11 @@
 ## Overview
 
 **Theke** (from Media-*thek*) is a self-hosted media manager: it acquires German
-public-broadcaster content and files it into a movie library (e.g. Jellyfin). The
-only source is the public Mediatheken via the **MediathekView film list** (a plain
-download from liste.mediathekview.de).
+public-broadcaster content and files it into a movie library on disk (the
+canonical `Title (Year)/Title (Year).ext` layout, with optional Kodi-style nfo
+sidecars -- read by common media servers (Kodi, Emby, Jellyfin, Plex) alike; Theke
+targets the layout, not any one media server). The only source is the public Mediatheken via the
+**MediathekView film list** (a plain download from liste.mediathekview.de).
 
 ## Phases (implementation order)
 
@@ -55,8 +57,16 @@ download from liste.mediathekview.de).
     SIGINT/SIGTERM stop; one JSON summary per pass. `run --once` = one pass (the
     former `update` command).
 11. **Docker + NAS deployment** -- containerize, deploy (smoke test, manual).
-12. **Library indexer** -- cache current library by parsing nfo files and reading
-    MP4 file names and folder names. Needed for phase 13.
+12. **Library indexer** (done) -- `theke library scan` walks `library_root` and
+    reconciles it with the `library` table: identify each movie (known DB path /
+    Kodi nfo `<uniqueid type="tmdb">` / `Title (Year)` folder + TMDB search), probe
+    physical attributes via ffprobe (skipped for files unchanged since the last
+    scan), record films as 'L', follow moves, flag duplicates, and mark vanished
+    films 'D' by a mark-and-sweep over `indexed_at`. A folder with a `.thekeignore`
+    marker is skipped; unidentified folders are reported, not stored. The DB is the
+    authority -- the media server is never read as one. Two guards stop a dropped
+    mount from wiping the catalogue (unreadable root aborts; an empty walk spares
+    existing 'L' rows unless `--allow-empty`). Needed for phase 13.
 13. **Quality upgrades + series completion** -- detect higher resolutions /
     missing episodes (needs the indexer).
 14. **Web UI** -- user friendly wrapper for the CLI (via REST API): dashboard,
@@ -105,7 +115,10 @@ Single SQLite file `theke.db`. Field lists and status names are indicative.
 - **queue** -- review queue + download record in one. `status` is one char
   (Lifecycle `proposed -> approved -> downloading -> done / failed / cancelled`).
 - **library** -- wishlist + current library record in one. `status` is one char
-  ('W' wish, 'M' missing episode, 'L' library). Primary key based on `tmdb_id`.
+  ('W' wish, 'M' missing episode, 'L' library, 'D' deleted -- an 'L' whose file
+  vanished from disk). Primary key based on `tmdb_id`. `library scan` (phase 12)
+  fills the on-disk attributes (path/resolution/languages/duration/file_size/
+  indexed_at/source) and runs the deletion mark-and-sweep over `indexed_at`.
 - **meta** -- key/value table for metadata (filmliste_id, filmliste_created).
 
 ## Stage details
@@ -191,6 +204,7 @@ Theke/
 |   +-- match.py      tmdb_id matching
 |   +-- queue.py      download-queue dedup / selection
 |   +-- files.py      download / remux / move primitives
+|   +-- index.py      library scan: walk / nfo+name parse / ffprobe (pure; seams injected)
 |   +-- subtitle.py   subtitle download + conversion
 |   +-- scheduler.py  run_schedule parsing + the run loop (pure; seams injected)
 |   +-- ...           (more files as needed)

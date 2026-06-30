@@ -3,7 +3,7 @@
 # identify each film (known DB path / Kodi nfo uniqueid / folder-name + TMDB
 # search), probe its physical attributes via ffprobe, detect deletions by a
 # mark-and-sweep over indexed_at, and report unidentified folders. The DB is the
-# authority; the media server (Kodi/Jellyfin/...) is never read as one. Pure
+# authority; the media server (Kodi/Emby/Jellyfin/Plex) is never read as one. Pure
 # parsing/walking helpers live here; CLI wiring + TMDB/DB access stay in
 # __init__.py. ffprobe is a seam (run_ffprobe), monkeypatched in tests.
 
@@ -15,7 +15,7 @@ import subprocess
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".flv",
               ".webm", ".mpg", ".mpeg"}
 
-# Kodi/Jellyfin extras subfolders: never their own film, skipped while walking.
+# Kodi/Emby/Jellyfin extras subfolders: never their own film, skipped while walking.
 EXTRAS_DIRS = {"behind the scenes", "extras", "featurettes", "trailers",
                "deleted scenes", "making of", "interviews", "scenes", "shorts",
                "other", "sample", "samples"}
@@ -41,8 +41,8 @@ def parse_folder_title(name) -> tuple | None:
 def nfo_tmdb_id(text) -> str | None:
     """The TMDB id from a Kodi-style nfo: <uniqueid type="tmdb">, else the legacy
     <tmdbid>; None when neither is present. Regex (not an XML parse) so a slightly
-    malformed nfo still yields its id. The format is shared by Kodi/Emby/Jellyfin
-    -- reading it is plattform-neutral, not a media-server binding."""
+    malformed nfo still yields its id. The format is shared across media servers
+    (Kodi/Emby/Jellyfin/Plex) -- reading it is platform-neutral, not a media-server binding."""
     m = _UNIQUEID_RX.search(text) or _TMDBID_RX.search(text)
     return m.group(1) if m else None
 

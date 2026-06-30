@@ -1267,8 +1267,8 @@ def _url_ext(url) -> str:
 
 
 def _subtitle_lang(row) -> str:
-    """Sidecar language tag (Jellyfin convention): the queue language when it is a
-    2-letter code, else 'de' (covers '', 'ov' and original-language fallbacks)."""
+    """Sidecar language tag (Kodi/media-server convention): the queue language when
+    it is a 2-letter code, else 'de' (covers '', 'ov' and original-language fallbacks)."""
     lang = (row["language"] or "").strip()
     return lang if len(lang) == 2 and lang.isalpha() else "de"
 
