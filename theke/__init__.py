@@ -16,13 +16,16 @@ import lzma
 import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
 from datetime import datetime, time, timezone
 
 from theke import core
+from theke import scheduler
 from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
                         DbError, DbLockedError, MIGRATIONS, db_connect,
                         db_get_meta, db_set_meta)
@@ -1733,21 +1736,23 @@ def _print_import(result):
         print(f'  line {e["line"]}: {e["input"]!r} -- {e["reason"]}')
 
 
-# -- update (phase 9: the wishlist automation orchestrator) -------------------
-# One unattended pass over the whole pipeline: refresh + enrich the mirror, then
-# for every open wish ('W') resolve its TMDB id, tag the matching rows and queue
-# the deduplicated download set. With queue_auto_approve the approved entries are
-# downloaded straight away (each finished wish is recorded as 'L' by the download
-# stage); otherwise the run stops at the approval gate. A single failing wish
-# never aborts the pass. Reuses the existing stage handlers verbatim.
+# -- run (phase 9 pass + phase 10 scheduler) ----------------------------------
+# _run_pass is one unattended pass over the whole pipeline: refresh + enrich the
+# mirror, then for every open wish ('W') resolve its TMDB id, tag the matching
+# rows and queue the deduplicated download set. With queue_auto_approve the
+# approved entries are downloaded straight away (each finished wish is recorded as
+# 'L' by the download stage); otherwise the run stops at the approval gate. A
+# single failing wish never aborts the pass. Reuses the existing stage handlers
+# verbatim. The scheduler (cmd_run) loops this body on the configured schedule;
+# `run --once` runs exactly one pass.
 
 def _ns(**kw) -> argparse.Namespace:
-    """A throwaway Namespace to drive a reused stage handler from update (each
+    """A throwaway Namespace to drive a reused stage handler from _run_pass (each
     reads only a few attributes)."""
     return argparse.Namespace(**kw)
 
 
-def cmd_update(conn, cfg, args: argparse.Namespace) -> dict:
+def _run_pass(conn, cfg) -> dict:
     """Run fetch -> enrich -> (match + queue) per wish -> download (when
     auto-approved). Returns one aggregated summary."""
     fetch = cmd_fetch(conn, cfg, _ns(force=False))
@@ -1778,6 +1783,60 @@ def cmd_update(conn, cfg, args: argparse.Namespace) -> dict:
     return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
             "list_added": list_added, "wishes": len(wishes), "failed": failed,
             "downloaded": downloaded, **totals}
+
+
+# -- scheduler (phase 10: loop _run_pass on a schedule) -----------------------
+# One process, one DB connection -- the single writer for its lifetime, shared by
+# a future in-process web UI (phase 14). The loop is theke.scheduler.run_loop; we
+# only inject the pass (one _run_pass) and the per-pass output sink. SIGINT/SIGTERM
+# request a clean stop after the current pass. `--once` is a single pass (the old
+# `update`), going through main's normal result printing.
+
+def cmd_run(conn, cfg, args: argparse.Namespace):
+    """Single pass (--once) or the scheduled loop. The loop streams one summary
+    per pass itself (returning None so main prints nothing extra); --once returns
+    the single summary for main to print."""
+    if args.once:
+        return _run_pass(conn, cfg)
+    stop = threading.Event()
+    _install_signal_handlers(stop)
+    log.info("scheduler started (run_schedule=%s)", cfg.run_schedule)
+    scheduler.run_loop(
+        pass_fn=lambda: _run_pass(conn, cfg),
+        on_result=lambda result: _emit_pass(conn, result, args.json),
+        schedule=scheduler.parse_schedule(cfg.run_schedule),
+        stop_event=stop)
+    log.info("scheduler stopped")
+    return None
+
+
+def _install_signal_handlers(stop: threading.Event):
+    """Wire SIGINT/SIGTERM to set the stop event for a clean shutdown after the
+    current pass. Best-effort: a signal unavailable on the platform (Windows
+    SIGTERM) or outside the main thread is skipped silently."""
+    def handler(signum, _frame):
+        log.info("signal %d received, stopping after the current pass", signum)
+        stop.set()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, AttributeError, OSError):
+            pass
+
+
+def _emit_pass(conn, result: dict, as_json: bool):
+    """Record the pass in the meta heartbeat and stream its summary live: one JSON
+    object per pass (JSONL) in --json, else a timestamped key=value block. stdout
+    is flushed so a long-running daemon stays followable."""
+    db_set_meta(conn, "run_last_finished", _now())
+    db_set_meta(conn, "run_last_result", json.dumps(result))
+    if as_json:
+        print(json.dumps(result), flush=True)
+    else:
+        print(f"-- pass {_now()}")
+        for key, value in result.items():
+            print(f"{key} = {value}")
+        sys.stdout.flush()
 
 
 # -- cli ----------------------------------------------------------------------
@@ -1995,7 +2054,8 @@ def build_parser() -> argparse.ArgumentParser:
     lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
     lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")
 
-    sub.add_parser("update", help="run the wishlist pipeline end to end", description="One unattended pass: fetch + enrich the mirror, import any configured tmdb_lists into the library (movies only, additive), then for every open wish ('W') match the TMDB id and stage the deduplicated download set. With queue_auto_approve set, the approved entries are downloaded straight away (recording each finished wish as 'L'); otherwise the run stops at the approval gate. A failing wish or list does not abort the pass. Progress is printed to stderr.")
+    runp = sub.add_parser("run", help="run the wishlist pipeline, once or on a schedule", description="Loop the whole wishlist pipeline on the configured schedule (run_schedule). One pass: fetch + enrich the mirror, import any configured tmdb_lists into the library (movies only, additive), then for every open wish ('W') match the TMDB id and stage the deduplicated download set; with queue_auto_approve the approved entries are downloaded straight away (recording each finished wish as 'L'), else the pass stops at the approval gate. A failing wish or list does not abort the pass, and a failing pass does not abort the loop. The process holds the single DB writer for its lifetime (a future in-process web UI shares it); SIGINT/SIGTERM stop it cleanly after the current pass. In --json each pass prints one JSON object (JSONL); progress goes to stderr. --once runs a single pass and exits.")
+    runp.add_argument("--once", action="store_true", help="run a single pass and exit (no scheduling)")
 
     _set_default_action(parser, "enrich",  csub, "run")
     _set_default_action(parser, "match",   msub, "run")
@@ -2093,9 +2153,9 @@ def main(argv=None) -> int:
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_library(conn, cfg, args)
                 finally: conn.close()
-            case "update":
+            case "run":
                 conn = db_connect(cfg.db_path)
-                try:     result = cmd_update(conn, cfg, args)
+                try:     result = cmd_run(conn, cfg, args)
                 finally: conn.close()
             case _: raise DbError(f"unhandled command: {args.command}")
 
@@ -2106,11 +2166,12 @@ def main(argv=None) -> int:
             print(f"error: {exc}", file=sys.stderr)
         return EXIT_LOCKED if isinstance(exc, DbLockedError) else EXIT_ERROR
 
-    if args.json:
-        print(json.dumps(result))
-    else:
-        for key, value in result.items():
-            print(f"{key} = {value}")
+    if result is not None:   # the scheduler loop streams its own per-pass output
+        if args.json:
+            print(json.dumps(result))
+        else:
+            for key, value in result.items():
+                print(f"{key} = {value}")
     return EXIT_OK
 
 

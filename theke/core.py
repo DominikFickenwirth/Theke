@@ -54,6 +54,7 @@ class Config:
     video_ext:            str   = "mp4"
     audio_ext:            str   = "aac"
     library_path:         str   = "movies/{Title} ({Year})/{Title} ({Year}).mp4"
+    run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
 
 
 def load_config(path: str | None, overrides: dict | None = None) -> Config:
@@ -96,7 +97,13 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
 
 # -- db -----------------------------------------------------------------------
 # Thin SQLite layer; keep all SQLite specifics here so the backend could be
-# swapped later. Single-user design: one process at a time owns the DB.
+# swapped later. Single-writer design: exactly one process writes the DB, but
+# other tools (DBBrowser, the web UI) may open it read-only at any time -- even
+# while the long-lived scheduler holds it. Two pieces make that work: the main DB
+# runs in WAL mode (readers and the one writer coexist), and the single-writer
+# claim is a separate sidecar lock file (db_path + "-lock") held exclusively for
+# the connection's lifetime -- never the main DB itself, which would lock readers
+# out. A second writer fails immediately with DbLockedError.
 
 class DbError(Exception):
     """Database problem other than locking (e.g. schema newer than code)."""
@@ -208,21 +215,55 @@ MIGRATIONS: list[tuple[str, ...]] = [
 ]
 
 
-def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
-    """Open (or create) the DB, take the exclusive lock, run pending migrations.
+class _Connection(sqlite3.Connection):
+    """Main-DB connection that also releases its sidecar writer lock on close, so
+    closing the DB the usual way frees the single-writer claim too."""
+    _writer_lock = None
 
-    The exclusive lock is held until close; a second process fails immediately
-    with DbLockedError instead of waiting.
+    def close(self):
+        if self._writer_lock is not None:
+            self._writer_lock.close()
+            self._writer_lock = None
+        super().close()
+
+
+def _acquire_writer_lock(db_path: str) -> sqlite3.Connection:
+    """Claim the single-writer lock on the sidecar file db_path + "-lock", held
+    for the returned connection's lifetime (EXCLUSIVE locking mode keeps the file
+    lock after COMMIT). Readers never touch this file, so the main DB stays open
+    to them. Raises DbLockedError if another process already holds it."""
+    lock = sqlite3.connect(db_path + "-lock", isolation_level=None)
+    try:
+        lock.execute("PRAGMA busy_timeout = 0")
+        lock.execute("PRAGMA locking_mode = EXCLUSIVE")
+        lock.execute("BEGIN EXCLUSIVE")
+        lock.execute("COMMIT")          # the exclusive file lock stays held
+    except sqlite3.OperationalError as exc:
+        lock.close()
+        if "database is locked" in str(exc):
+            raise DbLockedError(
+                f"database is in use by another process: {db_path}") from None
+        raise
+    return lock
+
+
+def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
+    """Open (or create) the DB, claim the single-writer lock, run pending
+    migrations. The writer lock (a sidecar file) is held until close; a second
+    writer fails immediately with DbLockedError instead of waiting. WAL mode keeps
+    the main DB readable by other tools while we hold it.
     """
     if migrations is None:
         migrations = MIGRATIONS
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    lock = _acquire_writer_lock(db_path)
+    conn = sqlite3.connect(db_path, isolation_level=None, factory=_Connection)
+    conn._writer_lock = lock            # released by _Connection.close
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 0")
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA locking_mode = EXCLUSIVE")
-        conn.execute("BEGIN EXCLUSIVE")  # lock stays held after COMMIT
+        conn.execute("PRAGMA journal_mode = WAL")   # readers coexist with us
+        conn.execute("BEGIN")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version > len(migrations):
             raise DbError(
@@ -237,14 +278,8 @@ def db_connect(db_path: str, migrations=None) -> sqlite3.Connection:
         except sqlite3.Error:
             conn.execute("ROLLBACK")
             raise
-    except sqlite3.OperationalError as exc:
-        conn.close()
-        if "database is locked" in str(exc):
-            raise DbLockedError(
-                f"database is in use by another process: {db_path}") from None
-        raise
     except BaseException:
-        conn.close()
+        conn.close()                    # frees the connection and the writer lock
         raise
     return conn
 
