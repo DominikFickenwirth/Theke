@@ -548,6 +548,32 @@ def test_parse_csv_empty_row_is_a_row_error():
     assert rows[0][0] == 2 and rows[0][2]["kind"] == "error"
 
 
+# -- import: file reading / encoding -----------------------------------------
+
+def test_read_import_file_utf8(tmp_path):
+    p = tmp_path / "u.csv"
+    p.write_bytes("Gruesse Grüße".encode("utf-8"))  # umlauts as utf-8
+    assert theke._read_import_file(str(p)) == "Gruesse Grüße"
+
+
+def test_read_import_file_cp1252_fallback(tmp_path):
+    p = tmp_path / "c.csv"
+    p.write_bytes(b"Gruesse Gr\xfc\xdfe")  # "Gruesse Gruesse" with cp1252 ue/sz
+    assert theke._read_import_file(str(p)) == "Gruesse Grüße"
+
+
+def test_import_csv_cp1252_file_resolves_title(tmp_path, monkeypatch):
+    stub_import(monkeypatch)
+    p = tmp_path / "wishes.csv"
+    p.write_bytes("title,year\nGrüße,2020\n".encode("cp1252"))
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=str(p), json=True))
+        assert result["added"] == 1 and result["failed"] == 0
+    finally:
+        conn.close()
+
+
 # -- cmd_library add by title ------------------------------------------------
 
 def test_library_add_by_title_resolves_tmdb_id(tmp_path, monkeypatch):
