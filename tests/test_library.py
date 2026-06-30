@@ -839,6 +839,33 @@ def test_search_title_wrong_year_lists_found_years(monkeypatch):
     assert "2000" in msg                 # the wanted year
 
 
+def test_search_title_retries_without_leading_article(monkeypatch):
+    # "Der Pate" yields nothing; the retry drops the article ("Pate") and hits.
+    calls = []
+    def fake(url, timeout=None):
+        calls.append(url)
+        payload = {"results": []} if "query=Der" in url else SEARCH
+        return json.dumps(payload).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    tid, title, year = theke._search_title(CFG, "Der Pate", 1981, 2)
+    assert tid == "9268"                     # SEARCH's first hit (id 9268, 1981)
+    assert len(calls) == 2                    # full title, then stripped retry
+    assert "query=Der+Pate" in calls[0]
+    assert "query=Pate" in calls[1]
+
+
+def test_search_title_no_article_does_not_retry(monkeypatch):
+    # No leading article -> no second query; 0 results stays a no-match error.
+    calls = []
+    def fake(url, timeout=None):
+        calls.append(url)
+        return json.dumps({"results": []}).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    with pytest.raises(ValueError):
+        theke._search_title(CFG, "Ghostfilm", 2000, 2)
+    assert len(calls) == 1
+
+
 def test_import_title_without_year_is_error(tmp_path, monkeypatch):
     # A txt title line with no "(YYYY)" must fail (no guessing without a year).
     stub_import(monkeypatch)
