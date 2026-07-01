@@ -350,6 +350,36 @@ def test_bulk_match_skips_trailers(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_bulk_match_persists_each_decision_before_abort(tmp_path, monkeypatch):
+    # A Ctrl+C mid-loop must leave already-decided rows persisted (no end-of-run
+    # batch): row m1 matches and commits, then row m2's search raises -> m1 stays
+    # '3', m2 untouched at '1'.
+    calls = {"search": 0}
+
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            calls["search"] += 1
+            if calls["search"] == 2:
+                raise KeyboardInterrupt
+            return json.dumps({"results": [
+                {"id": 1234, "title": "Das Boot", "release_date": "1981-09-17"}]
+            }).encode("utf-8")
+        return json.dumps(TMDB_BOOT).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)      # matches -> committed
+        insert_movie(conn, "m2", "Anderer Film", 2000, 6000)  # search raises Ctrl+C
+        with pytest.raises(KeyboardInterrupt):
+            bulk_match(conn, CFG)
+        assert status_of(conn, "m1") == "3"                   # persisted before abort
+        assert tuple(tmdb_of(conn, "m1")) == ("1234", 1.0)
+        assert status_of(conn, "m2") == "1"                   # never reached
+    finally:
+        conn.close()
+
+
 # -- find_matches (DB scan over category='Movie') ----------------------------
 
 def open_db(tmp_path):
