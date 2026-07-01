@@ -7,12 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 import theke
-from theke import Config, ConfigError, cmd_match, db_connect
+from theke import Config, ConfigError, cmd_match, cmd_tmdb, db_connect
 from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
-                         find_arte_links, pick_by_year, bulk_accept, bulk_match)
+                         find_arte_links, bulk_match,
+                         search_movies, resolve_one)
 
 
 # -- normalize / strip_articles ----------------------------------------------
@@ -199,40 +200,191 @@ def test_tmdb_movie_parses_titles_year_runtime(monkeypatch):
     assert meta["titles"] == ["Das Boot", "Das Boot - Director's Cut"]
 
 
-# -- bulk match: bulk_accept (pure gate; candidate pick -> pick_by_year) -----
+# -- search_movies / resolve_one (unified core: search+filter+detail+score) --
+
+def sres(mid, title, release):   # one raw /search/movie result
+    return {"id": mid, "title": title, "release_date": release}
 
 
-def brow(clean_title="Das Boot", year=1981, duration=8940, date="1985-01-01"):
-    return {"clean_title": clean_title, "year": year, "duration": duration, "date": date}
+def movie_search_stub(monkeypatch, results, details, *, total_pages=1, total_results=None):
+    """Stub http_get for the full core: /search/movie returns `results` (raw
+    result dicts) with pagination; /movie/<id> returns details[str(id)]. Counts
+    calls so a test can assert a candidate was pruned before its detail fetch."""
+    calls = {"search": 0, "movie": 0}
+
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            calls["search"] += 1
+            body = {"results": results, "total_pages": total_pages,
+                    "total_results": len(results) if total_results is None else total_results}
+            return json.dumps(body).encode("utf-8")
+        calls["movie"] += 1
+        mid = url.split("/movie/")[1].split("?")[0]
+        return json.dumps(details[mid]).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    return calls
 
 
-def test_bulk_accept_all_gates_pass():
-    a = bulk_accept(BOOT, brow(), 2)
-    assert a["accepted"] is True
-    assert a["confidence"] == 1.0   # exact title * year 1.0 * runtime 1.0
+def test_search_movies_single_hit_scored(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT})
+    res = search_movies(CFG, "Das Boot", year=1981, broadcast_year=1985, runtime=149)
+    assert res["total"] == 1 and res["truncated"] is False
+    assert res["matches"] == [{"tmdb_id": "1234", "title": "Das Boot",
+                               "year": 1981, "runtime": 149, "confidence": 1.0}]
 
 
-def test_bulk_accept_runtime_is_a_hard_gate():
-    # 120 min vs 149 min: above the clip floor (score_match would only soft-
-    # penalise, conf 0.9) but rel dist 0.194 > RUNTIME_TOLERANCE 0.15 -> reject.
-    assert bulk_accept(BOOT, brow(duration=7200), 2)["accepted"] is False
+def test_search_movies_broadcast_prefilters_before_detail(monkeypatch):
+    # aired 1978 (+-2 -> 1980); a 1981 release is post-broadcast -> dropped before
+    # any /movie detail fetch.
+    calls = movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                              {"1234": TMDB_BOOT})
+    res = search_movies(CFG, "Das Boot", broadcast_year=1978)
+    assert res["matches"] == []
+    assert calls["movie"] == 0
 
 
-def test_bulk_accept_rejects_when_runtime_missing():
-    assert bulk_accept({"titles": ["Das Boot"], "year": 1981, "runtime": None},
-                       brow(), 2)["accepted"] is False
-    assert bulk_accept(BOOT, brow(duration=None), 2)["accepted"] is False
+def test_search_movies_runtime_is_a_hard_gate(monkeypatch):
+    # wanted 90 min vs TMDB 149 min: rel dist 0.396 > RUNTIME_TOLERANCE -> no match
+    # (the detail is still fetched to learn the runtime).
+    calls = movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                              {"1234": TMDB_BOOT})
+    res = search_movies(CFG, "Das Boot", runtime=90)
+    assert res["matches"] == []
+    assert calls["movie"] == 1
 
 
-def test_bulk_accept_year_present_requires_tmdb_year():
-    # row has a year but the TMDB candidate has none -> cannot confirm -> reject.
-    assert bulk_accept({"titles": ["Das Boot"], "year": None, "runtime": 149},
-                       brow(year=1981), 2)["accepted"] is False
+def test_search_movies_year_window_prunes_before_detail(monkeypatch):
+    calls = movie_search_stub(
+        monkeypatch,
+        [sres(1234, "Das Boot", "1981-09-17"), sres(999, "Das Boot", "2013-05-01")],
+        {"1234": TMDB_BOOT, "999": {**TMDB_BOOT, "release_date": "2013-05-01"}})
+    res = search_movies(CFG, "Das Boot", year=1981)   # tol 2 -> 1979..1983
+    assert [m["tmdb_id"] for m in res["matches"]] == ["1234"]
+    assert calls["movie"] == 1   # the 2013 candidate is pruned before its detail
 
 
-def test_bulk_accept_rejects_release_after_broadcast():
-    # release 1981 but aired 1978 (+-2 -> 1980): a film cannot air before release.
-    assert bulk_accept(BOOT, brow(year=None, date="1978-01-01"), 2)["accepted"] is False
+def test_search_movies_yearless_returns_all_above_floor(monkeypatch):
+    movie_search_stub(
+        monkeypatch,
+        [sres(1234, "Das Boot", "1981-09-17"), sres(4321, "Das Boot", "1997-01-01")],
+        {"1234": TMDB_BOOT, "4321": {**TMDB_BOOT, "release_date": "1997-01-01"}})
+    res = search_movies(CFG, "Das Boot")   # no year -> both kept, popularity order
+    assert [m["tmdb_id"] for m in res["matches"]] == ["1234", "4321"]
+    assert all(m["confidence"] == 0.85 for m in res["matches"])   # no-year cap
+
+
+def test_search_movies_title_floor_drops_weak_hit(monkeypatch):
+    # TMDB fuzzy-returns an unrelated film; the title floor now rejects it.
+    movie_search_stub(monkeypatch, [sres(55, "Heat", "1995-12-15")],
+                      {"55": {"title": "Heat", "original_title": "Heat",
+                              "release_date": "1995-12-15", "runtime": 170,
+                              "alternative_titles": {"titles": []}}})
+    assert search_movies(CFG, "Das Boot")["matches"] == []
+
+
+def test_search_movies_truncated_when_multipage(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT}, total_pages=2, total_results=25)
+    res = search_movies(CFG, "Das Boot", year=1981)
+    assert res["truncated"] is True and res["total"] == 25
+    assert [m["tmdb_id"] for m in res["matches"]] == ["1234"]
+
+
+def test_search_movies_no_results(monkeypatch):
+    calls = movie_search_stub(monkeypatch, [], {})
+    assert search_movies(CFG, "Unknown Film") == {"matches": [], "total": 0,
+                                                  "truncated": False}
+    assert calls["movie"] == 0
+
+
+def test_search_movies_retries_without_leading_article(monkeypatch):
+    # first query (with "Der") empty; the retry without the article finds the film.
+    calls = {"n": 0}
+
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            calls["n"] += 1
+            hit = "Pate" in url and "Der" not in url   # article dropped on retry
+            results = [sres(238, "Der Pate", "1972-03-14")] if hit else []
+            return json.dumps({"results": results, "total_pages": 1,
+                               "total_results": len(results)}).encode("utf-8")
+        return json.dumps({"title": "Der Pate", "original_title": "The Godfather",
+                           "release_date": "1972-03-14", "runtime": 175,
+                           "alternative_titles": {"titles": []}}).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    res = search_movies(CFG, "Der Pate", year=1972)
+    assert [m["tmdb_id"] for m in res["matches"]] == ["238"]
+    assert calls["n"] == 2   # one with the article (empty), one without
+
+
+def test_resolve_one_single_hit(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT})
+    assert resolve_one(CFG, "Das Boot", year=1981, runtime=149) == {
+        "tmdb_id": "1234", "title": "Das Boot", "year": 1981, "confidence": 1.0}
+
+
+def test_resolve_one_none(monkeypatch):
+    movie_search_stub(monkeypatch, [], {})
+    assert resolve_one(CFG, "Nope") == {"error": "none"}
+
+
+def test_resolve_one_ambiguous(monkeypatch):
+    movie_search_stub(
+        monkeypatch,
+        [sres(1234, "Das Boot", "1981-09-17"), sres(4321, "Das Boot", "1997-01-01")],
+        {"1234": TMDB_BOOT, "4321": {**TMDB_BOOT, "release_date": "1997-01-01"}})
+    assert resolve_one(CFG, "Das Boot") == {"error": "ambiguous", "count": 2}
+
+
+def test_resolve_one_truncated(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT}, total_pages=2, total_results=25)
+    assert resolve_one(CFG, "Das Boot", year=1981) == {"error": "truncated", "total": 25}
+
+
+# -- cmd_tmdb (theke tmdb search) --------------------------------------------
+
+def targs(title="Das Boot", year=None, broadcast_year=None, runtime=None,
+          year_tolerance=None, tmdb_cmd="search"):
+    return SimpleNamespace(tmdb_cmd=tmdb_cmd, title=title, year=year,
+                           broadcast_year=broadcast_year, runtime=runtime,
+                           year_tolerance=year_tolerance)
+
+
+def test_cmd_tmdb_search_returns_matches(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT})
+    res = cmd_tmdb(CFG, targs(year=1981, runtime=149))
+    assert res["truncated"] is False
+    assert res["matches"] == [{"tmdb_id": "1234", "title": "Das Boot",
+                               "year": 1981, "runtime": 149, "confidence": 1.0}]
+
+
+def test_cmd_tmdb_search_truncated(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT}, total_pages=2, total_results=25)
+    res = cmd_tmdb(CFG, targs(year=1981))
+    assert res["truncated"] is True and res["total"] == 25
+
+
+def test_cmd_tmdb_requires_key():
+    with pytest.raises(ConfigError):
+        cmd_tmdb(Config(), targs())
+
+
+# -- search_movies hard gate (migrated from bulk_accept) ---------------------
+
+
+def test_search_movies_rejects_candidate_without_runtime(monkeypatch):
+    # a wanted runtime is mandatory: a TMDB candidate with no runtime cannot
+    # confirm it -> no match (the detail is fetched, then rejected).
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": {**TMDB_BOOT, "runtime": None}})
+    assert search_movies(CFG, "Das Boot", year=1981, runtime=149)["matches"] == []
 
 
 # -- bulk_match orchestrator (row-driven, DB + stubbed TMDB IO) --------------

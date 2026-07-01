@@ -192,21 +192,21 @@ def tmdb_movie(cfg, tmdb_id) -> dict:
             "original_language": data.get("original_language")}
 
 
-def tmdb_search(cfg, title) -> list:
-    """Search TMDB movies by title, popularity-ordered, as {tmdb_id, title,
-    year} candidates. The wanted year is NOT sent to the API (we want a tolerant
-    local match); pick_by_year refines the pick afterwards."""
+def _tmdb_search_page(cfg, title):
+    """One page of TMDB movie search as (candidates, total_results, total_pages):
+    candidates are {tmdb_id, title, year} (year from the release_date), in TMDB's
+    popularity order. The wanted year is NOT sent (tolerant local match)."""
     params = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
                         "query": title})
     url = f"{cfg.tmdb_api_url}/search/movie?{params}"
     data = json.loads(core.http_get(url, cfg.download_timeout).decode("utf-8"))
-    out = []
+    cands = []
     for r in data.get("results", []):
         rel = r.get("release_date") or ""
         year = int(rel[:4]) if rel[:4].isdigit() else None
-        out.append({"tmdb_id": str(r["id"]), "title": r.get("title") or "",
-                    "year": year})
-    return out
+        cands.append({"tmdb_id": str(r["id"]), "title": r.get("title") or "",
+                      "year": year})
+    return cands, data.get("total_results") or len(cands), data.get("total_pages") or 1
 
 
 def tmdb_list(cfg, list_id) -> list:
@@ -233,25 +233,90 @@ def tmdb_list(cfg, list_id) -> list:
     return items
 
 
-def pick_by_year(candidates, year, tolerance):
-    """Pick the one TMDB candidate to confirm for a wanted year: within
-    tolerance, the smallest year distance, ties keeping TMDB's popularity order
-    (candidates without a year are skipped once a year is wanted). Without a
-    wanted year only an unambiguous result counts: exactly one candidate, else
-    None (avoids guessing). None when nothing qualifies."""
-    if not candidates:
+# -- unified movie search (the one title->TMDB choke point) ------------------
+# search_movies does the whole job for every caller (tmdb search, library add/
+# import, match bulk): search + article retry, cheap year/broadcast prefilter,
+# per-survivor detail fetch, and full scoring (title floor + year + a hard
+# runtime gate). Callers only pass the signals they have and read the result.
+
+
+def _in_windows(cand_year, year, broadcast_year, tol) -> bool:
+    """Cheap pre-detail filter on a candidate's release year: inside the wanted
+    year window (undated candidates only survive when no year is wanted) and not
+    released past the broadcast year within tolerance (undated candidates
+    survive)."""
+    if year is not None and (cand_year is None or abs(cand_year - year) > tol):
+        return False
+    if broadcast_year is not None and cand_year is not None \
+            and cand_year > broadcast_year + tol:
+        return False
+    return True
+
+
+def _score_candidate(meta, title, year, runtime, tol):
+    """Confidence for one fetched candidate against the wanted title/year/runtime,
+    or None when a hard gate rejects it: score_match's title floor + year gate, a
+    wanted year needs a TMDB year to confirm, and a wanted runtime is mandatory
+    and within RUNTIME_TOLERANCE. `runtime` is in minutes."""
+    row = {"clean_title": title, "year": year,
+           "duration": runtime * 60 if runtime is not None else None}
+    s = score_match(meta, row, year_tolerance=tol)
+    if s["rejected"] or (year is not None and meta.get("year") is None):
         return None
-    if year is None:
-        return candidates[0] if len(candidates) == 1 else None
-    best, best_delta = None, None
-    for c in candidates:
-        if c["year"] is None:
+    if runtime is not None:
+        mr = meta.get("runtime")
+        if not mr or abs(runtime - mr) / mr > RUNTIME_TOLERANCE:
+            return None
+    return s["confidence"]
+
+
+def search_movies(cfg, title, *, year=None, broadcast_year=None, runtime=None,
+                  tolerance=None) -> dict:
+    """Resolve a movie title against TMDB, doing the whole job: search (retrying
+    without a leading article), drop candidates outside the year/broadcast
+    windows cheaply, then fetch each survivor's detail and fully score it (title
+    floor, year, runtime as a hard gate when a wanted runtime is given). Returns
+    {matches, total, truncated}: matches ({tmdb_id,title,year,runtime,confidence})
+    sorted by confidence desc (ties keep TMDB popularity), the raw total_results,
+    and whether results spilled past page 1 (truncated -> never a safe auto-match)."""
+    tol = cfg.match_year_tolerance if tolerance is None else tolerance
+    cands, total, pages = _tmdb_search_page(cfg, title)
+    if not cands:
+        stripped = _drop_article(title)
+        if stripped != title:
+            cands, total, pages = _tmdb_search_page(cfg, stripped)
+    scored = []
+    for i, c in enumerate(cands):
+        if not _in_windows(c["year"], year, broadcast_year, tol):
             continue
-        delta = abs(c["year"] - year)
-        if delta > tolerance or (best_delta is not None and delta >= best_delta):
-            continue
-        best, best_delta = c, delta
-    return best
+        meta = tmdb_movie(cfg, c["tmdb_id"])
+        conf = _score_candidate(meta, title, year, runtime, tol)
+        if conf is not None:
+            scored.append((-conf, i, {"tmdb_id": meta["tmdb_id"], "title": meta["title"],
+                                      "year": meta["year"], "runtime": meta["runtime"],
+                                      "confidence": conf}))
+    scored.sort(key=lambda s: (s[0], s[1]))
+    return {"matches": [s[2] for s in scored], "total": total, "truncated": pages > 1}
+
+
+def resolve_one(cfg, title, *, year=None, broadcast_year=None, runtime=None,
+                tolerance=None) -> dict:
+    """Auto-match adapter over search_movies: a single, non-truncated match ->
+    {tmdb_id,title,year,confidence}; otherwise a typed miss {error: 'none' |
+    'ambiguous'(+count) | 'truncated'(+total)}. Never raises (the tmdb search
+    command needs the structured result)."""
+    res = search_movies(cfg, title, year=year, broadcast_year=broadcast_year,
+                        runtime=runtime, tolerance=tolerance)
+    if res["truncated"]:
+        return {"error": "truncated", "total": res["total"]}
+    ms = res["matches"]
+    if not ms:
+        return {"error": "none"}
+    if len(ms) > 1:
+        return {"error": "ambiguous", "count": len(ms)}
+    m = ms[0]
+    return {"tmdb_id": m["tmdb_id"], "title": m["title"], "year": m["year"],
+            "confidence": m["confidence"]}
 
 
 def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
@@ -291,9 +356,10 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
 
 
 # -- bulk match (phase 15: row-driven, eager, hard-gated) --------------------
-# Reverse of the lazy id-driven match: search TMDB by a row's own title and
-# accept only on hard gates (title + mandatory runtime + confirmed year +
-# release-not-after-broadcast), so the eager catalog stays free of false hits.
+# Reverse of the lazy id-driven match: resolve a row's own title against TMDB
+# via the shared search core (resolve_one -- title + mandatory runtime +
+# confirmed year + release-not-after-broadcast), so the eager catalog stays free
+# of false hits.
 
 
 def _drop_article(title) -> str:
@@ -303,17 +369,6 @@ def _drop_article(title) -> str:
     return rest if rest and head.casefold() in ARTICLES else title
 
 
-def _search_candidates(cfg, title) -> list:
-    """TMDB search for a title, retrying without a leading article when the first
-    query finds nothing (mirrors library's _search_title)."""
-    cands = tmdb_search(cfg, title)
-    if not cands:
-        stripped = _drop_article(title)
-        if stripped != title:
-            cands = tmdb_search(cfg, stripped)
-    return cands
-
-
 def _broadcast_year(date):
     """The airing year from a mediathek `date` (leading 'YYYY...'); None when
     absent or unparseable."""
@@ -321,32 +376,16 @@ def _broadcast_year(date):
     return int(s) if s.isdigit() else None
 
 
-def bulk_accept(meta, row, tol) -> dict:
-    """Decide whether to eagerly tag `row` with TMDB `meta`, on hard gates (all
-    must hold): the lazy score must not reject (title floor + year within tol);
-    runtime is mandatory and within RUNTIME_TOLERANCE (not the soft lazy
-    confirmer); a row year needs a TMDB year to confirm against; and the release
-    year must not sit past the broadcast year (within tol). Returns
-    {"accepted", "confidence"} with the lazy confidence when accepted."""
-    s = score_match(meta, row, year_tolerance=tol)
-    runtime, dur = meta.get("runtime"), row["duration"]
-    my, ry = row["year"], meta.get("year")
-    by = _broadcast_year(row.get("date"))
-    ok = (not s["rejected"]
-          and runtime and dur and abs(dur / 60 - runtime) / runtime <= RUNTIME_TOLERANCE
-          and (my is None or ry is not None)
-          and (by is None or ry is None or ry <= by + tol))
-    return {"accepted": bool(ok), "confidence": s["confidence"] if ok else 0.0}
-
-
 def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
     """Eager, row-driven movie match (phase 15): for each enriched-and-untried
-    movie row ('1', non-trailer) search TMDB by its own clean_title, confirm on
-    the hard gates (pick_by_year + bulk_accept) and tag a confident hit '3' (with
-    tmdb_id) or mark the row '2' (bulk-attempted, no match -- skipped by later
-    bulk passes, still lazy-matchable). Deduplicates the search per distinct
-    title and caches TMDB movie lookups by id; `limit` caps rows per call so a
-    backlog drains over several passes. Returns {scanned, matched, attempted}."""
+    movie row ('1', non-trailer) resolve its own clean_title against TMDB via the
+    shared search core (resolve_one, hard-gated on title/year/broadcast/runtime)
+    and tag a single confident hit '3' (with tmdb_id + confidence) or mark the row
+    '2' (bulk-attempted, no match -- skipped by later bulk passes, still
+    lazy-matchable). Memoizes the resolution per identical (title, year,
+    broadcast, duration) so repeats cost no extra TMDB calls; `limit` caps rows
+    per call so a backlog drains over several passes. Returns {scanned, matched,
+    attempted}."""
     tol = cfg.match_year_tolerance if year_tolerance is None else year_tolerance
     start = time.perf_counter()
     sql = ("SELECT mediathek_id, clean_title, year, duration, date, tmdb_id "
@@ -356,20 +395,18 @@ def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
         sql += f" LIMIT {int(limit)}"
     rows = [dict(r) for r in conn.execute(sql)]
     log.info("bulk matching %d movie rows", len(rows))
-    searches, movies, matched = {}, {}, 0
+    resolved, matched = {}, 0
     for r in rows:
-        key = normalize(r["clean_title"])
-        if key not in searches:
-            searches[key] = _search_candidates(cfg, r["clean_title"])
-        cand = pick_by_year(searches[key], r["year"], tol)
+        by = _broadcast_year(r["date"])
+        rt = r["duration"] / 60 if r["duration"] else None
+        key = (normalize(r["clean_title"]), r["year"], by, r["duration"])
+        if key not in resolved:
+            resolved[key] = resolve_one(cfg, r["clean_title"], year=r["year"],
+                                        broadcast_year=by, runtime=rt, tolerance=tol)
+        res = resolved[key]
         tid, conf = None, None
-        if cand is not None and not (r["tmdb_id"] and r["tmdb_id"] != cand["tmdb_id"]):
-            cid = cand["tmdb_id"]
-            if cid not in movies:
-                movies[cid] = tmdb_movie(cfg, cid)
-            a = bulk_accept(movies[cid], r, tol)
-            if a["accepted"]:
-                tid, conf = cid, a["confidence"]
+        if "tmdb_id" in res and not (r["tmdb_id"] and r["tmdb_id"] != res["tmdb_id"]):
+            tid, conf = res["tmdb_id"], res["confidence"]
         # persist per row (autocommit): a Ctrl+C mid-loop keeps the done rows.
         if tid is not None:
             conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "

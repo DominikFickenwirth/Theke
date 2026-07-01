@@ -12,8 +12,7 @@ import pytest
 
 import theke
 from theke import *
-from theke import (cmd_library, cmd_queue, _run_pass, db_connect, main,
-                   tmdb_search, pick_by_year)
+from theke import cmd_library, cmd_queue, _run_pass, db_connect, main
 
 
 # -- helpers -----------------------------------------------------------------
@@ -46,9 +45,32 @@ def stub_tmdb(monkeypatch):
                         lambda url, timeout=None: json.dumps(TMDB).encode("utf-8"))
 
 
+def _detail_from_result(r):
+    """A minimal /movie detail synthesized from a raw search result: title +
+    release_date consistent with the search hit (so the shared search core's
+    title/year gates pass); runtime present but irrelevant when none is wanted."""
+    return {"title": r["title"], "original_title": r["title"],
+            "release_date": r.get("release_date", ""), "runtime": 100,
+            "alternative_titles": {"titles": []}}
+
+
+def _search_movie_fake(payload):
+    """http_get fake serving /search/movie (payload) plus /movie/<id> details
+    synthesized from the payload's results -- the shared resolve_one path fetches
+    a candidate's detail before scoring it."""
+    by_id = {str(r["id"]): _detail_from_result(r) for r in payload.get("results", [])}
+
+    def fake(url, timeout=None):
+        if "/search/movie" in url:
+            return json.dumps(payload).encode("utf-8")
+        mid = url.split("/movie/")[1].split("?")[0]
+        return json.dumps(by_id[mid]).encode("utf-8")
+
+    return fake
+
+
 def stub_search(monkeypatch, payload=SEARCH):
-    monkeypatch.setattr(theke.core, "http_get",
-                        lambda url, timeout=None: json.dumps(payload).encode("utf-8"))
+    monkeypatch.setattr(theke.core, "http_get", _search_movie_fake(payload))
 
 
 def insert_movie(conn, mediathek_id, tmdb_id="100", language="de", duration=6000,
@@ -103,11 +125,14 @@ def stub_import(monkeypatch):
     (404 -> raises), any other /movie/<id> is the valid TMDB film (title "Mein
     Film", year 2020), and /search/movie yields SEARCH (first hit id 9268, 1981)
     unless the query mentions 'Nonexistent' (then no results)."""
+    by_id = {str(r["id"]): _detail_from_result(r) for r in SEARCH["results"]}
+
     def fake(url, timeout=None):
         if "/movie/999" in url:
             raise RuntimeError("404 Not Found")
-        if "/movie/" in url:
-            return json.dumps(TMDB).encode("utf-8")
+        if "/movie/" in url:   # search hits are title/year-consistent, ids elsewhere -> TMDB
+            mid = url.split("/movie/")[1].split("?")[0]
+            return json.dumps(by_id.get(mid, TMDB)).encode("utf-8")
         if "/search/movie" in url:
             payload = {"results": []} if "Nonexistent" in url else SEARCH
             return json.dumps(payload).encode("utf-8")
@@ -392,58 +417,6 @@ def test_library_list_filters_by_status(tmp_path, monkeypatch):
         conn.close()
 
 
-# -- tmdb_search / pick_by_year (title -> tmdb_id resolution) ----------------
-
-def test_tmdb_search_parses_results(monkeypatch):
-    captured = {}
-    def fake(url, timeout=None):
-        captured["url"] = url
-        return json.dumps(SEARCH).encode("utf-8")
-    monkeypatch.setattr(theke.core, "http_get", fake)
-    res = tmdb_search(CFG, "Die Klapperschlange")
-    assert res == [
-        {"tmdb_id": "9268", "title": "Die Klapperschlange", "year": 1981},
-        {"tmdb_id": "999",  "title": "Escape Remake",       "year": 2013},
-    ]
-    assert "/search/movie?" in captured["url"]
-    assert "query=Die+Klapperschlange" in captured["url"]
-
-
-# year, popularity order: A 2010, B 1981, C 1983 (B before C).
-CANDS = [{"tmdb_id": "1", "title": "A", "year": 2010},
-         {"tmdb_id": "2", "title": "B", "year": 1981},
-         {"tmdb_id": "3", "title": "C", "year": 1983}]
-
-
-def test_pick_by_year_closest_within_tolerance():
-    assert pick_by_year(CANDS, 1981, 5)["tmdb_id"] == "2"   # delta 0
-
-
-def test_pick_by_year_ties_keep_popularity_order():
-    # 1982: B and C are both delta 1; B is more popular (earlier) -> "2".
-    assert pick_by_year(CANDS, 1982, 2)["tmdb_id"] == "2"
-
-
-def test_pick_by_year_none_when_all_out_of_tolerance():
-    assert pick_by_year(CANDS, 1990, 2) is None   # deltas 20/9/7
-
-
-def test_pick_by_year_no_year_only_when_single_candidate():
-    only = [{"tmdb_id": "9", "title": "X", "year": 2000}]
-    assert pick_by_year(only, None, 2)["tmdb_id"] == "9"   # exactly one -> take it
-    assert pick_by_year(CANDS, None, 2) is None            # ambiguous -> no match
-
-
-def test_pick_by_year_skips_candidates_without_year():
-    cands = [{"tmdb_id": "1", "title": "A", "year": None},
-             {"tmdb_id": "2", "title": "B", "year": 1981}]
-    assert pick_by_year(cands, 1981, 2)["tmdb_id"] == "2"
-
-
-def test_pick_by_year_empty():
-    assert pick_by_year([], 1981, 2) is None
-
-
 # -- import: format detection ------------------------------------------------
 
 def test_detect_format_by_extension():
@@ -607,9 +580,10 @@ def test_read_import_file_cp1252_fallback(tmp_path):
 
 
 def test_import_csv_cp1252_file_resolves_title(tmp_path, monkeypatch):
-    stub_import(monkeypatch)
+    stub_search(monkeypatch, payload={"results": [
+        {"id": 500, "title": "Grüße", "release_date": "1981-01-01"}]})
     p = tmp_path / "wishes.csv"
-    p.write_bytes("title,year\nGrüße,1981\n".encode("cp1252"))  # SEARCH hit is 1981
+    p.write_bytes("title,year\nGrüße,1981\n".encode("cp1252"))  # the hit is 1981
     conn = open_db(tmp_path)
     try:
         result = cmd_library(conn, CFG, libargs("import", path=str(p), json=True))
@@ -620,7 +594,8 @@ def test_import_csv_cp1252_file_resolves_title(tmp_path, monkeypatch):
 
 def test_import_csv_semicolon_cp1252_file(tmp_path, monkeypatch):
     # The real lfi2.csv case: cp1252 bytes AND a ';' separator.
-    stub_import(monkeypatch)
+    stub_search(monkeypatch, payload={"results": [
+        {"id": 500, "title": "Grüße", "release_date": "1981-01-01"}]})
     p = tmp_path / "wishes.csv"
     p.write_bytes("title;year\nGrüße;1981\n".encode("cp1252"))
     conn = open_db(tmp_path)
@@ -698,12 +673,15 @@ def test_library_add_by_title_yearless_single_candidate_resolves(tmp_path, monke
 
 
 def test_library_add_by_title_yearless_multiple_candidates_raises(tmp_path, monkeypatch):
-    # No --year and several hits -> ambiguous, raises (no most-popular guess).
-    stub_search(monkeypatch)   # two results
+    # No --year and two hits sharing the searched title -> both pass the floor ->
+    # ambiguous, raises (no most-popular guess).
+    stub_search(monkeypatch, payload={"results": [
+        {"id": 9268, "title": "Die Klapperschlange", "release_date": "1981-04-22"},
+        {"id": 9269, "title": "Die Klapperschlange", "release_date": "1997-01-01"}]})
     conn = open_db(tmp_path)
     try:
         with pytest.raises(ValueError):
-            cmd_library(conn, CFG, libargs("add", title="Escape"))
+            cmd_library(conn, CFG, libargs("add", title="Die Klapperschlange"))
     finally:
         conn.close()
 
@@ -741,14 +719,15 @@ def test_library_add_by_tmdb_logs_resolution(tmp_path, monkeypatch, caplog):
 
 
 def test_library_add_by_title_logs_before_after(tmp_path, monkeypatch, caplog):
-    # --title logs the searched title (before) and the resolved hit (after).
+    # --title logs the searched title (before) and the resolved hit (after); the
+    # article-less query still resolves the article-carrying TMDB title.
     stub_search(monkeypatch)   # resolves to 9268 "Die Klapperschlange" (1981)
     conn = open_db(tmp_path)
     try:
         with caplog.at_level(logging.INFO, logger="theke"):
-            cmd_library(conn, CFG, libargs("add", title="Snake Movie", year=1981))
+            cmd_library(conn, CFG, libargs("add", title="Klapperschlange", year=1981))
         msgs = " ".join(r.getMessage() for r in caplog.records)
-        assert "Snake Movie" in msgs           # the searched title (before)
+        assert "'Klapperschlange'" in msgs     # the searched title (before)
         assert "Die Klapperschlange" in msgs   # the resolved title (after)
         assert "9268" in msgs                  # the resolved id
     finally:
@@ -896,7 +875,13 @@ def test_import_human_output_lists_errors(tmp_path, monkeypatch, capsys):
         conn.close()
 
 
-# -- import: informative resolution failures ---------------------------------
+# -- _search_title: the raising resolve_one adapter --------------------------
+
+def test_search_title_single_hit_resolves(monkeypatch):
+    stub_search(monkeypatch, payload=SEARCH_ONE)
+    assert theke._search_title(CFG, "Die Klapperschlange", 1981, 2) == \
+        ("9268", "Die Klapperschlange", 1981)
+
 
 def test_search_title_no_results_says_no_match(monkeypatch):
     # 0 candidates -> the message must name the title and "no ... match".
@@ -907,68 +892,51 @@ def test_search_title_no_results_says_no_match(monkeypatch):
     assert "no" in msg.lower() and "match" in msg.lower() and "Ghostfilm" in msg
 
 
-def test_search_title_wrong_year_lists_found_years(monkeypatch):
-    # SEARCH has two candidates (1981, 2013); wanting 2000 +-2 excludes both.
+def test_search_title_wrong_year_is_a_no_match(monkeypatch):
+    # SEARCH's candidates (1981, 2013) are both outside 2000 +-2 -> no match; the
+    # message names the title and the wanted year.
     stub_search(monkeypatch)
     with pytest.raises(ValueError) as exc:
         theke._search_title(CFG, "Die Klapperschlange", 2000, 2)
     msg = str(exc.value)
-    assert msg.startswith("2 ")          # the candidate count is reported
-    assert "1981" in msg and "2013" in msg   # the years that were found
-    assert "2000" in msg                 # the wanted year
-
-
-def test_search_title_retries_without_leading_article(monkeypatch):
-    # "Der Pate" yields nothing; the retry drops the article ("Pate") and hits.
-    calls = []
-    def fake(url, timeout=None):
-        calls.append(url)
-        payload = {"results": []} if "query=Der" in url else SEARCH
-        return json.dumps(payload).encode("utf-8")
-    monkeypatch.setattr(theke.core, "http_get", fake)
-    tid, title, year = theke._search_title(CFG, "Der Pate", 1981, 2)
-    assert tid == "9268"                     # SEARCH's first hit (id 9268, 1981)
-    assert len(calls) == 2                    # full title, then stripped retry
-    assert "query=Der+Pate" in calls[0]
-    assert "query=Pate" in calls[1]
-
-
-def test_search_title_no_article_does_not_retry(monkeypatch):
-    # No leading article -> no second query; 0 results stays a no-match error.
-    calls = []
-    def fake(url, timeout=None):
-        calls.append(url)
-        return json.dumps({"results": []}).encode("utf-8")
-    monkeypatch.setattr(theke.core, "http_get", fake)
-    with pytest.raises(ValueError):
-        theke._search_title(CFG, "Ghostfilm", 2000, 2)
-    assert len(calls) == 1
+    assert "Die Klapperschlange" in msg and "2000" in msg
 
 
 def test_search_title_yearless_single_candidate_resolves(monkeypatch):
     # No year given but exactly one TMDB hit -> take it (match bulk's rule).
     stub_search(monkeypatch, payload=SEARCH_ONE)
-    tid, title, year = theke._search_title(CFG, "Die Klapperschlange", None, 2)
-    assert (tid, title, year) == ("9268", "Die Klapperschlange", 1981)
+    assert theke._search_title(CFG, "Die Klapperschlange", None, 2) == \
+        ("9268", "Die Klapperschlange", 1981)
 
 
 def test_search_title_yearless_multiple_candidates_raises(monkeypatch):
-    # No year and more than one hit -> ambiguous, no guessing; the message names
-    # the count and the title.
-    stub_search(monkeypatch)   # SEARCH has two results
+    # No year and two hits sharing the title -> both pass the floor -> ambiguous;
+    # the message names the count and the title.
+    stub_search(monkeypatch, payload={"results": [
+        {"id": 9268, "title": "Die Klapperschlange", "release_date": "1981-04-22"},
+        {"id": 9269, "title": "Die Klapperschlange", "release_date": "1997-01-01"}]})
     with pytest.raises(ValueError) as exc:
-        theke._search_title(CFG, "Escape", None, 2)
+        theke._search_title(CFG, "Die Klapperschlange", None, 2)
     msg = str(exc.value)
-    assert msg.startswith("2 ") and "Escape" in msg
+    assert msg.startswith("2 ") and "Die Klapperschlange" in msg
+
+
+def test_search_title_truncated_says_too_many(monkeypatch):
+    # Results spilled past page 1 -> refuse with a 'too many' message.
+    def fake(url, timeout=None):
+        if "/search/movie" in url:
+            return json.dumps({"results": SEARCH_ONE["results"], "total_pages": 2,
+                               "total_results": 30}).encode("utf-8")
+        return json.dumps(_detail_from_result(SEARCH_ONE["results"][0])).encode("utf-8")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    with pytest.raises(ValueError) as exc:
+        theke._search_title(CFG, "Die Klapperschlange", 1981, 2)
+    assert "too many" in str(exc.value).lower()
 
 
 def test_import_yearless_title_single_match_resolves(tmp_path, monkeypatch):
     # A yearless title with exactly one TMDB hit is imported (match bulk's rule).
-    def fake(url, timeout=None):
-        if "/search/movie" in url:
-            return json.dumps(SEARCH_ONE).encode("utf-8")
-        raise AssertionError(f"unexpected url {url}")
-    monkeypatch.setattr(theke.core, "http_get", fake)
+    monkeypatch.setattr(theke.core, "http_get", _search_movie_fake(SEARCH_ONE))
     path = write_file(tmp_path, "wishes.txt", "Die Klapperschlange")
     conn = open_db(tmp_path)
     try:
