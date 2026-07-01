@@ -1669,6 +1669,7 @@ def _library_scan(conn, cfg, args) -> dict:
         raise ConfigError("library scan needs library_root (set it in the config or pass --root)")
     if not os.path.isdir(root):
         raise ConfigError(f"library_root is not a readable directory: {root}")
+    log.info("scanning library at %s", root)
     scan_start = _now()
     totals = {"scanned": 0, "added": 0, "updated": 0, "moved": 0,
               "duplicates": [], "unresolved": [], "ignored": 0, "deleted": 0}
@@ -1991,18 +1992,19 @@ def _library_import(conn, cfg, args) -> dict:
     tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
     resolved, errors = [], []
     total = len(entries)
+    log.info("importing %d entries from %s", total, args.path)
     for n, (lineno, raw, entry) in enumerate(entries, 1):
-        log.info("[%d/%d] line %d: %s", n, total, lineno, raw)
         if entry["kind"] == "error":
-            log.warning("  line %d skipped: %s", lineno, entry["reason"])
+            log.warning("[%d/%d] line %d: %s -- skipped: %s", n, total, lineno, raw, entry["reason"])
             errors.append({"line": lineno, "input": raw, "reason": entry["reason"]})
             continue
         try:
             tid, title, year = _resolve_entry(cfg, entry, tol)
-            log.info("  -> %s", _resolved_label(tid, title, year))   # what it resolved to
+            log.info("[%d/%d] line %d: %s -> %s", n, total, lineno, raw,
+                     _resolved_label(tid, title, year))         # one line: input -> resolution
             resolved.append((tid, title, year))
         except Exception as exc:
-            log.warning("  line %d failed: %s", lineno, exc)
+            log.warning("[%d/%d] line %d: %s -- failed: %s", n, total, lineno, raw, exc)
             errors.append({"line": lineno, "input": raw, "reason": str(exc)})
     result = {**_insert_wishes(conn, resolved), "failed": len(errors), "errors": errors}
     if args.json:
@@ -2052,6 +2054,7 @@ def _run_pass(conn, cfg) -> dict:
     wishes = [r["tmdb_id"] for r in
               conn.execute("SELECT tmdb_id FROM library WHERE status='W'")]
     failed = 0
+    log.info("matching + queueing %d wishes", len(wishes))
     for tid in wishes:
         try:
             match = _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
