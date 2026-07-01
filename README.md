@@ -917,6 +917,13 @@ Default: `["start", 3600]` (sofort, dann stündlich). Überrennt ein langer Pass
 mehrere Ticks, werden die verpassten zu **einem** Folgepass zusammengefasst
 (Überlappung ist ausgeschlossen -- der Loop ist Single-Thread).
 
+Die config wird **vor jedem Pass neu aus der Datei gelesen**, sodass Änderungen
+(z. B. an `tmdb_lists` oder `queue_auto_approve`) ohne Neustart wirken; eine
+gerade unlesbare Datei (mitten im Speichern erwischt) beendet die Schleife nicht,
+sondern behält die letzte gültige config bei. `run_schedule` und die
+DB-Verbindung stehen dagegen für die Prozesslaufzeit fest (eine Zeitplanänderung
+greift erst nach Neustart).
+
 Der Prozess hält die **einzige DB-Schreibverbindung** für seine Laufzeit (eine
 spätere Web-UI im selben Prozess teilt sie sich); ein zweiter schreibender
 `theke`-Aufruf scheitert solange am DB-Lock. `SIGINT`/`SIGTERM` (Strg+C bzw.
@@ -982,8 +989,9 @@ docker compose logs -f            # Scheduler-Ausgabe (ein JSON-Objekt pro Pass)
 
 Beim ersten Start legt `theke` selbst eine Start-`theke.json` mit Defaults in
 `/config` an (die per `--config` angegebene Datei fehlt noch). Danach: Datei
-anpassen (v.a. `tmdb_lists` / `run_schedule`) und den Container neu starten.
-Einzelne Kommandos lassen sich im laufenden Container ausführen, z.B.:
+anpassen (v.a. `tmdb_lists` / `run_schedule`) -- der Scheduler liest sie vor
+jedem Pass neu; nur eine Änderung an `run_schedule` erfordert einen Neustart des
+Containers. Einzelne Kommandos lassen sich im laufenden Container ausführen, z.B.:
 
 ```sh
 docker compose exec theke theke --config /config/theke.json --json config
