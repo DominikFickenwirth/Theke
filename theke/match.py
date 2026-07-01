@@ -364,38 +364,30 @@ def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
         sql += f" LIMIT {int(limit)}"
     rows = [dict(r) for r in conn.execute(sql)]
     log.info("bulk matching %d movie rows", len(rows))
-    searches, movies, decisions = {}, {}, []
+    searches, movies, matched = {}, {}, 0
     for r in rows:
         key = normalize(r["clean_title"])
         if key not in searches:
             searches[key] = _search_candidates(cfg, r["clean_title"])
         cand = bulk_pick(searches[key], r["year"], tol)
-        accepted = False
+        tid, conf = None, None
         if cand is not None and not (r["tmdb_id"] and r["tmdb_id"] != cand["tmdb_id"]):
-            tid = cand["tmdb_id"]
-            if tid not in movies:
-                movies[tid] = tmdb_movie(cfg, tid)
-            a = bulk_accept(movies[tid], r, tol)
-            accepted = a["accepted"]
-            if accepted:
-                decisions.append((r["mediathek_id"], tid, a["confidence"]))
-        if not accepted:
-            decisions.append((r["mediathek_id"], None, None))
+            cid = cand["tmdb_id"]
+            if cid not in movies:
+                movies[cid] = tmdb_movie(cfg, cid)
+            a = bulk_accept(movies[cid], r, tol)
+            if a["accepted"]:
+                tid, conf = cid, a["confidence"]
+        # persist per row (autocommit): a Ctrl+C mid-loop keeps the done rows.
+        if tid is not None:
+            conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
+                         "status='3' WHERE mediathek_id=?", (tid, conf, r["mediathek_id"]))
+            matched += 1
+        else:
+            conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id=?",
+                         (r["mediathek_id"],))
         log.info("bulk %s '%s' (%s): %s", r["mediathek_id"][:7], r["clean_title"],
-                 r["year"], "matched" if accepted else "no match")
-    conn.execute("BEGIN")
-    try:
-        for mid, tid, conf in decisions:
-            if tid is not None:
-                conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
-                             "status='3' WHERE mediathek_id=?", (tid, conf, mid))
-            else:
-                conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id=?", (mid,))
-        conn.execute("COMMIT")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    matched = sum(1 for _, tid, _ in decisions if tid is not None)
+                 r["year"], "matched" if tid is not None else "no match")
     log.debug("bulk_match: %d rows -> %d matched, %.2fs", len(rows), matched,
               time.perf_counter() - start)
     return {"scanned": len(rows), "matched": matched, "attempted": len(rows) - matched}
