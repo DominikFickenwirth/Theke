@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from functools import lru_cache
 from urllib.parse import urlencode
 
 from theke import core   # http_get; via the module so theke.core.http_get patches apply
@@ -56,22 +57,29 @@ def _forms(s: str) -> list:
     return [s] if stripped == s else [s, stripped]
 
 
+@lru_cache(maxsize=1 << 17)
+def _match_forms(title) -> tuple:
+    """A title's comparison forms as (normalized_string, token_tuple) pairs (full
+    + article-stripped). Cached so a row's clean_title is normalized once per
+    process, not once per row per wish (the run-pass hot path)."""
+    return tuple((f, tuple(f.split())) for f in _forms(normalize(title)))
+
+
 # -- title similarity --------------------------------------------------------
 
-def _is_token_run(short: list, long: list) -> bool:
+def _is_token_run(short, long) -> bool:
     """True if `short` is a contiguous run of tokens inside `long`."""
     if not short or len(short) > len(long):
         return False
     return any(long[i:i + len(short)] == short for i in range(len(long) - len(short) + 1))
 
 
-def _pair_sim(a: str, b: str) -> float:
-    """Similarity of two normalized strings: exact, whole-token containment with
-    enough coverage (so a short franchise name inside a long title does not
-    over-score), else a character-level difflib ratio."""
+def _pair_sim(a, ta, b, tb) -> float:
+    """Similarity of two normalized strings (with their pre-split token tuples):
+    exact, whole-token containment with enough coverage (so a short franchise
+    name inside a long title does not over-score), else a difflib ratio."""
     if a == b:
         return 1.0
-    ta, tb = a.split(), b.split()
     if _is_token_run(ta, tb) or _is_token_run(tb, ta):
         if min(len(ta), len(tb)) / max(len(ta), len(tb)) >= SUBSTR_COVERAGE:
             return SUBSTR_SIM
@@ -81,12 +89,12 @@ def _pair_sim(a: str, b: str) -> float:
 def title_similarity(tmdb_titles, clean_title) -> float:
     """Best similarity of any TMDB title variant against clean_title, each
     compared in full and article-stripped form (handles missing/extra article)."""
-    clean_forms = _forms(normalize(clean_title))
+    clean_forms = _match_forms(clean_title)
     best = 0.0
     for t in tmdb_titles:
-        for tf in _forms(normalize(t)):
-            for cf in clean_forms:
-                best = max(best, _pair_sim(tf, cf))
+        for tf, tt in _match_forms(t):
+            for cf, ct in clean_forms:
+                best = max(best, _pair_sim(tf, tt, cf, ct))
                 if best == 1.0:
                     return 1.0
     return best
