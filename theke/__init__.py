@@ -34,7 +34,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
-                         pick_by_year, bulk_match, ARTICLES)
+                         pick_by_year, bulk_match, search_movies, resolve_one, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import index
@@ -872,6 +872,35 @@ def _enrich_dist_cmd(conn, args) -> dict:
 # Wish-first: resolve a TMDB id to its title variants/year/runtime, then tag the
 # matching movie rows with tmdb_id + match_confidence. `run` writes; `show` is a
 # read-only score explainer for tuning. Heavy lifting lives in theke.match.
+
+def cmd_tmdb(cfg, args: argparse.Namespace) -> dict:
+    """Dispatch a tmdb action (DB-free -- pure TMDB queries). `search` resolves a
+    title against TMDB via the shared search_movies core. Needs a TMDB API key."""
+    if not cfg.tmdb_api_key:
+        raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
+    match args.tmdb_cmd:
+        case "search": return _tmdb_search_cmd(cfg, args)
+        case _: raise DbError(f"unhandled tmdb action: {args.tmdb_cmd}")
+
+
+def _tmdb_search_cmd(cfg, args) -> dict:
+    """Resolve --title (+ optional --year/--broadcast-year/--runtime) to matching
+    TMDB movies via search_movies, using the shared year tolerance. Logs one line
+    per match to stderr, or 'too many matches' when the results spilled past page
+    1. Returns the raw {matches, total, truncated}."""
+    tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
+    res = search_movies(cfg, args.title, year=args.year,
+                        broadcast_year=args.broadcast_year, runtime=args.runtime,
+                        tolerance=tol)
+    if res["truncated"]:
+        log.info("too many matches for %r: %d total -- refine the search",
+                 args.title, res["total"])
+    else:
+        log.info("%d match(es) for %r", len(res["matches"]), args.title)
+        for m in res["matches"]:
+            log.info("  %s  %r (%s)", m["tmdb_id"], m["title"], m["year"])
+    return res
+
 
 def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
     """Dispatch a match action: `run` tags rows, `show` explains scores,
@@ -2364,6 +2393,15 @@ def build_parser() -> argparse.ArgumentParser:
     msho.add_argument("-y", "--year-tolerance", type=int, metavar="N", dest="year_tolerance",           help="accepted production-year difference for movies (default: config match_year_tolerance)")
     msho.add_argument("-l", "--limit",    type=int, default=20, metavar="N",                            help="max candidates to list (default 20)")
 
+    tmdbp = sub.add_parser("tmdb", help="query TMDB directly (search)", description="Direct TMDB queries via the shared movie-search core. search resolves a title (+ optional year/broadcast-year/runtime) to the matching TMDB movies, or reports 'too many' when results spill past page 1. DB-free; needs a TMDB key.")
+    tsub = tmdbp.add_subparsers(dest="tmdb_cmd", required=True, metavar="action")
+    tsea = tsub.add_parser("search", help="resolve a title to matching TMDB movies (default)", description="Search TMDB by --title (retrying without a leading article), drop candidates outside the year/broadcast windows, then fully score the rest (title floor, year, runtime as a hard gate when --runtime is given). Lists the matches; 'too many matches' when results spill past page 1.")
+    tsea.add_argument("-t", "--title",          required=True, metavar="TITLE",           help="movie title to resolve")
+    tsea.add_argument("-y", "--year",           type=int, metavar="YEAR",                 help="wanted production year (tolerant by --year-tolerance)")
+    tsea.add_argument("-b", "--broadcast-year", type=int, dest="broadcast_year", metavar="YEAR", help="airing year; drops TMDB releases after it (within tolerance)")
+    tsea.add_argument("-r", "--runtime",        type=int, metavar="MIN",                  help="runtime in minutes; a hard gate when given")
+    tsea.add_argument(      "--year-tolerance", type=int, dest="year_tolerance", metavar="N", help="accepted year difference (default: config match_year_tolerance)")
+
     queuep = sub.add_parser("queue", help="stage and review the download queue", description="Stage downloads into the review queue by tmdb_id (deduplicated) or mediathek_id (direct), and manage them. DB-only: nothing here touches the filesystem.")
     qsub = queuep.add_subparsers(dest="queue_cmd", required=True, metavar="action")
     qadd = qsub.add_parser("add", help="stage downloads by tmdb_id or mediathek_id", description="Stage downloads. --tmdb dedups a matched film's many rows to the minimal download set (best quality per whitelisted language, shared video flagged for remux); --mediathek-id queues one row directly. New entries are 'proposed' unless queue_auto_approve is set.")
@@ -2449,6 +2487,7 @@ def build_parser() -> argparse.ArgumentParser:
     _set_default_action(parser, "config",  cfgsub, "show")
     _set_default_action(parser, "enrich",  csub, "run")
     _set_default_action(parser, "match",   msub, "run")
+    _set_default_action(parser, "tmdb",    tsub, "search")
     _set_default_action(parser, "queue",   qsub, "list")
     _set_default_action(parser, "library", lsub, "list")
     return parser
@@ -2547,6 +2586,8 @@ def main(argv=None) -> int:
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_match(conn, cfg, args)
                 finally: conn.close()
+            case "tmdb":
+                result = cmd_tmdb(cfg, args)
             case "queue":
                 conn = db_connect(cfg.db_path)
                 try:     result = cmd_queue(conn, cfg, args)
