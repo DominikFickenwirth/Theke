@@ -5,10 +5,14 @@
 # only IO and goes through core.http_get (monkeypatched in tests).
 import difflib
 import json
+import logging
 import re
+import time
 from urllib.parse import urlencode
 
 from theke import core   # http_get; via the module so theke.core.http_get patches apply
+
+log = logging.getLogger("theke")   # scan timings at DEBUG (theke run --verbose)
 
 # Scoring knobs. Title is a gate (below the floor is no match); year is a near-
 # hard gate (production year assumed); runtime is a soft confirmer.
@@ -283,10 +287,12 @@ def find_matches(conn, tmdb_meta, min_conf, year_tolerance=YEAR_TOLERANCE) -> li
     """Scan the movie subset, score each row (accepting years within
     year_tolerance), return the matches (confidence >= min_conf, not rejected)
     sorted by confidence desc, then mediathek_id."""
+    start = time.perf_counter()
     rows = conn.execute("SELECT mediathek_id, clean_title, year, duration, flags "
                         "FROM mediathek WHERE category='Movie' AND status='1'")
-    out = []
+    out, scanned = [], 0
     for r in rows:
+        scanned += 1
         if r["flags"] and "T" in r["flags"]:   # trailers are never the wanted film
             continue
         s = score_match(tmdb_meta, r, year_tolerance)
@@ -296,6 +302,8 @@ def find_matches(conn, tmdb_meta, min_conf, year_tolerance=YEAR_TOLERANCE) -> li
                     "confidence": s["confidence"], "title_sim": s["title_sim"],
                     "year_delta": s["year_delta"], "runtime_delta": s["runtime_delta"]})
     out.sort(key=lambda m: (-m["confidence"], m["mediathek_id"]))
+    log.debug("find_matches: scanned %d Movie rows -> %d candidates, %.2fs",
+              scanned, len(out), time.perf_counter() - start)
     return out
 
 
@@ -369,9 +377,11 @@ def find_arte_links(conn, anchors, exclude_ids) -> list:
     row inherits its anchor's confidence. Sorted by video-id, then mediathek_id."""
     if not anchors:
         return []
-    groups = {}
+    start = time.perf_counter()
+    groups, scanned = {}, 0
     for r in conn.execute("SELECT mediathek_id, clean_title, url_website FROM "
                           "mediathek WHERE sender LIKE 'ARTE.%' AND status='1'"):
+        scanned += 1
         vid = arte_video_id(r["url_website"])
         if vid in anchors:
             groups.setdefault(vid, []).append(r)
@@ -385,4 +395,6 @@ def find_arte_links(conn, anchors, exclude_ids) -> list:
             out.append({"mediathek_id": r["mediathek_id"],
                         "clean_title": r["clean_title"],
                         "confidence": anchors[vid], "arte_video_id": vid})
+    log.debug("find_arte_links: scanned %d ARTE rows -> %d links, %.2fs",
+              scanned, len(out), time.perf_counter() - start)
     return out

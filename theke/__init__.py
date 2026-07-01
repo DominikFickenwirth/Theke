@@ -23,6 +23,7 @@ import threading
 import urllib.parse
 import urllib.request
 from datetime import datetime, time, timezone
+from time import perf_counter
 
 from theke import core
 from theke import scheduler
@@ -2056,14 +2057,15 @@ def _run_pass(conn, cfg) -> dict:
     failed = 0
     log.info("matching + queueing %d wishes", len(wishes))
     for tid in wishes:
+        started = perf_counter()
         try:
             match = _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
                                       episode=None, dry_run=False, min_conf=None,
                                       year_tolerance=None))
             _queue_add_tmdb(conn, cfg, str(tid), status, {}, totals)
-            log.info("%s  matches: %s, written: %s, total queued: %s", tid,
+            log.info("wish %s: %s matches, %s written, %s queued (%.2fs)", tid,
                      match["candidates"] + match["arte_linked"], match["written"],
-                     totals["queued"])
+                     totals["queued"], perf_counter() - started)
         except Exception as exc:
             failed += 1
             log.warning("update wish %s failed: %s", tid, exc)
