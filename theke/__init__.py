@@ -2036,10 +2036,11 @@ def _ns(**kw) -> argparse.Namespace:
 
 
 def _run_pass(conn, cfg) -> dict:
-    """Run fetch -> enrich -> (match + queue) per wish -> download (when
-    auto-approved). Returns one aggregated summary."""
+    """Run fetch -> enrich -> library scan -> (match + queue) per wish -> download
+    (when auto-approved). Returns one aggregated summary."""
     fetch = cmd_fetch(conn, cfg, _ns(force=False))
     enriched = _enrich_run(conn, cfg, _ns(force=False))
+    scan = _run_scan(conn, cfg)
     list_added = 0
     for lid in cfg.tmdb_lists:
         try:
@@ -2064,8 +2065,23 @@ def _run_pass(conn, cfg) -> dict:
     if cfg.queue_auto_approve:
         downloaded = _queue_download(conn, cfg, _ns(all=True, ids=[], force=False))["downloaded"]
     return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
-            "list_added": list_added, "wishes": len(wishes), "failed": failed,
-            "downloaded": downloaded, **totals}
+            "scan": scan, "list_added": list_added, "wishes": len(wishes),
+            "failed": failed, "downloaded": downloaded, **totals}
+
+
+def _run_scan(conn, cfg) -> dict:
+    """Reconcile the on-disk library into the `library` table as part of a pass, so
+    a wish already satisfied on disk is recorded 'L' (never re-acquired) and a
+    vanished file is flagged 'D'. Runs with default args (whole `library_root`, no
+    --allow-empty). A scan failure (e.g. an unmounted root) is caught and reported
+    as {"error": ...}, never aborting the rest of the pass. The verbose duplicate/
+    unresolved path lists collapse to their lengths in the pass summary."""
+    try:
+        totals = _library_scan(conn, cfg, _ns(root=None, allow_empty=False))
+    except Exception as exc:
+        log.warning("scan failed: %s", exc)
+        return {"error": str(exc)}
+    return {k: len(v) if isinstance(v, list) else v for k, v in totals.items()}
 
 
 # -- scheduler (phase 10: loop _run_pass on a schedule) -----------------------
