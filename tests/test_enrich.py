@@ -765,8 +765,7 @@ def test_topic_routing_plain_series_unchanged():
 
 
 # -- category/genre split: medium (category) vs TMDB genre -------------------
-# category in {Movie, Episode, Clip, Event, NULL}; genre is TMDB-only, multiple
-# values comma-joined in canonical TMDB order.
+# category in {Movie, Episode, Clip, Event, NULL}
 
 def test_genre_word_maps_to_movie_plus_tmdb_genre():
     # A bare fiction genre word as topic -> Movie medium + the TMDB genre.

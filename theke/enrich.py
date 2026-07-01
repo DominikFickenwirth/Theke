@@ -96,8 +96,8 @@ SUFFIX_MARKERS = [
 ]
 # -- output taxonomy: medium (category) + TMDB genre ------------------------
 # Two orthogonal axes. category is the medium, a small custom set
-# (Movie/Episode/Clip/Event/None); genre is TMDB-only (no custom genres, so a
-# later TMDB lookup stays clean), multiple values comma-joined in this order.
+# (Movie/Episode/Clip/Event/None); genre is filled by enrich, multiple values
+# are comma-joined in this order.
 TMDB_ORDER = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Documentary',
               'Drama', 'Family', 'Kids', 'Fantasy', 'History', 'Horror', 'Music',
               'Mystery', 'News', 'Reality', 'Romance', 'SciFi', 'Soap', 'Talk',
