@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import theke
-from theke import Config, ConfigError, cmd_match, db_connect
+from theke import Config, ConfigError, cmd_match, cmd_tmdb, db_connect
 from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
@@ -344,6 +344,36 @@ def test_resolve_one_truncated(monkeypatch):
     movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
                       {"1234": TMDB_BOOT}, total_pages=2, total_results=25)
     assert resolve_one(CFG, "Das Boot", year=1981) == {"error": "truncated", "total": 25}
+
+
+# -- cmd_tmdb (theke tmdb search) --------------------------------------------
+
+def targs(title="Das Boot", year=None, broadcast_year=None, runtime=None,
+          year_tolerance=None, tmdb_cmd="search"):
+    return SimpleNamespace(tmdb_cmd=tmdb_cmd, title=title, year=year,
+                           broadcast_year=broadcast_year, runtime=runtime,
+                           year_tolerance=year_tolerance)
+
+
+def test_cmd_tmdb_search_returns_matches(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT})
+    res = cmd_tmdb(CFG, targs(year=1981, runtime=149))
+    assert res["truncated"] is False
+    assert res["matches"] == [{"tmdb_id": "1234", "title": "Das Boot",
+                               "year": 1981, "runtime": 149, "confidence": 1.0}]
+
+
+def test_cmd_tmdb_search_truncated(monkeypatch):
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": TMDB_BOOT}, total_pages=2, total_results=25)
+    res = cmd_tmdb(CFG, targs(year=1981))
+    assert res["truncated"] is True and res["total"] == 25
+
+
+def test_cmd_tmdb_requires_key():
+    with pytest.raises(ConfigError):
+        cmd_tmdb(Config(), targs())
 
 
 # -- bulk match: bulk_accept (pure gate; candidate pick -> pick_by_year) -----

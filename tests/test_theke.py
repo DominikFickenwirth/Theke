@@ -738,6 +738,7 @@ def test_default_action_injection_is_explicit():
     parser = theke.build_parser()
     assert theke._inject_default_action(parser, ["enrich"]) == ["enrich", "run"]
     assert theke._inject_default_action(parser, ["match", "--tmdb", "603"]) == ["match", "run", "--tmdb", "603"]
+    assert theke._inject_default_action(parser, ["tmdb", "--title", "X"]) == ["tmdb", "search", "--title", "X"]
 
 
 def test_default_action_leaves_explicit_subaction_and_help():
