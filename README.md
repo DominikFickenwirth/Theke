@@ -398,7 +398,8 @@ Die Gates sind bewusst streng, um Fehl-Matches zu vermeiden: Titelähnlichkeit,
 **Pflicht-Laufzeit** im Toleranzband, bei vorhandenem Jahr die Jahresdifferenz
 (`±match_year_tolerance`), das Erscheinungsjahr darf nicht nach dem
 Ausstrahlungsjahr liegen -- und nach all dem muss **genau ein** Treffer übrig sein.
-Braucht einen TMDB-Key. Gibt `scanned`/`matched`/`attempted` aus.
+Braucht einen TMDB-Key. Gibt `scanned`/`matched`/`attempted`/`errored` aus
+(eine Zeile mit unerwartetem Fehler bleibt auf `'1'` und wird nicht abgebrochen).
 
 | Option              | Wirkung                                                          |
 | ------------------- | --------------------------------------------------------------- |
