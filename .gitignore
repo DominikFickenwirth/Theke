@@ -23,6 +23,8 @@ dist/
 .eggs/
 .pytest_cache/
 
+.vscode/
+
 
 # == THEKE RUNTIME ==========================================================
 
