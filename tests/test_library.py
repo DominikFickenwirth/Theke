@@ -428,8 +428,10 @@ def test_pick_by_year_none_when_all_out_of_tolerance():
     assert pick_by_year(CANDS, 1990, 2) is None   # deltas 20/9/7
 
 
-def test_pick_by_year_no_year_takes_most_popular():
-    assert pick_by_year(CANDS, None, 2)["tmdb_id"] == "1"
+def test_pick_by_year_no_year_only_when_single_candidate():
+    only = [{"tmdb_id": "9", "title": "X", "year": 2000}]
+    assert pick_by_year(only, None, 2)["tmdb_id"] == "9"   # exactly one -> take it
+    assert pick_by_year(CANDS, None, 2) is None            # ambiguous -> no match
 
 
 def test_pick_by_year_skips_candidates_without_year():

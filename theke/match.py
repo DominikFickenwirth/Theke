@@ -234,14 +234,15 @@ def tmdb_list(cfg, list_id) -> list:
 
 
 def pick_by_year(candidates, year, tolerance):
-    """Pick the best search candidate for a wanted year: within tolerance, the
-    smallest year distance, ties keeping TMDB's popularity order. With no wanted
-    year, take the most popular result. None when nothing qualifies (candidates
-    without a year are skipped once a year is wanted)."""
+    """Pick the one TMDB candidate to confirm for a wanted year: within
+    tolerance, the smallest year distance, ties keeping TMDB's popularity order
+    (candidates without a year are skipped once a year is wanted). Without a
+    wanted year only an unambiguous result counts: exactly one candidate, else
+    None (avoids guessing). None when nothing qualifies."""
     if not candidates:
         return None
     if year is None:
-        return candidates[0]
+        return candidates[0] if len(candidates) == 1 else None
     best, best_delta = None, None
     for c in candidates:
         if c["year"] is None:
@@ -295,15 +296,6 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
 # release-not-after-broadcast), so the eager catalog stays free of false hits.
 
 
-def bulk_pick(candidates, row_year, tol):
-    """Pick the one TMDB candidate to confirm for a row. With a row year, the
-    tolerant nearest by year (pick_by_year). Without a year, only an unambiguous
-    result counts: exactly one candidate, else None (avoids guessing)."""
-    if row_year is not None:
-        return pick_by_year(candidates, row_year, tol)
-    return candidates[0] if len(candidates) == 1 else None
-
-
 def _drop_article(title) -> str:
     """Drop a single leading article word from a raw title (case-insensitive),
     for a search retry; unchanged when there is no leading article."""
@@ -350,7 +342,7 @@ def bulk_accept(meta, row, tol) -> dict:
 def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
     """Eager, row-driven movie match (phase 15): for each enriched-and-untried
     movie row ('1', non-trailer) search TMDB by its own clean_title, confirm on
-    the hard gates (bulk_pick + bulk_accept) and tag a confident hit '3' (with
+    the hard gates (pick_by_year + bulk_accept) and tag a confident hit '3' (with
     tmdb_id) or mark the row '2' (bulk-attempted, no match -- skipped by later
     bulk passes, still lazy-matchable). Deduplicates the search per distinct
     title and caches TMDB movie lookups by id; `limit` caps rows per call so a
@@ -369,7 +361,7 @@ def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
         key = normalize(r["clean_title"])
         if key not in searches:
             searches[key] = _search_candidates(cfg, r["clean_title"])
-        cand = bulk_pick(searches[key], r["year"], tol)
+        cand = pick_by_year(searches[key], r["year"], tol)
         tid, conf = None, None
         if cand is not None and not (r["tmdb_id"] and r["tmdb_id"] != cand["tmdb_id"]):
             cid = cand["tmdb_id"]

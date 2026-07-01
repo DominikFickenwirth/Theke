@@ -34,7 +34,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
-                         pick_by_year, bulk_pick, bulk_match, ARTICLES)
+                         pick_by_year, bulk_match, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import index
@@ -1455,7 +1455,7 @@ def _drop_leading_article(title) -> str:
 
 def _search_title(cfg, title, year, tol) -> tuple:
     """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
-    pick sharing `match bulk`'s bulk_pick rule: with a year the tolerant nearest
+    pick sharing `match bulk`'s pick_by_year rule: with a year the tolerant nearest
     (smallest distance, ties keep popularity); without a year only an unambiguous
     single hit. Raises ValueError when nothing qualifies, naming the cause: no
     title hit at all, an ambiguous yearless search, or hits whose years all miss
@@ -1468,7 +1468,7 @@ def _search_title(cfg, title, year, tol) -> tuple:
             cands = tmdb_search(cfg, stripped)
     if not cands:
         raise ValueError(f"no TMDB title matches {title!r}")
-    cand = bulk_pick(cands, year, tol)
+    cand = pick_by_year(cands, year, tol)
     if cand is None:
         if year is None:
             raise ValueError(f"{len(cands)} TMDB title matches for {title!r}; "
@@ -1985,7 +1985,7 @@ def _read_import_file(path):
 def _resolve_entry(cfg, entry, tol) -> tuple:
     """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
     id is verified via TMDB (a bad id propagates as 404); a title is searched via
-    `_search_title` (bulk_pick rule): with a year the tolerant nearest, without a
+    `_search_title` (pick_by_year rule): with a year the tolerant nearest, without a
     year only an unambiguous single hit (an ambiguous yearless title raises)."""
     if entry["kind"] == "id":
         meta = tmdb_movie(cfg, entry["id"])

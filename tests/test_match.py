@@ -12,7 +12,7 @@ from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
-                         find_arte_links, bulk_pick, bulk_accept, bulk_match)
+                         find_arte_links, pick_by_year, bulk_accept, bulk_match)
 
 
 # -- normalize / strip_articles ----------------------------------------------
@@ -199,25 +199,7 @@ def test_tmdb_movie_parses_titles_year_runtime(monkeypatch):
     assert meta["titles"] == ["Das Boot", "Das Boot - Director's Cut"]
 
 
-# -- bulk match: bulk_pick / bulk_accept (pure gates) ------------------------
-
-BCANDS = [{"tmdb_id": "1", "title": "Das Boot", "year": 1981},
-          {"tmdb_id": "2", "title": "Das Boot", "year": 1990}]
-
-
-def test_bulk_pick_year_present_uses_pick_by_year():
-    assert bulk_pick(BCANDS, 1981, 2)["tmdb_id"] == "1"   # delta 0 wins
-
-
-def test_bulk_pick_year_present_none_within_tolerance():
-    assert bulk_pick(BCANDS, 1950, 2) is None   # both years miss +-2
-
-
-def test_bulk_pick_no_year_only_when_single_candidate():
-    only = [{"tmdb_id": "9", "title": "X", "year": 2000}]
-    assert bulk_pick(only, None, 2)["tmdb_id"] == "9"   # exactly one -> take it
-    assert bulk_pick(BCANDS, None, 2) is None            # ambiguous -> no match
-    assert bulk_pick([], None, 2) is None                # empty -> no match
+# -- bulk match: bulk_accept (pure gate; candidate pick -> pick_by_year) -----
 
 
 def brow(clean_title="Das Boot", year=1981, duration=8940, date="1985-01-01"):
