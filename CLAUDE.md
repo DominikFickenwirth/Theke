@@ -211,10 +211,11 @@ Theke/
 +-- pyproject.toml    package + console-script `theke`, dependencies
 +-- tests/            pytest suite
 +-- webui/            Web UI + REST API
-+-- docker/           CLI image entrypoint
 +-- analysis/         temporary review notes + scratch scripts (committed, not shipped)
 +-- CLAUDE.md
 +-- README.md
++-- Dockerfile
++-- docker-compose.yml
 ```
 
 ## Development and deployment

@@ -917,43 +917,52 @@ theke --db build/theke.db run                 # Daemon nach run_schedule
 # Docker-Deployment (Synology-NAS)
 
 Ausgeliefert wird Theke als Container, der den Scheduler (`theke run`) als Daemon
-fährt. Alle Dateien liegen in Docker-Volumes:
+fährt. Die Dateien liegen in drei gemounteten Volumes:
 
-| Volume    | Inhalt                                                        |
-| --------- | ------------------------------------------------------------- |
-| `/config` | `theke.json` (beim ersten Start aus einer Vorlage angelegt). |
-| `/data`   | `theke.db` und temporäre Dateien.                            |
-| `/movies` | die Film-Library (`library_root`).                           |
+| Volume     | Inhalt                                                       |
+| ---------- | ------------------------------------------------------------ |
+| `/config`  | `theke.json` **und** `theke.db`.                            |
+| `/temp`    | Download-Scratch (`temp_path`).                             |
+| `/library` | die Film-Library (`library_root`).                          |
+
+**`/temp` und `/library` müssen auf demselben physischen Volume liegen** (im
+compose beide unter `/volume1`) -- dann ist das Einsortieren eines fertigen
+Downloads ein schnelles `rename` auf einem Dateisystem statt einer langsamen
+Kopie über Volume-Grenzen.
 
 Das Image bringt **FFmpeg** und **tzdata** mit; `TZ` steuert die lokale Uhrzeit
-für die `run_schedule`-Trigger. Der TMDB-Key gehört **nicht** in die Config-Datei,
-sondern kommt als `THEKE_TMDB_API_KEY` per Env (überschreibt die Datei).
+für die `run_schedule`-Trigger. Die **Pfade** setzt das compose auf die Volumes:
+`theke.db` über `--db /config/theke.db` im Container-Kommando, `temp_path` /
+`library_root` / `library_path` per Env (`THEKE_TEMP_PATH`, `THEKE_LIBRARY_ROOT`,
+`THEKE_LIBRARY_PATH`). Der **TMDB-Key** kommt als `THEKE_TMDB_API_KEY` per Env
+(gehört nicht in die Datei). In der `theke.json` pflegst du den Rest (v.a.
+`tmdb_lists`, `run_schedule`, `languages`).
 
 ## Build auf dem NAS (Container Manager)
 
 Der Build läuft direkt auf dem NAS -- kein lokales Docker nötig:
 
-1. Repo aufs NAS kopieren (z.B. in einen Ordner auf `/volume1/docker/theke`).
-2. In `docker/docker-compose.yml` den `/movies`-Host-Pfad auf deinen
-   Library-Share anpassen.
-3. TMDB-Key setzen: entweder eine Datei `docker/.env` mit
-   `THEKE_TMDB_API_KEY=dein_key` anlegen, oder im Container Manager das
+1. Repo aufs NAS kopieren (z.B. nach `/volume1/docker/theke`).
+2. In `docker-compose.yml` die Host-Pfade anpassen: der `/library`- und der
+   `/temp`-Mount auf **dasselbe** Volume (z.B. beide unter `/volume1/video/...`).
+3. TMDB-Key setzen: entweder eine Datei `.env` neben der `docker-compose.yml`
+   mit `THEKE_TMDB_API_KEY=dein_key` anlegen, oder im Container Manager das
    Env-Feld setzen.
-4. **Container Manager -> Projekt -> Erstellen**, als Pfad den `docker/`-Ordner
-   wählen (nutzt die `docker-compose.yml`). Container Manager baut das Image auf
-   dem NAS und startet den Container.
+4. **Container Manager -> Projekt -> Erstellen**, als Pfad das Repo-Wurzel-
+   verzeichnis wählen (nutzt die `docker-compose.yml`). Container Manager baut
+   das Image auf dem NAS und startet den Container.
 
-Alternativ per SSH aus dem `docker/`-Ordner:
+Alternativ per SSH aus dem Repo-Wurzelverzeichnis:
 
 ```sh
 docker compose up -d --build      # baut das Image und startet den Daemon
 docker compose logs -f            # Scheduler-Ausgabe (ein JSON-Objekt pro Pass)
 ```
 
-Beim ersten Start legt der Entrypoint eine Start-`theke.json` in `/config` an
-(aus `docker/theke.example.json`). Danach: Datei anpassen (v.a. `tmdb_lists` /
-`run_schedule`) und den Container neu starten. Einzelne Kommandos lassen sich im
-laufenden Container ausführen, z.B.:
+Beim ersten Start legt `theke` selbst eine Start-`theke.json` mit Defaults in
+`/config` an (die per `--config` angegebene Datei fehlt noch). Danach: Datei
+anpassen (v.a. `tmdb_lists` / `run_schedule`) und den Container neu starten.
+Einzelne Kommandos lassen sich im laufenden Container ausführen, z.B.:
 
 ```sh
 docker compose exec theke theke --config /config/theke.json --json config
