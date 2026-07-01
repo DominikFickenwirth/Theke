@@ -181,8 +181,12 @@ collapses the missed ones into one; the single-threaded loop rules out overlap.
   nests them as sub-actions. **Machine-readable mode** (`--json`, stable exit
   codes, stable grammar) so the REST layer / Web UI can drive and parse it.
   - **stdout vs stderr:** stdout carries only the result (the single JSON object
-    in `--json`); progress/diagnostics go to **stderr** as plain text, so a long
-    stage stays visible without polluting the parseable result.
+    in `--json`); progress/diagnostics go to **stderr** as plain text via the
+    `theke` logger (one prefixed line per record). Every major loop announces
+    itself first and then logs one line per record. `-v`/`--verbose` lowers the
+    level to DEBUG (network timings via the single `core.http_get` choke point --
+    query stripped so the TMDB key never leaks; per-wish scan costs); the config
+    field `log_level` (default INFO) sets the same without the flag, CLI winning.
 - **Web UI (phase 14):** the only UI -- review dashboard, settings, history, and
   read-only browse/search over the catalog. Talks to the CLI through a **REST
   API** (REST over the `--json` layer); holds no logic. May later be wrapped
