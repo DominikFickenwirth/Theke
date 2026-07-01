@@ -1080,6 +1080,30 @@ def test_klare_sprache_marker_capitalized():
     assert r["year"] == 2022
 
 
+# -- enrich improvements A2: " - Audiodeskription" bare suffix -> flag A ------
+
+def test_audiodeskription_bare_suffix_sets_flag_a_and_strips():
+    # A2: the common bare " - Audiodeskription" suffix (no parens) must flag A and
+    # be stripped, like the parenthetical "(Audiodeskription)" form already does.
+    r = enrich("ARD", "Spielfilm", "Exil - Audiodeskription", "", 5400)
+    assert r["flags"] == "A"
+    assert r["clean_title"] == "Exil"
+
+
+def test_hoerfassung_bare_suffix_sets_flag_a():
+    r = enrich("ARD", "Spielfilm", "Haus ohne Dach - Hörfassung", "", 5400)
+    assert r["flags"] == "A"
+    assert r["clean_title"] == "Haus ohne Dach"
+
+
+def test_audiodeskription_doubled_suffix_fully_stripped():
+    # The suffix sometimes appears twice; strip repeatedly until none remains.
+    r = enrich("ARD", "Spielfilm",
+                 "Räuberhände - Audiodeskription - Audiodeskription", "", 5400)
+    assert r["flags"] == "A"
+    assert r["clean_title"] == "Räuberhände"
+
+
 # -- cmd_enrich: DB write side ---------------------------------------------
 
 def open_db(tmp_path):
