@@ -14,12 +14,12 @@ RUN apt-get update \
 ENV PYTHONIOENCODING=utf-8 \
     PYTHONUNBUFFERED=1
 
+# install python package in /app
 WORKDIR /app
 COPY pyproject.toml ./
 COPY theke/ ./theke/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -e .
 
-# theke seeds /config/theke.json with defaults on first run (missing --config
-# path); paths point at the mounted volumes via THEKE_* env (see compose). The
-# process is PID 1, so `docker stop` reaches it as SIGTERM for a clean pass stop.
-CMD ["theke", "--config", "/config/theke.json", "--db", "/config/theke.db", "run"]
+# run theke in /config mount
+WORKDIR /config
+CMD ["theke", "run"]

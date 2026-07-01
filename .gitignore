@@ -31,5 +31,6 @@ theke.db-*
 theke.json
 
 build/
+config/
 
 .env

@@ -1,23 +1,29 @@
-# Synology Container Manager: create a Project pointing at this folder -- it uses
-# this compose file and builds the image on the NAS. Set THEKE_TMDB_API_KEY
-# (Container Manager env field or a .env file next to this one) and adjust the
-# two host paths below.
 services:
   theke:
-    # EITHER build locally
+    # a) EITHER build locally
     build: .
     image: theke:local
-    # OR pull from docker hub
+    # b) OR pull from docker hub
     # image: xxxx/theke:latest
+
     container_name: theke
-    restart: unless-stopped
     environment:
       - TZ=Europe/Berlin
       - THEKE_TMDB_API_KEY=${THEKE_TMDB_API_KEY:-}
       - THEKE_TEMP_PATH=/temp
       - THEKE_LIBRARY_ROOT=/library
       - THEKE_LIBRARY_PATH=/library/{Title} ({Year})/{Title} ({Year}).mp4
+
     volumes:
-      - ./build:/config           # theke.json + theke.db
-      - ./build/movies:/library   # your movie library
-      - ./build/temp:/temp        # use same volume as library for fast copy ops!
+      - ./config:/config           # theke.json + theke.db
+      - ./config/movies:/library   # your movie library
+      - ./config/temp:/temp        # use same volume as library for fast copy ops!
+      # for debugging only: make python scripts replaceable
+      # - ./theke:/app/theke
+
+    restart: unless-stopped
+    # to run single commands, uncomment one of the following lines
+    # and make sure to COMMENT OUT "restart: unless-stopped"
+    # command: ["theke", "queue"]
+    # command: ["theke", "queue", "approve", "--all"]
+    # command: ["theke", "library", "import", "/temp/movies.csv"]
