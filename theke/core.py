@@ -13,6 +13,7 @@
 
 import dataclasses
 import json
+import os
 import sqlite3
 import sys
 import urllib.request
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 # -- config -------------------------------------------------------------------
 
 CONFIG_DEFAULT_PATH = "theke.json"
+ENV_PREFIX = "THEKE_"  # env source: THEKE_<FIELD>, e.g. THEKE_TMDB_API_KEY
 
 
 class ConfigError(Exception):
@@ -59,12 +61,28 @@ class Config:
     run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
 
 
-def load_config(path: str | None, overrides: dict | None = None) -> Config:
-    """Load the JSON config file and apply CLI overrides (None = not set).
+def _env_value(var: str, raw: str, ftype: type):
+    """Coerce an env string to a Config field's type (str raw, else JSON)."""
+    if ftype is str:
+        return raw
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"invalid value for env {var}: {exc}") from None
+    if not isinstance(value, ftype):
+        raise ConfigError(f"env {var} must be of type {ftype.__name__}")
+    return value
 
+
+def load_config(path: str | None, overrides: dict | None = None) -> Config:
+    """Load config from file, env (THEKE_<FIELD>), and CLI overrides.
+
+    Precedence: defaults < config file < env < CLI (None override = not set).
     An explicitly given path must exist; the default path may be absent.
     Unknown keys are ignored with a warning on stderr (forward compatibility);
-    wrong value types for known keys are errors (typo protection).
+    wrong value types for known keys are errors (typo protection). Env values
+    are strings: str fields are taken raw, other types are parsed as JSON and
+    type-checked like file values.
     """
     explicit = path is not None
     path = path or CONFIG_DEFAULT_PATH
@@ -91,10 +109,28 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
             raise ConfigError(
                 f"config key {key} must be of type {fields[key].__name__}")
         known[key] = value
+    for name, ftype in fields.items():
+        raw = os.environ.get(ENV_PREFIX + name.upper())
+        if raw is not None:
+            known[name] = _env_value(ENV_PREFIX + name.upper(), raw, ftype)
     for key, value in (overrides or {}).items():
         if value is not None:
             known[key] = value
     return Config(**known)
+
+
+def write_default_config(path: str) -> None:
+    """Write a starter config file with all defaults (pretty JSON, UTF-8).
+
+    Used to seed a config on first run when an explicit --config path is absent
+    (the container's first start), analogous to the DB being created on demand.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(dataclasses.asdict(Config()), fh, indent=4, ensure_ascii=False)
+        fh.write("\n")
 
 
 # -- db -----------------------------------------------------------------------

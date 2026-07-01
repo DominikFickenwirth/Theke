@@ -1,0 +1,4 @@
+# Keep the build context small; the image only needs pyproject.toml + theke/.
+*
+!/theke/*.py
+!/pyproject.toml

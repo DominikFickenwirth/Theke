@@ -1,0 +1,4 @@
+# Container files must keep LF regardless of the (Windows) dev host
+*.sh       text eol=lf
+Dockerfile text eol=lf
+*.yml      text eol=lf

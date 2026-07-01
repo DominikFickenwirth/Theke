@@ -143,6 +143,103 @@ def test_config_fiction_topics_from_file(tmp_path):
     assert load_config(str(path)).fiction_topics == ["Mein Regio-Krimi", "Dorf-Saga"]
 
 
+# -- config: env vars (phase 11, third source: defaults < file < env < CLI) --
+
+def test_config_env_overrides_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no theke.json here
+    monkeypatch.setenv("THEKE_DB_PATH", "env.db")
+    assert load_config(None).db_path == "env.db"
+
+
+def test_config_env_overrides_file(tmp_path, monkeypatch):
+    path = tmp_path / "prec.json"
+    write_config(path, {"db_path": "file.db"})
+    monkeypatch.setenv("THEKE_DB_PATH", "env.db")
+    assert load_config(str(path)).db_path == "env.db"
+
+
+def test_config_cli_overrides_env(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_DB_PATH", "env.db")
+    cfg = load_config(None, overrides={"db_path": "cli.db"})
+    assert cfg.db_path == "cli.db"
+
+
+def test_config_env_str_used_raw(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # str values are not JSON-parsed: no quoting needed
+    monkeypatch.setenv("THEKE_LIBRARY_ROOT", "/mnt/my movies")
+    assert load_config(None).library_root == "/mnt/my movies"
+
+
+def test_config_env_secret_key(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # the documented container use: keep secrets out of the file
+    monkeypatch.setenv("THEKE_TMDB_API_KEY", "SECRET")
+    assert load_config(None).tmdb_api_key == "SECRET"
+
+
+def test_config_env_int_coerced(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_MATCH_YEAR_TOLERANCE", "3")
+    assert load_config(None).match_year_tolerance == 3
+
+
+def test_config_env_bool_coerced(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_QUEUE_AUTO_APPROVE", "true")
+    assert load_config(None).queue_auto_approve is True
+
+
+def test_config_env_list_coerced(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_LANGUAGES", '["en", "fr"]')
+    assert load_config(None).languages == ["en", "fr"]
+
+
+def test_config_env_bad_json_is_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_MATCH_YEAR_TOLERANCE", "notanint")
+    with pytest.raises(ConfigError, match="THEKE_MATCH_YEAR_TOLERANCE"):
+        load_config(None)
+
+
+def test_config_env_wrong_type_is_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # valid JSON, wrong type (str where int expected)
+    monkeypatch.setenv("THEKE_MATCH_YEAR_TOLERANCE", '"three"')
+    with pytest.raises(ConfigError, match="THEKE_MATCH_YEAR_TOLERANCE"):
+        load_config(None)
+
+
+# -- config: auto-create a starter file (phase 11) ---------------------------
+
+def test_write_default_config_roundtrips_to_defaults(tmp_path):
+    from theke.core import write_default_config
+    path = tmp_path / "theke.json"
+    write_default_config(str(path))
+    assert load_config(str(path)) == Config()
+
+
+def test_main_creates_starter_config_for_missing_explicit_path(tmp_path):
+    cfgpath = tmp_path / "cfg" / "theke.json"  # nested: the parent is created too
+    assert main(["--json", "--config", str(cfgpath), "config"]) == 0
+    assert cfgpath.exists()
+    written = json.loads(cfgpath.read_text(encoding="utf-8"))
+    assert written["db_path"] == "theke.db"          # the dataclass defaults
+    assert written["run_schedule"] == ["start", 3600]
+
+
+def test_main_does_not_overwrite_existing_config(tmp_path):
+    cfgpath = tmp_path / "theke.json"
+    write_config(cfgpath, {"db_path": "keep.db"})
+    assert main(["--json", "--config", str(cfgpath), "config"]) == 0
+    assert json.loads(cfgpath.read_text(encoding="utf-8")) == {"db_path": "keep.db"}
+
+
+def test_main_default_path_missing_creates_nothing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no --config: keep the dev behavior (no stray file)
+    assert main(["--json", "config"]) == 0
+    assert not (tmp_path / "theke.json").exists()
+
+
 def test_config_languages_wrong_type_is_error(tmp_path):
     path = tmp_path / "ql.json"
     write_config(path, {"languages": "de"})   # must be a list, not a string
