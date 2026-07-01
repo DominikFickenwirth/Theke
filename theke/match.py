@@ -304,6 +304,24 @@ def bulk_pick(candidates, row_year, tol):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _drop_article(title) -> str:
+    """Drop a single leading article word from a raw title (case-insensitive),
+    for a search retry; unchanged when there is no leading article."""
+    head, _, rest = (title or "").partition(" ")
+    return rest if rest and head.casefold() in ARTICLES else title
+
+
+def _search_candidates(cfg, title) -> list:
+    """TMDB search for a title, retrying without a leading article when the first
+    query finds nothing (mirrors library's _search_title)."""
+    cands = tmdb_search(cfg, title)
+    if not cands:
+        stripped = _drop_article(title)
+        if stripped != title:
+            cands = tmdb_search(cfg, stripped)
+    return cands
+
+
 def _broadcast_year(date):
     """The airing year from a mediathek `date` (leading 'YYYY...'); None when
     absent or unparseable."""
@@ -327,6 +345,59 @@ def bulk_accept(meta, row, tol) -> dict:
           and (my is None or ry is not None)
           and (by is None or ry is None or ry <= by + tol))
     return {"accepted": bool(ok), "confidence": s["confidence"] if ok else 0.0}
+
+
+def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
+    """Eager, row-driven movie match (phase 15): for each enriched-and-untried
+    movie row ('1', non-trailer) search TMDB by its own clean_title, confirm on
+    the hard gates (bulk_pick + bulk_accept) and tag a confident hit '3' (with
+    tmdb_id) or mark the row '2' (bulk-attempted, no match -- skipped by later
+    bulk passes, still lazy-matchable). Deduplicates the search per distinct
+    title and caches TMDB movie lookups by id; `limit` caps rows per call so a
+    backlog drains over several passes. Returns {scanned, matched, attempted}."""
+    tol = cfg.match_year_tolerance if year_tolerance is None else year_tolerance
+    start = time.perf_counter()
+    sql = ("SELECT mediathek_id, clean_title, year, duration, date, tmdb_id "
+           "FROM mediathek WHERE category='Movie' AND status='1' "
+           "AND (flags IS NULL OR flags NOT LIKE '%T%') ORDER BY mediathek_id")
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    rows = [dict(r) for r in conn.execute(sql)]
+    log.info("bulk matching %d movie rows", len(rows))
+    searches, movies, decisions = {}, {}, []
+    for r in rows:
+        key = normalize(r["clean_title"])
+        if key not in searches:
+            searches[key] = _search_candidates(cfg, r["clean_title"])
+        cand = bulk_pick(searches[key], r["year"], tol)
+        accepted = False
+        if cand is not None and not (r["tmdb_id"] and r["tmdb_id"] != cand["tmdb_id"]):
+            tid = cand["tmdb_id"]
+            if tid not in movies:
+                movies[tid] = tmdb_movie(cfg, tid)
+            a = bulk_accept(movies[tid], r, tol)
+            accepted = a["accepted"]
+            if accepted:
+                decisions.append((r["mediathek_id"], tid, a["confidence"]))
+        if not accepted:
+            decisions.append((r["mediathek_id"], None, None))
+        log.info("bulk %s: %s", r["mediathek_id"], "matched" if accepted else "no match")
+    conn.execute("BEGIN")
+    try:
+        for mid, tid, conf in decisions:
+            if tid is not None:
+                conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
+                             "status='3' WHERE mediathek_id=?", (tid, conf, mid))
+            else:
+                conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id=?", (mid,))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    matched = sum(1 for _, tid, _ in decisions if tid is not None)
+    log.debug("bulk_match: %d rows -> %d matched, %.2fs", len(rows), matched,
+              time.perf_counter() - start)
+    return {"scanned": len(rows), "matched": matched, "attempted": len(rows) - matched}
 
 
 # -- candidate search --------------------------------------------------------
