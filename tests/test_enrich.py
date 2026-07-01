@@ -1061,6 +1061,25 @@ def test_fiction_topics_extendable_via_param():
     assert r1["category"] == "Movie"
 
 
+# -- enrich improvements A3: "(klare Sprache)" -> flag E ---------------------
+
+def test_klare_sprache_marker_sets_flag_e_and_strips():
+    # A3: "(klare Sprache)" is a plain-language edition marker (like einfache/
+    # leichte Sprache); it sets flag E and is stripped from the title.
+    r = enrich("ARD", "Tatort", "Siebte Etage (2024) (klare Sprache)", "", 5400)
+    assert "E" in r["flags"]
+    assert r["clean_title"] == "Siebte Etage"
+    assert r["year"] == 2024              # stripping unblocks the trailing (YYYY)
+
+
+def test_klare_sprache_marker_capitalized():
+    # Also the capitalized "(Klare Sprache)" spelling.
+    r = enrich("ARD", "Tatort", "Hubertys Rache (2022) (Klare Sprache)", "", 5400)
+    assert "E" in r["flags"]
+    assert r["clean_title"] == "Hubertys Rache"
+    assert r["year"] == 2022
+
+
 # -- cmd_enrich: DB write side ---------------------------------------------
 
 def open_db(tmp_path):
