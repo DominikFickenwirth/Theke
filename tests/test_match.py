@@ -653,6 +653,31 @@ def test_cmd_match_reset_needs_no_api_key(tmp_path):
         conn.close()
 
 
+# -- match bulk (phase 15, eager row-driven catalog match) -------------------
+
+def test_cmd_match_bulk_tags_and_marks(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m_hit", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m_miss", "Unknown Film", 2000, 6000)
+        res = cmd_match(conn, CFG, margs(match_cmd="bulk", limit=None))
+        assert res == {"scanned": 2, "matched": 1, "attempted": 1}
+        assert status_of(conn, "m_hit") == "3"
+        assert status_of(conn, "m_miss") == "2"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_bulk_needs_api_key(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ConfigError):
+            cmd_match(conn, Config(), margs(match_cmd="bulk", limit=None))
+    finally:
+        conn.close()
+
+
 def test_cmd_match_requires_api_key(tmp_path, monkeypatch):
     conn = boot_db(tmp_path, monkeypatch)
     try:

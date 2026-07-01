@@ -1051,6 +1051,25 @@ def test_update_auto_approve_downloads_and_marks_library(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_run_pass_bulk_matches_before_wishes(tmp_path, monkeypatch):
+    # the pass eagerly bulk-matches enriched-and-untried movie rows before the
+    # wish loop, so the '1' pool is drained (here the search finds nothing -> '2').
+    stub_tmdb(monkeypatch)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=True)
+        insert_movie(conn, "m_x", tmdb_id="", status="1")   # enriched, untried
+        result = _run_pass(conn, cfg)
+        assert result["bulk"]["scanned"] == 1
+        assert result["bulk"]["matched"] + result["bulk"]["attempted"] == 1
+        st = conn.execute("SELECT status FROM mediathek WHERE mediathek_id='m_x'").fetchone()
+        assert st["status"] in ("2", "3")                   # no longer '1'
+    finally:
+        conn.close()
+
+
 def test_update_without_auto_approve_stops_at_proposed(tmp_path, monkeypatch):
     stub_tmdb(monkeypatch)
     stub_files(monkeypatch)
