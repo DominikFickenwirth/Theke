@@ -119,17 +119,29 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
     return Config(**known)
 
 
+# The subset seeded into a starter config -- the fields a user actually sets;
+# every other field keeps its default and stays out of the file to avoid clutter.
+STARTER_CONFIG_FIELDS = (
+    "tmdb_api_key", "tmdb_read_token", "tmdb_lists", "tmdb_language",
+    "queue_auto_approve", "languages", "video_ext", "audio_ext",
+    "run_schedule")
+
+
 def write_default_config(path: str) -> None:
-    """Write a starter config file with all defaults (pretty JSON, UTF-8).
+    """Write a starter config file with the user-facing defaults (pretty JSON).
 
     Used to seed a config on first run when an explicit --config path is absent
     (the container's first start), analogous to the DB being created on demand.
+    Only the fields a user commonly sets are emitted (STARTER_CONFIG_FIELDS);
+    the rest keep their dataclass defaults and are omitted.
     """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    defaults = dataclasses.asdict(Config())
+    data = {name: defaults[name] for name in STARTER_CONFIG_FIELDS}
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(dataclasses.asdict(Config()), fh, indent=4, ensure_ascii=False)
+        json.dump(data, fh, indent=4, ensure_ascii=False)
         fh.write("\n")
 
 
