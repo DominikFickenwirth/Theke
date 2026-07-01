@@ -1109,6 +1109,52 @@ def test_update_wish_failure_does_not_abort(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_update_runs_library_scan(tmp_path, monkeypatch):
+    # a pass reconciles the on-disk library: _run_pass invokes the scan with the
+    # configured root (default args) and folds its numeric counts into "scan"
+    # (the verbose path lists collapse to their lengths).
+    stub_tmdb(monkeypatch)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    seen = {}
+    def fake_scan(conn, cfg, args):
+        seen["root"] = args.root
+        seen["allow_empty"] = args.allow_empty
+        return {"scanned": 2, "added": 1, "updated": 0, "moved": 0,
+                "duplicates": [], "unresolved": ["/x"], "ignored": 0, "deleted": 1}
+    monkeypatch.setattr(theke, "_library_scan", fake_scan)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=False)
+        result = _run_pass(conn, cfg)
+        assert seen == {"root": None, "allow_empty": False}
+        assert result["scan"] == {"scanned": 2, "added": 1, "updated": 0,
+                                  "moved": 0, "duplicates": 0, "unresolved": 1,
+                                  "ignored": 0, "deleted": 1}
+    finally:
+        conn.close()
+
+
+def test_update_scan_failure_does_not_abort(tmp_path, monkeypatch):
+    # an unmounted / missing library_root raises ConfigError; the pass catches it,
+    # reports the scan error, and still runs the rest of the pipeline.
+    stub_tmdb(monkeypatch)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    def boom(conn, cfg, args):
+        raise ConfigError("library_root is not a readable directory: movies")
+    monkeypatch.setattr(theke, "_library_scan", boom)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=False)
+        result = _run_pass(conn, cfg)
+        assert result["scan"] == {
+            "error": "library_root is not a readable directory: movies"}
+        assert result["enriched"] == 0        # the rest of the pass still ran
+    finally:
+        conn.close()
+
+
 # A configured list with a single movie that matches the inserted mediathek row.
 LIST_ONE = {"items": [{"id": 100, "title": "Mein Film",
                        "release_date": "2020-05-01", "media_type": "movie"}]}
