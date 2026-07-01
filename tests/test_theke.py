@@ -223,8 +223,12 @@ def test_main_creates_starter_config_for_missing_explicit_path(tmp_path):
     assert main(["--json", "--config", str(cfgpath), "config"]) == 0
     assert cfgpath.exists()
     written = json.loads(cfgpath.read_text(encoding="utf-8"))
-    assert written["db_path"] == "theke.db"          # the dataclass defaults
-    assert written["run_schedule"] == ["start", 3600]
+    assert set(written) == {                         # only the user-facing subset
+        "tmdb_api_key", "tmdb_read_token", "tmdb_lists", "tmdb_language",
+        "queue_auto_approve", "languages", "video_ext", "audio_ext",
+        "run_schedule"}
+    assert written["run_schedule"] == ["start", 3600]  # the dataclass defaults
+    assert written["languages"] == ["de"]
 
 
 def test_main_does_not_overwrite_existing_config(tmp_path):
