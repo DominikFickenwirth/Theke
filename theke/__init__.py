@@ -23,6 +23,7 @@ import threading
 import urllib.parse
 import urllib.request
 from datetime import datetime, time, timezone
+from time import perf_counter
 
 from theke import core
 from theke import scheduler
@@ -1669,6 +1670,7 @@ def _library_scan(conn, cfg, args) -> dict:
         raise ConfigError("library scan needs library_root (set it in the config or pass --root)")
     if not os.path.isdir(root):
         raise ConfigError(f"library_root is not a readable directory: {root}")
+    log.info("scanning library at %s", root)
     scan_start = _now()
     totals = {"scanned": 0, "added": 0, "updated": 0, "moved": 0,
               "duplicates": [], "unresolved": [], "ignored": 0, "deleted": 0}
@@ -1991,18 +1993,19 @@ def _library_import(conn, cfg, args) -> dict:
     tol = cfg.match_year_tolerance if args.year_tolerance is None else args.year_tolerance
     resolved, errors = [], []
     total = len(entries)
+    log.info("importing %d entries from %s", total, args.path)
     for n, (lineno, raw, entry) in enumerate(entries, 1):
-        log.info("[%d/%d] line %d: %s", n, total, lineno, raw)
         if entry["kind"] == "error":
-            log.warning("  line %d skipped: %s", lineno, entry["reason"])
+            log.warning("[%d/%d] line %d: %s -- skipped: %s", n, total, lineno, raw, entry["reason"])
             errors.append({"line": lineno, "input": raw, "reason": entry["reason"]})
             continue
         try:
             tid, title, year = _resolve_entry(cfg, entry, tol)
-            log.info("  -> %s", _resolved_label(tid, title, year))   # what it resolved to
+            log.info("[%d/%d] line %d: %s -> %s", n, total, lineno, raw,
+                     _resolved_label(tid, title, year))         # one line: input -> resolution
             resolved.append((tid, title, year))
         except Exception as exc:
-            log.warning("  line %d failed: %s", lineno, exc)
+            log.warning("[%d/%d] line %d: %s -- failed: %s", n, total, lineno, raw, exc)
             errors.append({"line": lineno, "input": raw, "reason": str(exc)})
     result = {**_insert_wishes(conn, resolved), "failed": len(errors), "errors": errors}
     if args.json:
@@ -2052,12 +2055,17 @@ def _run_pass(conn, cfg) -> dict:
     wishes = [r["tmdb_id"] for r in
               conn.execute("SELECT tmdb_id FROM library WHERE status='W'")]
     failed = 0
+    log.info("matching + queueing %d wishes", len(wishes))
     for tid in wishes:
+        started = perf_counter()
         try:
-            _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
+            match = _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
                                       episode=None, dry_run=False, min_conf=None,
                                       year_tolerance=None))
             _queue_add_tmdb(conn, cfg, str(tid), status, {}, totals)
+            log.info("wish %s: %s matches, %s written, %s queued (%.2fs)", tid,
+                     match["candidates"] + match["arte_linked"], match["written"],
+                     totals["queued"], perf_counter() - started)
         except Exception as exc:
             failed += 1
             log.warning("update wish %s failed: %s", tid, exc)
@@ -2254,6 +2262,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-c", "--config", metavar="PATH",      help=f"config file (default: {CONFIG_DEFAULT_PATH})")
     parser.add_argument("-d", "--db",     metavar="PATH",      help="database file (overrides db_path from config)")
     parser.add_argument("-j", "--json",   action="store_true", help="machine-readable output: one JSON object on stdout")
+    parser.add_argument("-v", "--verbose", action="store_true", help="verbose stderr logging (DEBUG level: network timings, per-loop detail)")
     parser.default_actions = {}  # command -> (default action, its subparsers action)
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
 
@@ -2464,6 +2473,14 @@ def _setup_logging():
     log.setLevel(logging.INFO)
 
 
+def _resolve_log_level(args, cfg) -> int:
+    """The effective stderr log level: --verbose forces DEBUG; otherwise the
+    configured log_level name (unknown names fall back to INFO)."""
+    if getattr(args, "verbose", False):
+        return logging.DEBUG
+    return getattr(logging, (cfg.log_level or "INFO").upper(), logging.INFO)
+
+
 def main(argv=None) -> int:
     """CLI entry point; returns the process exit code."""
     _setup_logging()
@@ -2479,6 +2496,7 @@ def main(argv=None) -> int:
             log.info(f"config {args.config} not found -- writing defaults")
             write_default_config(args.config)
         cfg = load_config(args.config, overrides={"db_path": args.db})
+        log.setLevel(_resolve_log_level(args, cfg))
         match args.command:
             case "config":
                 result = cmd_config(cfg, args)

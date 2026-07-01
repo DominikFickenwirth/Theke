@@ -75,6 +75,7 @@ Vor dem Befehl angegeben, gelten für alle Befehle:
 | `-c`, `--config PATH`| Konfigurationsdatei (Standard: `theke.json`).          |
 | `-d`, `--db PATH`    | DB-Datei; überschreibt `db_path` aus der Konfiguration.|
 | `-j`, `--json`       | Maschinenlesbar: genau ein JSON-Objekt auf stdout.     |
+| `-v`, `--verbose`    | Ausführliches stderr-Log (DEBUG): Netz-Timings, Scan-Details. |
 | `-h`, `--help`       | Hilfe (auch je Befehl: `theke <befehl> --help`).       |
 
 **Kürzel:** Fast jede Option hat ein Ein-Buchstaben-Kürzel (wie `-h` für
@@ -89,6 +90,14 @@ stderr -- eine lange Stufe bleibt sichtbar, ohne das parsebare Ergebnis zu
 verschmutzen. Lange Übertragungen melden Fortschritt: Downloads (HTTP wie HLS)
 je 100 MiB eine Zeile (mit Prozent, wenn die Größe bekannt ist), ffmpeg-Läufe
 (remux, HLS-Fallback) alle 10 % der Mediendauer (`HH:MM:SS / HH:MM:SS (P%)`).
+Jede große Schleife kündigt sich vorab an und meldet einen Datensatz je Zeile.
+
+**Ausführliches Log (`-v`/`--verbose`):** senkt das stderr-Log auf DEBUG und
+zeigt Netz-Timings (jeder Request: Endpunkt, Bytes, Dauer -- der Query-String
+mit dem TMDB-Key wird nie geloggt) und die Kosten der Pro-Wish-Scans
+(`find_matches`/`find_arte_links`: gescannte Zeilen + Dauer). Ohne Flag lässt
+sich derselbe Pegel dauerhaft über das Config-Feld `log_level` setzen (Standard
+`INFO`), z.B. für den Scheduler-Daemon; `--verbose` schlägt die Config.
 
 **Präzedenz der Konfiguration:** CLI-Parameter > Umgebungsvariablen
 (`THEKE_<FELD>`) > Konfigurationsdatei > Defaults. Jedes Config-Feld ist über

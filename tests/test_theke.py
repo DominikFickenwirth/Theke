@@ -479,6 +479,33 @@ def test_http_get_merges_custom_headers(monkeypatch):
     assert req.get_header("User-agent") == "theke"          # default User-Agent kept
 
 
+class _Resp:
+    def __enter__(self):     return self
+    def __exit__(self, *a):  return False
+    def read(self):          return b"0123456789"           # 10 bytes
+
+
+def test_http_get_logs_timing_at_debug_without_query(monkeypatch, caplog):
+    import theke
+    monkeypatch.setattr(theke.core.urllib.request, "urlopen",
+                        lambda request, timeout=None: _Resp())
+    with caplog.at_level(logging.DEBUG, logger="theke"):
+        theke.core.http_get("https://api/movie/603?api_key=SECRET&language=de")
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("10 bytes" in m for m in msgs)               # byte count reported
+    assert any("/movie/603" in m for m in msgs)             # endpoint path shown
+    assert all("SECRET" not in m for m in msgs)             # query (api_key) stripped
+
+
+def test_http_get_timing_is_silent_above_debug(monkeypatch, caplog):
+    import theke
+    monkeypatch.setattr(theke.core.urllib.request, "urlopen",
+                        lambda request, timeout=None: _Resp())
+    with caplog.at_level(logging.INFO, logger="theke"):
+        theke.core.http_get("https://api/movie/603?api_key=SECRET")
+    assert caplog.records == []                             # timing is DEBUG-only
+
+
 # -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [
@@ -1573,3 +1600,61 @@ def test_cli_fetch_locked_db_exits_3(tmp_path, capsys, monkeypatch):
         assert main(["--json", "--db", db, "fetch"]) == 3
     finally:
         conn.close()
+
+
+# -- verbose / log level -----------------------------------------------------
+
+def test_config_log_level_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert Config().log_level == "INFO"
+    assert load_config(None).log_level == "INFO"
+
+
+def test_config_log_level_from_file(tmp_path):
+    path = tmp_path / "c.json"
+    write_config(path, {"log_level": "DEBUG"})
+    assert load_config(str(path)).log_level == "DEBUG"
+
+
+def test_verbose_flag_defaults_false():
+    import theke
+    assert theke.build_parser().parse_args(["config", "show"]).verbose is False
+
+
+def test_verbose_flag_sets_true():
+    import theke
+    assert theke.build_parser().parse_args(["-v", "config", "show"]).verbose is True
+
+
+def test_resolve_log_level_verbose_forces_debug():
+    import theke
+    # --verbose wins over any configured level.
+    assert theke._resolve_log_level(SimpleNamespace(verbose=True),
+                                    Config(log_level="WARNING")) == logging.DEBUG
+
+
+def test_resolve_log_level_from_config_when_not_verbose():
+    import theke
+    args = SimpleNamespace(verbose=False)
+    assert theke._resolve_log_level(args, Config(log_level="WARNING")) == logging.WARNING
+    assert theke._resolve_log_level(args, Config()) == logging.INFO   # default INFO
+
+
+def test_resolve_log_level_unknown_config_falls_back_to_info():
+    import theke
+    assert theke._resolve_log_level(SimpleNamespace(verbose=False),
+                                    Config(log_level="bogus")) == logging.INFO
+
+
+def test_main_verbose_lowers_logger_to_debug(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    import theke
+    assert main(["-v", "config", "show"]) == 0
+    assert theke.log.level == logging.DEBUG
+
+
+def test_main_without_verbose_keeps_info_level(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    import theke
+    assert main(["config", "show"]) == 0
+    assert theke.log.level == logging.INFO

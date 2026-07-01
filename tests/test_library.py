@@ -1652,3 +1652,84 @@ def test_library_remove_deleted_cli(tmp_path, capsys):
     cfgpath = _cfg_file(tmp_path)
     assert main(["--json", "--config", cfgpath, "library", "remove", "--deleted"]) == 0
     assert json.loads(capsys.readouterr().out) == {"removed": 0}
+
+
+# -- consistent per-loop / per-record logging --------------------------------
+
+def test_import_announces_and_logs_one_line_per_resolved_entry(tmp_path, monkeypatch, caplog):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "w.txt", "100\n")
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("import", path=path, json=True))
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("importing 1 entries") for m in msgs)   # loop announced
+    per_line = [m for m in msgs if "line 1" in m]
+    assert len(per_line) == 1                                       # ONE line per record
+    assert "-> " in per_line[0] and "100" in per_line[0]           # shows what it resolved to
+
+
+def test_import_logs_one_line_per_failed_entry(tmp_path, monkeypatch, caplog):
+    stub_import(monkeypatch)
+    path = write_file(tmp_path, "w.txt", "999\n")                   # /movie/999 -> 404
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, CFG, libargs("import", path=path, json=True))
+    finally:
+        conn.close()
+    per_line = [r.getMessage() for r in caplog.records if "line 1" in r.getMessage()]
+    assert len(per_line) == 1                                       # ONE line, even on failure
+    assert "failed" in per_line[0]
+
+
+def test_run_pass_announces_wish_count(tmp_path, monkeypatch, caplog):
+    stub_tmdb(monkeypatch)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=False)
+        insert_movie(conn, "m_de", tmdb_id="", status="1")
+        cmd_library(conn, cfg, libargs("add", tmdb=["100"]))       # add before capturing
+        with caplog.at_level(logging.INFO, logger="theke"):
+            _run_pass(conn, cfg)
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("matching + queueing 1" in m and "wish" in m for m in msgs)
+    finally:
+        conn.close()
+
+
+def test_scan_announces_root(tmp_path, monkeypatch, caplog):
+    stub_ffprobe(monkeypatch)
+    make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    conn = open_db(tmp_path)
+    try:
+        with caplog.at_level(logging.INFO, logger="theke"):
+            cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("scanning library at") and str(tmp_path) in m for m in msgs)
+
+
+def test_run_pass_logs_per_wish_elapsed(tmp_path, monkeypatch, caplog):
+    stub_tmdb(monkeypatch)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=False)
+        insert_movie(conn, "m_de", tmdb_id="", status="1")
+        cmd_library(conn, cfg, libargs("add", tmdb=["100"]))
+        with caplog.at_level(logging.INFO, logger="theke"):
+            _run_pass(conn, cfg)
+        msgs = [r.getMessage() for r in caplog.records]
+        # one per-wish line naming the id, its counts and the elapsed seconds.
+        assert any(m.startswith("wish 100:") and "queued" in m and "s)" in m
+                   for m in msgs)
+    finally:
+        conn.close()

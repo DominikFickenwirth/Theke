@@ -13,11 +13,17 @@
 
 import dataclasses
 import json
+import logging
 import os
 import sqlite3
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
+
+# Progress/diagnostics share the package-wide "theke" logger; main() routes it to
+# stderr. Using the stdlib logger keeps this leaf layer free of theke imports.
+log = logging.getLogger("theke")
 
 
 # -- config -------------------------------------------------------------------
@@ -59,6 +65,7 @@ class Config:
     audio_ext:            str   = "aac"
     subtitle_formats:     list  = dataclasses.field(default_factory=lambda: ["srt", "ass", "ttml"])
     run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
+    log_level:            str   = "INFO"  # stderr log level; --verbose forces DEBUG
 
 
 def _coerce_value(label: str, raw: str, ftype: type):
@@ -431,5 +438,11 @@ def http_get(url: str, timeout=None, headers=None) -> bytes:
     hanging forever (None = no timeout). `headers` are merged over the default
     User-Agent (e.g. an Authorization bearer for TMDB)."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+    start = time.perf_counter()
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read()
+        data = response.read()
+    # DEBUG only (theke run --verbose): the query is stripped so a TMDB api_key
+    # never lands in the log; scheme+host+path is enough to identify the endpoint.
+    log.debug("GET %s -> %d bytes, %.2fs", url.split("?", 1)[0], len(data),
+              time.perf_counter() - start)
+    return data
