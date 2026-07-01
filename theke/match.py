@@ -289,6 +289,46 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
             "year": year, "season": season, "episode": episode}
 
 
+# -- bulk match (phase 15: row-driven, eager, hard-gated) --------------------
+# Reverse of the lazy id-driven match: search TMDB by a row's own title and
+# accept only on hard gates (title + mandatory runtime + confirmed year +
+# release-not-after-broadcast), so the eager catalog stays free of false hits.
+
+
+def bulk_pick(candidates, row_year, tol):
+    """Pick the one TMDB candidate to confirm for a row. With a row year, the
+    tolerant nearest by year (pick_by_year). Without a year, only an unambiguous
+    result counts: exactly one candidate, else None (avoids guessing)."""
+    if row_year is not None:
+        return pick_by_year(candidates, row_year, tol)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _broadcast_year(date):
+    """The airing year from a mediathek `date` (leading 'YYYY...'); None when
+    absent or unparseable."""
+    s = str(date or "")[:4]
+    return int(s) if s.isdigit() else None
+
+
+def bulk_accept(meta, row, tol) -> dict:
+    """Decide whether to eagerly tag `row` with TMDB `meta`, on hard gates (all
+    must hold): the lazy score must not reject (title floor + year within tol);
+    runtime is mandatory and within RUNTIME_TOLERANCE (not the soft lazy
+    confirmer); a row year needs a TMDB year to confirm against; and the release
+    year must not sit past the broadcast year (within tol). Returns
+    {"accepted", "confidence"} with the lazy confidence when accepted."""
+    s = score_match(meta, row, year_tolerance=tol)
+    runtime, dur = meta.get("runtime"), row["duration"]
+    my, ry = row["year"], meta.get("year")
+    by = _broadcast_year(row.get("date"))
+    ok = (not s["rejected"]
+          and runtime and dur and abs(dur / 60 - runtime) / runtime <= RUNTIME_TOLERANCE
+          and (my is None or ry is not None)
+          and (by is None or ry is None or ry <= by + tol))
+    return {"accepted": bool(ok), "confidence": s["confidence"] if ok else 0.0}
+
+
 # -- candidate search --------------------------------------------------------
 
 def find_matches(conn, tmdb_meta, min_conf, year_tolerance=YEAR_TOLERANCE) -> list:
