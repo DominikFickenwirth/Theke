@@ -12,7 +12,7 @@ from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
-                         find_arte_links)
+                         find_arte_links, bulk_pick, bulk_accept)
 
 
 # -- normalize / strip_articles ----------------------------------------------
@@ -197,6 +197,60 @@ def test_tmdb_movie_parses_titles_year_runtime(monkeypatch):
     assert meta["original_language"] == "de"
     # title == original_title -> deduped; only the DE alternative is added, US dropped.
     assert meta["titles"] == ["Das Boot", "Das Boot - Director's Cut"]
+
+
+# -- bulk match: bulk_pick / bulk_accept (pure gates) ------------------------
+
+BCANDS = [{"tmdb_id": "1", "title": "Das Boot", "year": 1981},
+          {"tmdb_id": "2", "title": "Das Boot", "year": 1990}]
+
+
+def test_bulk_pick_year_present_uses_pick_by_year():
+    assert bulk_pick(BCANDS, 1981, 2)["tmdb_id"] == "1"   # delta 0 wins
+
+
+def test_bulk_pick_year_present_none_within_tolerance():
+    assert bulk_pick(BCANDS, 1950, 2) is None   # both years miss +-2
+
+
+def test_bulk_pick_no_year_only_when_single_candidate():
+    only = [{"tmdb_id": "9", "title": "X", "year": 2000}]
+    assert bulk_pick(only, None, 2)["tmdb_id"] == "9"   # exactly one -> take it
+    assert bulk_pick(BCANDS, None, 2) is None            # ambiguous -> no match
+    assert bulk_pick([], None, 2) is None                # empty -> no match
+
+
+def brow(clean_title="Das Boot", year=1981, duration=8940, date="1985-01-01"):
+    return {"clean_title": clean_title, "year": year, "duration": duration, "date": date}
+
+
+def test_bulk_accept_all_gates_pass():
+    a = bulk_accept(BOOT, brow(), 2)
+    assert a["accepted"] is True
+    assert a["confidence"] == 1.0   # exact title * year 1.0 * runtime 1.0
+
+
+def test_bulk_accept_runtime_is_a_hard_gate():
+    # 120 min vs 149 min: above the clip floor (score_match would only soft-
+    # penalise, conf 0.9) but rel dist 0.194 > RUNTIME_TOLERANCE 0.15 -> reject.
+    assert bulk_accept(BOOT, brow(duration=7200), 2)["accepted"] is False
+
+
+def test_bulk_accept_rejects_when_runtime_missing():
+    assert bulk_accept({"titles": ["Das Boot"], "year": 1981, "runtime": None},
+                       brow(), 2)["accepted"] is False
+    assert bulk_accept(BOOT, brow(duration=None), 2)["accepted"] is False
+
+
+def test_bulk_accept_year_present_requires_tmdb_year():
+    # row has a year but the TMDB candidate has none -> cannot confirm -> reject.
+    assert bulk_accept({"titles": ["Das Boot"], "year": None, "runtime": 149},
+                       brow(year=1981), 2)["accepted"] is False
+
+
+def test_bulk_accept_rejects_release_after_broadcast():
+    # release 1981 but aired 1978 (+-2 -> 1980): a film cannot air before release.
+    assert bulk_accept(BOOT, brow(year=None, date="1978-01-01"), 2)["accepted"] is False
 
 
 # -- find_matches (DB scan over category='Movie') ----------------------------
