@@ -143,6 +143,72 @@ def test_config_fiction_topics_from_file(tmp_path):
     assert load_config(str(path)).fiction_topics == ["Mein Regio-Krimi", "Dorf-Saga"]
 
 
+# -- config: env vars (phase 11, third source: defaults < file < env < CLI) --
+
+def test_config_env_overrides_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no theke.json here
+    monkeypatch.setenv("THEKE_DB_PATH", "env.db")
+    assert load_config(None).db_path == "env.db"
+
+
+def test_config_env_overrides_file(tmp_path, monkeypatch):
+    path = tmp_path / "prec.json"
+    write_config(path, {"db_path": "file.db"})
+    monkeypatch.setenv("THEKE_DB_PATH", "env.db")
+    assert load_config(str(path)).db_path == "env.db"
+
+
+def test_config_cli_overrides_env(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_DB_PATH", "env.db")
+    cfg = load_config(None, overrides={"db_path": "cli.db"})
+    assert cfg.db_path == "cli.db"
+
+
+def test_config_env_str_used_raw(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # str values are not JSON-parsed: no quoting needed
+    monkeypatch.setenv("THEKE_LIBRARY_ROOT", "/mnt/my movies")
+    assert load_config(None).library_root == "/mnt/my movies"
+
+
+def test_config_env_secret_key(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # the documented container use: keep secrets out of the file
+    monkeypatch.setenv("THEKE_TMDB_API_KEY", "SECRET")
+    assert load_config(None).tmdb_api_key == "SECRET"
+
+
+def test_config_env_int_coerced(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_MATCH_YEAR_TOLERANCE", "3")
+    assert load_config(None).match_year_tolerance == 3
+
+
+def test_config_env_bool_coerced(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_QUEUE_AUTO_APPROVE", "true")
+    assert load_config(None).queue_auto_approve is True
+
+
+def test_config_env_list_coerced(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_LANGUAGES", '["en", "fr"]')
+    assert load_config(None).languages == ["en", "fr"]
+
+
+def test_config_env_bad_json_is_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("THEKE_MATCH_YEAR_TOLERANCE", "notanint")
+    with pytest.raises(ConfigError, match="THEKE_MATCH_YEAR_TOLERANCE"):
+        load_config(None)
+
+
+def test_config_env_wrong_type_is_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # valid JSON, wrong type (str where int expected)
+    monkeypatch.setenv("THEKE_MATCH_YEAR_TOLERANCE", '"three"')
+    with pytest.raises(ConfigError, match="THEKE_MATCH_YEAR_TOLERANCE"):
+        load_config(None)
+
+
 def test_config_languages_wrong_type_is_error(tmp_path):
     path = tmp_path / "ql.json"
     write_config(path, {"languages": "de"})   # must be a list, not a string
