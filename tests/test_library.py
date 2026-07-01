@@ -31,6 +31,11 @@ SEARCH = {"results": [
     {"id": 999,  "title": "Escape Remake",       "release_date": "2013-01-01"},
 ]}
 
+# A /search/movie response with a single, unambiguous hit.
+SEARCH_ONE = {"results": [
+    {"id": 9268, "title": "Die Klapperschlange", "release_date": "1981-04-22"},
+]}
+
 
 def open_db(tmp_path):
     return db_connect(str(tmp_path / "theke.db"))
@@ -678,6 +683,29 @@ def test_library_add_by_title_year_tolerance_override(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_library_add_by_title_yearless_single_candidate_resolves(tmp_path, monkeypatch):
+    # No --year: a single TMDB hit is taken (unified with match bulk / import).
+    stub_search(monkeypatch, payload=SEARCH_ONE)
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("add", title="Die Klapperschlange"))
+        assert result == {"added": 1, "skipped": 0}
+        assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_yearless_multiple_candidates_raises(tmp_path, monkeypatch):
+    # No --year and several hits -> ambiguous, raises (no most-popular guess).
+    stub_search(monkeypatch)   # two results
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            cmd_library(conn, CFG, libargs("add", title="Escape"))
+    finally:
+        conn.close()
+
+
 def test_library_add_by_title_no_results_raises(tmp_path, monkeypatch):
     stub_search(monkeypatch, payload={"results": []})
     conn = open_db(tmp_path)
@@ -915,9 +943,44 @@ def test_search_title_no_article_does_not_retry(monkeypatch):
     assert len(calls) == 1
 
 
-def test_import_title_without_year_is_error(tmp_path, monkeypatch):
-    # A txt title line with no "(YYYY)" must fail (no guessing without a year).
-    stub_import(monkeypatch)
+def test_search_title_yearless_single_candidate_resolves(monkeypatch):
+    # No year given but exactly one TMDB hit -> take it (match bulk's rule).
+    stub_search(monkeypatch, payload=SEARCH_ONE)
+    tid, title, year = theke._search_title(CFG, "Die Klapperschlange", None, 2)
+    assert (tid, title, year) == ("9268", "Die Klapperschlange", 1981)
+
+
+def test_search_title_yearless_multiple_candidates_raises(monkeypatch):
+    # No year and more than one hit -> ambiguous, no guessing; the message names
+    # the count and the title.
+    stub_search(monkeypatch)   # SEARCH has two results
+    with pytest.raises(ValueError) as exc:
+        theke._search_title(CFG, "Escape", None, 2)
+    msg = str(exc.value)
+    assert msg.startswith("2 ") and "Escape" in msg
+
+
+def test_import_yearless_title_single_match_resolves(tmp_path, monkeypatch):
+    # A yearless title with exactly one TMDB hit is imported (match bulk's rule).
+    def fake(url, timeout=None):
+        if "/search/movie" in url:
+            return json.dumps(SEARCH_ONE).encode("utf-8")
+        raise AssertionError(f"unexpected url {url}")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    path = write_file(tmp_path, "wishes.txt", "Die Klapperschlange")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 0
+        assert [r["tmdb_id"] for r in library_rows(conn)] == ["9268"]
+    finally:
+        conn.close()
+
+
+def test_import_yearless_title_multiple_matches_is_error(tmp_path, monkeypatch):
+    # A yearless title with >1 TMDB hit stays ambiguous -> error log (no guess);
+    # the id line still imports.
+    stub_import(monkeypatch)   # /search returns two results
     path = write_file(tmp_path, "wishes.txt", "Heat\n100")
     conn = open_db(tmp_path)
     try:
@@ -925,14 +988,13 @@ def test_import_title_without_year_is_error(tmp_path, monkeypatch):
         assert result["added"] == 1 and result["failed"] == 1
         assert result["errors"][0]["line"] == 1
         assert result["errors"][0]["input"] == "Heat"
-        assert "year" in result["errors"][0]["reason"].lower()
         assert [r["tmdb_id"] for r in library_rows(conn)] == ["100"]
     finally:
         conn.close()
 
 
-def test_import_csv_title_without_year_is_error(tmp_path, monkeypatch):
-    stub_import(monkeypatch)
+def test_import_csv_yearless_title_multiple_matches_is_error(tmp_path, monkeypatch):
+    stub_import(monkeypatch)   # /search returns two results
     path = write_file(tmp_path, "wishes.csv",
                       "title,year\nDie Klapperschlange,1981\nHeat,")
     conn = open_db(tmp_path)
@@ -940,7 +1002,6 @@ def test_import_csv_title_without_year_is_error(tmp_path, monkeypatch):
         result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
         assert result["added"] == 1 and result["failed"] == 1
         assert result["errors"][0]["line"] == 3
-        assert "year" in result["errors"][0]["reason"].lower()
     finally:
         conn.close()
 
