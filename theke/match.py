@@ -337,7 +337,7 @@ def find_matches(conn, tmdb_meta, min_conf, year_tolerance=YEAR_TOLERANCE) -> li
     sorted by confidence desc, then mediathek_id."""
     start = time.perf_counter()
     sql = ("SELECT mediathek_id, clean_title, year, duration, flags "
-           "FROM mediathek WHERE category='Movie' AND status='1'")
+           "FROM mediathek WHERE category='Movie' AND status IN ('1','2')")
     params = ()
     ry = tmdb_meta.get("year")   # year is a near-hard gate -> prune out-of-window
     if ry is not None:           # rows in SQL; jahrlose rows survive (no gate)
@@ -367,7 +367,7 @@ def find_episode_matches(conn, tv_meta, min_conf) -> list:
     confidence desc, then mediathek_id."""
     rows = conn.execute(
         "SELECT mediathek_id, clean_title, series_name, season, episode, duration, "
-        "flags FROM mediathek WHERE category='Episode' AND status='1' "
+        "flags FROM mediathek WHERE category='Episode' AND status='1' "   # episodes are never bulk-attempted (movies-only)
         "AND season=? AND episode=?", (tv_meta["season"], tv_meta["episode"]))
     out = []
     for r in rows:
@@ -434,7 +434,7 @@ def find_arte_links(conn, anchors, exclude_ids) -> list:
     start = time.perf_counter()
     groups, scanned = {}, 0
     for r in conn.execute("SELECT mediathek_id, clean_title, url_website FROM "
-                          "mediathek WHERE sender LIKE 'ARTE.%' AND status='1'"):
+                          "mediathek WHERE sender LIKE 'ARTE.%' AND status IN ('1','2')"):
         scanned += 1
         vid = arte_video_id(r["url_website"])
         if vid in anchors:

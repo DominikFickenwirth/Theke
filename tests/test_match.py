@@ -596,8 +596,8 @@ def test_cmd_match_run_series_writes_id_and_confidence(tmp_path, monkeypatch):
         assert tuple(tmdb_of(conn, "e1")) == ("55", 1.0)
         assert tuple(tmdb_of(conn, "e5")) == ("55", 0.9)
         assert tmdb_of(conn, "e2")["tmdb_id"] == ""   # wrong series, untouched
-        assert status_of(conn, "e1") == "2"
-        assert status_of(conn, "e5") == "2"
+        assert status_of(conn, "e1") == "3"
+        assert status_of(conn, "e5") == "3"
         assert status_of(conn, "e2") == "1"
     finally:
         conn.close()
@@ -935,7 +935,7 @@ def test_cmd_match_run_links_arte_language_variants(tmp_path, monkeypatch):
         assert tuple(tmdb_of(conn, "a1")) == ("1234", 1.0)   # pass-1 German hit
         assert tuple(tmdb_of(conn, "a2")) == ("1234", 1.0)   # variants inherit conf
         assert tuple(tmdb_of(conn, "a3")) == ("1234", 1.0)
-        assert status_of(conn, "a2") == "2" and status_of(conn, "a3") == "2"
+        assert status_of(conn, "a2") == "3" and status_of(conn, "a3") == "3"
     finally:
         conn.close()
 
@@ -1001,7 +1001,7 @@ def test_cmd_match_run_links_mysteries_of_lisbon(tmp_path, monkeypatch):
         # all five language variants linked by id, inheriting the anchor's 1.0
         for mid, *_ in LISBON_VARIANTS:
             assert tuple(tmdb_of(conn, mid)) == ("49348", 1.0)
-            assert status_of(conn, mid) == "2"
+            assert status_of(conn, mid) == "3"
     finally:
         conn.close()
 

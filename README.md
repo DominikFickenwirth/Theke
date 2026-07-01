@@ -373,9 +373,10 @@ theke --db build/theke.db match show --type series --tmdb 290 --season 2 --episo
 
 ### `match reset`
 
-Macht das Matching rückgängig: setzt gematchte Zeilen (`status='2'`) zurück auf
-`'1'` (angereichert). Leert dabei `tmdb_id` und `match_confidence`. Reine
-DB-Operation -- kein TMDB-Key nötig. Gibt `reset = N` aus.
+Macht das Matching rückgängig: setzt gematchte (`status='3'`) und erfolglos
+bulk-versuchte (`status='2'`) Zeilen zurück auf `'1'` (angereichert). Leert dabei
+`tmdb_id` und `match_confidence`. Reine DB-Operation -- kein TMDB-Key nötig. Gibt
+`reset = N` aus.
 
 | Option                | Wirkung                                                       |
 | --------------------- | ------------------------------------------------------------- |

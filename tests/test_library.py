@@ -154,7 +154,7 @@ def stub_stages(monkeypatch):
 def test_library_migration_creates_table(tmp_path):
     conn = open_db(tmp_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(library)")}
         assert cols == {"tmdb_id", "status", "title", "year", "path",
                         "created_at", "updated_at",

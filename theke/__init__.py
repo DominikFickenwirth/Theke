@@ -424,7 +424,7 @@ def _enrich_reset(conn, args) -> dict:
     """Undo enrich: take enriched/matched rows (status '1'/'2') back to '0', as
     if freshly fetched. Clears the enrich + match columns unless --status-only."""
     sets = "status='0'" if args.status_only else f"status='0', {_ENRICH_CLEAR}"
-    return _reset(conn, sets, "status IN ('1','2')")
+    return _reset(conn, sets, "status IN ('1','2','3')")
 
 
 def _reset(conn, sets, where) -> dict:
@@ -889,10 +889,11 @@ def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
 
 
 def _match_reset(conn, args) -> dict:
-    """Undo match: take matched rows (status '2') back to enriched ('1').
-    Clears tmdb_id + match_confidence unless --status-only."""
+    """Undo match: take matched ('3') and bulk-attempted ('2') rows back to
+    enriched ('1'), so a fresh match/bulk pass can retry them. Clears tmdb_id +
+    match_confidence unless --status-only."""
     sets = "status='1'" if args.status_only else f"status='1', {_MATCH_CLEAR}"
-    return _reset(conn, sets, "status='2'")
+    return _reset(conn, sets, "status IN ('2','3')")
 
 
 def _match_resolve(conn, cfg, args, min_conf) -> tuple:
@@ -937,7 +938,7 @@ def _match_run(conn, cfg, args) -> dict:
                     log.warning("skip %s: already tmdb_id %s", m["mediathek_id"], cur)
                     continue
                 conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
-                             "status='2' WHERE mediathek_id=?",
+                             "status='3' WHERE mediathek_id=?",
                              (meta["tmdb_id"], m["confidence"], m["mediathek_id"]))
                 written += 1
             conn.execute("COMMIT")
@@ -1053,7 +1054,7 @@ def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
     meta = tmdb_movie(cfg, tmdb_id)
     fields = _path_fields(meta["title"], meta["year"])
     rows = {r["mediathek_id"]: dict(r) for r in conn.execute(
-        "SELECT * FROM mediathek WHERE status='2' AND tmdb_id=?", (tmdb_id,))}
+        "SELECT * FROM mediathek WHERE status='3' AND tmdb_id=?", (tmdb_id,))}
     picks = select_downloads(list(rows.values()), cfg.languages, meta["original_language"])
     totals["deduplicated"] += len(rows) - len(picks)
     for i, p in enumerate(picks):
@@ -2283,7 +2284,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich = sub.add_parser("enrich", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
     csub = enrich.add_subparsers(dest="enrich_cmd", required=True, metavar="action")
     crun = csub.add_parser("run",    help="enrich mirrored rows (default)",                      description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the enrich columns and flip status 0 -> 1.")
-    crst = csub.add_parser("reset",  help="undo enrich: status 1/2 -> 0",                         description="Take enriched/matched rows (status '1'/'2') back to '0', as if freshly fetched. Clears the enrich + match columns unless --status-only.")
+    crst = csub.add_parser("reset",  help="undo enrich: status 1/2/3 -> 0",                       description="Take enriched/bulk-attempted/matched rows (status '1'/'2'/'3') back to '0', as if freshly fetched. Clears the enrich + match columns unless --status-only.")
     crep = csub.add_parser("report", help="read-only per-sender coverage report",                description="Per-sender coverage of the enrich fields. Reads the stored columns by default; --live re-runs enrich() without writing.")
     caud = csub.add_parser("audit",  help="read-only findings scan for wrong/suspicious values", description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-enriched rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
     csho = csub.add_parser("show",   help="read-only sample of rows with their enrich columns",  description="Dump the enrich columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
@@ -2314,7 +2315,7 @@ def build_parser() -> argparse.ArgumentParser:
     msub = matchp.add_subparsers(dest="match_cmd", required=True, metavar="action")
     mrun = msub.add_parser("run",  help="tag matching rows with tmdb_id + confidence (default)",  description="Resolve the TMDB id and write tmdb_id + match_confidence onto matching rows. For --type series, pass the (--tmdb, --season, --episode) triple. An existing different tmdb_id is preserved, not overwritten.")
     msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate rows with their score breakdown without writing. Defaults to listing everything not rejected.")
-    mrst = msub.add_parser("reset", help="undo match: status 2 -> 1",                              description="Take matched rows (status '2') back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
+    mrst = msub.add_parser("reset", help="undo match: status 2/3 -> 1",                            description="Take matched ('3') and bulk-attempted ('2') rows back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
     mrst.add_argument("-s", "--status-only", action="store_true",                                        help="only flip status, keep tmdb_id + match_confidence")
     mrun.add_argument("-t", "--tmdb",     required=True, metavar="ID",                                  help="TMDB id to match (movie id, or series id for --type series)")
     mrun.add_argument("-T", "--type",     default="movie", choices=["movie", "series"],                 help="media type (default movie)")

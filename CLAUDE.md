@@ -38,7 +38,7 @@ targets the layout, not any one media server). The only source is the public Med
    flips `status` '0' -> '1'. It is local and cheap (no API) and is the search base
    for everything below.
 4. **Match** (done) -- `theke match` matches a given TMDB ID with mediathek rows
-   by resolving the ID's metadata via TMDB API, and flips `status` '1' -> '2'.
+   by resolving the ID's metadata via TMDB API, and flips `status` -> '3' (matched).
 5. **Download queue** (done) -- staging of downloads via `mediathek_id` or `tmdb_id`
    into SQLite table `queue`. Depending on config, queue entries may need manual
    approval before download. Staging via `tmdb_id` is deduplicated automatically.
@@ -106,12 +106,14 @@ queue table                              |
 Single SQLite file `theke.db`. Field lists and status names are indicative.
 
 - **mediathek** -- film-list mirror, refreshed periodically. `status` is one char
-  ('0' new, '1' enriched, '2' matched, possibly: 'D' downloaded, 'N' not needed).
+  ('0' new, '1' enriched, '2' bulk-attempted-but-unmatched, '3' matched).
   `enrich` fills language/clean_title/series_name/season/episode/episode_count/
   category/year/country/flags/enrich_confidence and flips status to '1';
-  `match` fills tmdb_id/match_confidence on demand (only for rows a wishlist entry
-  or manual pick resolves) and flips status to '2'. All enriched columns survive
-  refreshes via `fetch`.
+  `match` fills tmdb_id/match_confidence and flips status to '3' -- lazy (on demand
+  for rows a wish or manual pick resolves) or eager (`match bulk`, phase 15). Bulk
+  match marks a row it cannot confidently match '2' (skipped by later bulk passes
+  but still lazy-matchable: `find_matches` scans '1' and '2'). All enriched columns
+  survive refreshes via `fetch`.
 - **queue** -- review queue + download record in one. `status` is one char
   (Lifecycle `proposed -> approved -> downloading -> done / failed / cancelled`).
 - **library** -- wishlist + current library record in one. `status` is one char

@@ -334,6 +334,11 @@ MIGRATIONS: list[tuple[str, ...]] = [
         "ALTER TABLE library ADD COLUMN indexed_at TEXT",   # last scan sighting (sweep watermark)
         "ALTER TABLE library ADD COLUMN source     TEXT",   # provenance (e.g. "scan")
     ),
+    (  # phase 15: bulk match re-purposes the mediathek status alphabet. Matched
+       # rows move to '3' (freeing '2' for "bulk-attempted, no confident match",
+       # which stays lazy-matchable). Migrate existing matched rows.
+        "UPDATE mediathek SET status='3' WHERE status='2'",
+    ),
 ]
 
 
