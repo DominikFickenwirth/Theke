@@ -1,0 +1,19 @@
+# Synology Container Manager: create a Project pointing at this folder -- it uses
+# this compose file and builds the image on the NAS. Adjust the /movies host path
+# to your library share and set THEKE_TMDB_API_KEY (Container Manager env field or
+# a .env file next to this one). config/ and data/ are created next to this file.
+services:
+  theke:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: theke:local
+    container_name: theke
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Berlin
+      - THEKE_TMDB_API_KEY=${THEKE_TMDB_API_KEY:-}
+    volumes:
+      - ./config:/config                 # theke.json (seeded on first run)
+      - ./data:/data                     # theke.db + temp files
+      - /volume1/video/movies:/movies    # <-- your library share

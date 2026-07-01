@@ -1,0 +1,12 @@
+# Keep the build context small; the image only needs pyproject.toml + theke/.
+.git
+.venv
+build
+analysis
+tests
+webui
+docker/config
+docker/data
+**/__pycache__
+*.egg-info
+.pytest_cache

@@ -90,7 +90,13 @@ verschmutzen. Lange Übertragungen melden Fortschritt: Downloads (HTTP wie HLS)
 je 100 MiB eine Zeile (mit Prozent, wenn die Größe bekannt ist), ffmpeg-Läufe
 (remux, HLS-Fallback) alle 10 % der Mediendauer (`HH:MM:SS / HH:MM:SS (P%)`).
 
-**Präzedenz der Konfiguration:** CLI-Parameter > Konfigurationsdatei > Defaults.
+**Präzedenz der Konfiguration:** CLI-Parameter > Umgebungsvariablen
+(`THEKE_<FELD>`) > Konfigurationsdatei > Defaults. Jedes Config-Feld ist über
+`THEKE_<FELD>` (Großbuchstaben) setzbar, z.B. `THEKE_TMDB_API_KEY`,
+`THEKE_DB_PATH`. Text-Felder werden roh übernommen (kein Quoting nötig), alle
+anderen Typen als JSON (`THEKE_QUEUE_AUTO_APPROVE=true`,
+`THEKE_LANGUAGES='["de","en"]'`). Gedacht v.a. für Secrets und das
+Docker-Deployment (siehe unten).
 
 **Exit-Codes** (stabil, für die GUI):
 
@@ -907,3 +913,52 @@ theke --db build/theke.db run --once          # ein Durchlauf
 theke --db build/theke.db --json run --once
 theke --db build/theke.db run                 # Daemon nach run_schedule
 ```
+
+# Docker-Deployment (Synology-NAS)
+
+Ausgeliefert wird Theke als Container, der den Scheduler (`theke run`) als Daemon
+fährt. Alle Dateien liegen in Docker-Volumes:
+
+| Volume    | Inhalt                                                        |
+| --------- | ------------------------------------------------------------- |
+| `/config` | `theke.json` (beim ersten Start aus einer Vorlage angelegt). |
+| `/data`   | `theke.db` und temporäre Dateien.                            |
+| `/movies` | die Film-Library (`library_root`).                           |
+
+Das Image bringt **FFmpeg** und **tzdata** mit; `TZ` steuert die lokale Uhrzeit
+für die `run_schedule`-Trigger. Der TMDB-Key gehört **nicht** in die Config-Datei,
+sondern kommt als `THEKE_TMDB_API_KEY` per Env (überschreibt die Datei).
+
+## Build auf dem NAS (Container Manager)
+
+Der Build läuft direkt auf dem NAS -- kein lokales Docker nötig:
+
+1. Repo aufs NAS kopieren (z.B. in einen Ordner auf `/volume1/docker/theke`).
+2. In `docker/docker-compose.yml` den `/movies`-Host-Pfad auf deinen
+   Library-Share anpassen.
+3. TMDB-Key setzen: entweder eine Datei `docker/.env` mit
+   `THEKE_TMDB_API_KEY=dein_key` anlegen, oder im Container Manager das
+   Env-Feld setzen.
+4. **Container Manager -> Projekt -> Erstellen**, als Pfad den `docker/`-Ordner
+   wählen (nutzt die `docker-compose.yml`). Container Manager baut das Image auf
+   dem NAS und startet den Container.
+
+Alternativ per SSH aus dem `docker/`-Ordner:
+
+```sh
+docker compose up -d --build      # baut das Image und startet den Daemon
+docker compose logs -f            # Scheduler-Ausgabe (ein JSON-Objekt pro Pass)
+```
+
+Beim ersten Start legt der Entrypoint eine Start-`theke.json` in `/config` an
+(aus `docker/theke.example.json`). Danach: Datei anpassen (v.a. `tmdb_lists` /
+`run_schedule`) und den Container neu starten. Einzelne Kommandos lassen sich im
+laufenden Container ausführen, z.B.:
+
+```sh
+docker compose exec theke theke --config /config/theke.json --json config
+docker compose exec theke theke --config /config/theke.json run --once
+```
+
+`docker compose stop` beendet den Scheduler über `SIGTERM` sauber nach dem
+laufenden Pass.

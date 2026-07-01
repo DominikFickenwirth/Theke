@@ -29,6 +29,11 @@ theke.db
 theke.db-*
 theke.json
 
+# Docker deployment runtime data (created next to docker/docker-compose.yml)
+docker/config/
+docker/data/
+docker/.env
+
 # Claude Code transient worktrees
 .claude/worktrees/
 

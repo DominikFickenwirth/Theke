@@ -1,0 +1,5 @@
+# Container files must keep LF regardless of the (Windows) dev host -- a CRLF in
+# entrypoint.sh breaks the shebang inside the image.
+*.sh            text eol=lf
+docker/Dockerfile text eol=lf
+*.yml           text eol=lf
