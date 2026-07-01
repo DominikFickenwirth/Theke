@@ -1143,6 +1143,42 @@ def test_redundant_series_suffix_not_stripped_without_series_name():
     assert r["clean_title"] == "Volles Haus – Anna und ihr Untermieter"
 
 
+# -- enrich improvements A4: bare "(n)" running number -> episode ------------
+
+def test_bare_paren_number_becomes_episode_and_episode_category():
+    # A4: a bare "(n)" (1-2 digits) at the title end is a running episode number.
+    # Extract it as episode, strip it, and let the episodic rule set Episode.
+    r = enrich("ARD", "Das Konto", "Das Konto (2)", "", 5400)
+    assert r["episode"] == 2
+    assert r["clean_title"] == "Das Konto"
+    assert r["category"] == "Episode"
+
+
+def test_bare_paren_number_with_redundant_series_suffix():
+    # A4 + A1 together: strip the bare "(n)" first, then the redundant reihe suffix.
+    r = enrich("ARD", "Anna und ihr Untermieter",
+                 "Volles Haus – Anna und ihr Untermieter (5)", "", 5400)
+    assert r["episode"] == 5
+    assert r["series_name"] == "Anna und ihr Untermieter"
+    assert r["clean_title"] == "Volles Haus"
+    assert r["category"] == "Episode"
+
+
+def test_bare_paren_number_does_not_take_a_year():
+    # GUARD: a 4-digit "(YYYY)" is a year disambiguation, never a bare episode.
+    r = enrich("ARD", "Spielfilm", "Der Fall (2019)", "", 5400)
+    assert r["episode"] is None
+    assert r["year"] == 2019
+    assert r["clean_title"] == "Der Fall"
+
+
+def test_bare_paren_number_does_not_override_existing_episode():
+    # GUARD: an explicit (Sxx/Exx) wins; the bare "(n)" only fills an unset episode.
+    r = enrich("ARD", "Doku", "Die Story (S02/E06) (3)", "", 3000)
+    assert r["episode"] == 6
+    assert r["clean_title"] == "Die Story (3)"
+
+
 # -- cmd_enrich: DB write side ---------------------------------------------
 
 def open_db(tmp_path):
