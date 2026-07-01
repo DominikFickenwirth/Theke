@@ -59,6 +59,7 @@ class Config:
     audio_ext:            str   = "aac"
     subtitle_formats:     list  = dataclasses.field(default_factory=lambda: ["srt", "ass", "ttml"])
     run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
+    log_level:            str   = "INFO"  # stderr log level; --verbose forces DEBUG
 
 
 def _coerce_value(label: str, raw: str, ftype: type):

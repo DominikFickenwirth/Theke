@@ -2054,10 +2054,13 @@ def _run_pass(conn, cfg) -> dict:
     failed = 0
     for tid in wishes:
         try:
-            _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
+            match = _match_run(conn, cfg, _ns(tmdb=tid, type="movie", season=None,
                                       episode=None, dry_run=False, min_conf=None,
                                       year_tolerance=None))
             _queue_add_tmdb(conn, cfg, str(tid), status, {}, totals)
+            log.info("%s  matches: %s, written: %s, total queued: %s", tid,
+                     match["candidates"] + match["arte_linked"], match["written"],
+                     totals["queued"])
         except Exception as exc:
             failed += 1
             log.warning("update wish %s failed: %s", tid, exc)
@@ -2254,6 +2257,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-c", "--config", metavar="PATH",      help=f"config file (default: {CONFIG_DEFAULT_PATH})")
     parser.add_argument("-d", "--db",     metavar="PATH",      help="database file (overrides db_path from config)")
     parser.add_argument("-j", "--json",   action="store_true", help="machine-readable output: one JSON object on stdout")
+    parser.add_argument("-v", "--verbose", action="store_true", help="verbose stderr logging (DEBUG level: network timings, per-loop detail)")
     parser.default_actions = {}  # command -> (default action, its subparsers action)
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
 
@@ -2464,6 +2468,14 @@ def _setup_logging():
     log.setLevel(logging.INFO)
 
 
+def _resolve_log_level(args, cfg) -> int:
+    """The effective stderr log level: --verbose forces DEBUG; otherwise the
+    configured log_level name (unknown names fall back to INFO)."""
+    if getattr(args, "verbose", False):
+        return logging.DEBUG
+    return getattr(logging, (cfg.log_level or "INFO").upper(), logging.INFO)
+
+
 def main(argv=None) -> int:
     """CLI entry point; returns the process exit code."""
     _setup_logging()
@@ -2479,6 +2491,7 @@ def main(argv=None) -> int:
             log.info(f"config {args.config} not found -- writing defaults")
             write_default_config(args.config)
         cfg = load_config(args.config, overrides={"db_path": args.db})
+        log.setLevel(_resolve_log_level(args, cfg))
         match args.command:
             case "config":
                 result = cmd_config(cfg, args)
