@@ -381,7 +381,8 @@ def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
                 decisions.append((r["mediathek_id"], tid, a["confidence"]))
         if not accepted:
             decisions.append((r["mediathek_id"], None, None))
-        log.info("bulk %s: %s", r["mediathek_id"], "matched" if accepted else "no match")
+        log.info("bulk %s '%s' (%s): %s", r["mediathek_id"][:7], r["clean_title"],
+                 r["year"], "matched" if accepted else "no match")
     conn.execute("BEGIN")
     try:
         for mid, tid, conf in decisions:
