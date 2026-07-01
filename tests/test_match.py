@@ -12,7 +12,7 @@ from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
-                         find_arte_links, pick_by_year, bulk_match,
+                         find_arte_links, bulk_match,
                          search_movies, resolve_one)
 
 

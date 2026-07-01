@@ -209,12 +209,6 @@ def _tmdb_search_page(cfg, title):
     return cands, data.get("total_results") or len(cands), data.get("total_pages") or 1
 
 
-def tmdb_search(cfg, title) -> list:
-    """Page-1 TMDB movie candidates ({tmdb_id, title, year}) for a title, thin
-    wrapper over _tmdb_search_page dropping the pagination totals."""
-    return _tmdb_search_page(cfg, title)[0]
-
-
 def tmdb_list(cfg, list_id) -> list:
     """Fetch a TMDB list's entries as {tmdb_id, title, year, media_type}, reading
     the v3 /list/{id} endpoint. A configured read access token authenticates via a
@@ -237,27 +231,6 @@ def tmdb_list(cfg, list_id) -> list:
         pages = data.get("total_pages") or 1
         page += 1
     return items
-
-
-def pick_by_year(candidates, year, tolerance):
-    """Pick the one TMDB candidate to confirm for a wanted year: within
-    tolerance, the smallest year distance, ties keeping TMDB's popularity order
-    (candidates without a year are skipped once a year is wanted). Without a
-    wanted year only an unambiguous result counts: exactly one candidate, else
-    None (avoids guessing). None when nothing qualifies."""
-    if not candidates:
-        return None
-    if year is None:
-        return candidates[0] if len(candidates) == 1 else None
-    best, best_delta = None, None
-    for c in candidates:
-        if c["year"] is None:
-            continue
-        delta = abs(c["year"] - year)
-        if delta > tolerance or (best_delta is not None and delta >= best_delta):
-            continue
-        best, best_delta = c, delta
-    return best
 
 
 # -- unified movie search (the one title->TMDB choke point) ------------------
