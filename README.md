@@ -882,20 +882,30 @@ theke --db build/theke.db --json library scan
 Stufe 9+10: **ein unbeaufsichtigter Durchlauf** der gesamten Pipeline für die
 Wunschliste -- einmalig (`--once`) oder **wiederholt nach einem Zeitplan** (der
 In-App-Scheduler). Ein Durchlauf (Pass) der Reihe nach: `fetch` (Filmliste
-aktualisieren), `enrich` (Metadaten extrahieren), dann -- sofern `tmdb_lists`
-konfiguriert ist -- jede **konfigurierte TMDB-Liste** additiv in die Library
-nachziehen (nur Filme, wie `library add --tmdb-list`; gezählt in `list_added`),
-dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen und passende
+aktualisieren), `enrich` (Metadaten extrahieren), `library scan` (die
+On-Disk-Library mit der `library`-Tabelle abgleichen, s.u.), dann -- sofern
+`tmdb_lists` konfiguriert ist -- jede **konfigurierte TMDB-Liste** additiv in die
+Library nachziehen (nur Filme, wie `library add --tmdb-list`; gezählt in
+`list_added`), dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen und passende
 `mediathek`-Zeilen taggen) und `queue add` (deduplizierte Download-Menge einreihen).
 Ist `queue_auto_approve` gesetzt, werden die genehmigten Einträge anschließend
 gleich heruntergeladen (jeder fertige Wunsch wird dabei als `L` vermerkt); sonst
 endet der Pass am Genehmigungs-Tor mit `proposed`-Einträgen. Ein einzelner
 fehlschlagender Wunsch oder eine fehlschlagende Liste (z. B. ein TMDB-Fehler)
 bricht den Pass nicht ab, und ein fehlschlagender Pass bricht die Schleife nicht
-ab. Das Pass-Ergebnis fasst `fetch`/`enriched`/`list_added`/`wishes`/`queued`/
-`skipped`/`deduplicated`/`failed`/`downloaded` zusammen; im Loop wird je Pass eine
-Zeile geschrieben (in `--json` ein JSON-Objekt pro Pass, JSONL), Fortschritt geht
-nach stderr.
+ab. Das Pass-Ergebnis fasst `fetch`/`enriched`/`scan`/`list_added`/`wishes`/
+`queued`/`skipped`/`deduplicated`/`failed`/`downloaded` zusammen; im Loop wird je
+Pass eine Zeile geschrieben (in `--json` ein JSON-Objekt pro Pass, JSONL),
+Fortschritt geht nach stderr.
+
+Der **Scan vor dem Wunsch-Loop** hält die `library`-Tabelle am On-Disk-Stand: ein
+Wunsch, dessen Film schon in der Library liegt, wird als `L` vermerkt und nicht
+neu beschafft; verschwundene Dateien werden `D`. Er läuft mit Default-Argumenten
+(ganzer `library_root`, ohne `--allow-empty`) und schreibt selbst nie ins
+Dateisystem. Ein Scan-Fehler (z. B. ein nicht eingehängter `library_root`) wird
+gefangen und unter `scan` als `{"error": ...}` gemeldet, ohne den restlichen Pass
+abzubrechen; die ausführlichen Duplikat-/Unresolved-Pfadlisten von `library scan`
+werden im Pass-Summary auf ihre Anzahl reduziert.
 
 Der Listen-Abgleich ist **nur additiv**: aus einer Liste entfernte Filme werden
 **nicht** aus der Library gelöscht (die Library hat mehrere Quellen, und ein
