@@ -479,6 +479,33 @@ def test_http_get_merges_custom_headers(monkeypatch):
     assert req.get_header("User-agent") == "theke"          # default User-Agent kept
 
 
+class _Resp:
+    def __enter__(self):     return self
+    def __exit__(self, *a):  return False
+    def read(self):          return b"0123456789"           # 10 bytes
+
+
+def test_http_get_logs_timing_at_debug_without_query(monkeypatch, caplog):
+    import theke
+    monkeypatch.setattr(theke.core.urllib.request, "urlopen",
+                        lambda request, timeout=None: _Resp())
+    with caplog.at_level(logging.DEBUG, logger="theke"):
+        theke.core.http_get("https://api/movie/603?api_key=SECRET&language=de")
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("10 bytes" in m for m in msgs)               # byte count reported
+    assert any("/movie/603" in m for m in msgs)             # endpoint path shown
+    assert all("SECRET" not in m for m in msgs)             # query (api_key) stripped
+
+
+def test_http_get_timing_is_silent_above_debug(monkeypatch, caplog):
+    import theke
+    monkeypatch.setattr(theke.core.urllib.request, "urlopen",
+                        lambda request, timeout=None: _Resp())
+    with caplog.at_level(logging.INFO, logger="theke"):
+        theke.core.http_get("https://api/movie/603?api_key=SECRET")
+    assert caplog.records == []                             # timing is DEBUG-only
+
+
 # -- db ----------------------------------------------------------------------
 
 DUMMY_MIGRATIONS = [
