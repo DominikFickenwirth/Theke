@@ -2084,13 +2084,32 @@ def cmd_run(conn, cfg, args: argparse.Namespace):
     stop = threading.Event()
     _install_signal_handlers(stop)
     log.info("scheduler started (run_schedule=%s)", cfg.run_schedule)
+    state = {"cfg": cfg}                    # reloaded per pass; see _reload_config
+
+    def one_pass():
+        state["cfg"] = _reload_config(args, state["cfg"])
+        return _run_pass(conn, state["cfg"])
+
     scheduler.run_loop(
-        pass_fn=lambda: _run_pass(conn, cfg),
+        pass_fn=one_pass,
         on_result=lambda result: _emit_pass(conn, result, args.json),
         schedule=scheduler.parse_schedule(cfg.run_schedule),
         stop_event=stop)
     log.info("scheduler stopped")
     return None
+
+
+def _reload_config(args, previous: Config) -> Config:
+    """Re-read the config file before a scheduled pass so external edits take
+    effect without a daemon restart. On any load error keep the last good config
+    and warn -- a file caught mid-save must never kill the loop. The schedule and
+    DB connection stay fixed for the process lifetime; only the pass body sees the
+    fresh values."""
+    try:
+        return load_config(args.config, overrides={"db_path": args.db})
+    except ConfigError as exc:
+        log.warning("config reload failed, keeping previous: %s", exc)
+        return previous
 
 
 def _install_signal_handlers(stop: threading.Event):
