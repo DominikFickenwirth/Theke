@@ -12,7 +12,7 @@ from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
-                         find_arte_links, bulk_pick, bulk_accept)
+                         find_arte_links, bulk_pick, bulk_accept, bulk_match)
 
 
 # -- normalize / strip_articles ----------------------------------------------
@@ -251,6 +251,103 @@ def test_bulk_accept_year_present_requires_tmdb_year():
 def test_bulk_accept_rejects_release_after_broadcast():
     # release 1981 but aired 1978 (+-2 -> 1980): a film cannot air before release.
     assert bulk_accept(BOOT, brow(year=None, date="1978-01-01"), 2)["accepted"] is False
+
+
+# -- bulk_match orchestrator (row-driven, DB + stubbed TMDB IO) --------------
+
+def bulk_stub(monkeypatch):
+    """Stub http_get: /search/movie yields the Boot hit for any 'boot' query
+    (else no results), /movie/<id> the canned Boot payload. Counts calls."""
+    calls = {"search": 0, "movie": 0}
+
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            calls["search"] += 1
+            hit = "boot" in url.lower()
+            results = ([{"id": 1234, "title": "Das Boot", "release_date": "1981-09-17"}]
+                       if hit else [])
+            return json.dumps({"results": results}).encode("utf-8")
+        calls["movie"] += 1
+        return json.dumps(TMDB_BOOT).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    return calls
+
+
+def test_bulk_match_matches_hits_and_marks_misses(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m_hit", "Das Boot", 1981, 8940)       # 149 min -> match
+        insert_movie(conn, "m_miss", "Unknown Film", 2000, 6000)  # no TMDB hit -> '2'
+        res = bulk_match(conn, CFG)
+        assert res == {"scanned": 2, "matched": 1, "attempted": 1}
+        assert status_of(conn, "m_hit") == "3"
+        assert tuple(tmdb_of(conn, "m_hit")) == ("1234", 1.0)
+        assert status_of(conn, "m_miss") == "2"
+        assert tmdb_of(conn, "m_miss")["tmdb_id"] == ""
+    finally:
+        conn.close()
+
+
+def test_bulk_match_dedupes_search_by_title(tmp_path, monkeypatch):
+    calls = bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        bulk_match(conn, CFG)
+        assert calls["search"] == 1   # one search for the shared title
+        assert calls["movie"] == 1    # one movie fetch for the shared id
+        assert status_of(conn, "m1") == "3" and status_of(conn, "m2") == "3"
+    finally:
+        conn.close()
+
+
+def test_bulk_match_only_status_1(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)                     # '1'
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m2'")
+        insert_movie(conn, "m3", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='m3'")
+        res = bulk_match(conn, CFG)
+        assert res["scanned"] == 1                      # only the '1' row
+        assert status_of(conn, "m2") == "2" and status_of(conn, "m3") == "3"
+    finally:
+        conn.close()
+
+
+def test_bulk_match_respects_limit(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m3", "Das Boot", 1981, 8940)
+        res = bulk_match(conn, CFG, limit=2)
+        assert res["scanned"] == 2
+        remaining = [r["mediathek_id"] for r in conn.execute(
+            "SELECT mediathek_id FROM mediathek WHERE status='1'")]
+        assert remaining == ["m3"]                       # ordered by id, m3 left
+    finally:
+        conn.close()
+
+
+def test_bulk_match_skips_trailers(tmp_path, monkeypatch):
+    calls = bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET flags='T' WHERE mediathek_id='m1'")
+        res = bulk_match(conn, CFG)
+        assert res["scanned"] == 0
+        assert status_of(conn, "m1") == "1"              # trailer untouched
+        assert calls["search"] == 0                      # never searched
+    finally:
+        conn.close()
 
 
 # -- find_matches (DB scan over category='Movie') ----------------------------
