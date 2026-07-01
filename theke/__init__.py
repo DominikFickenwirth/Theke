@@ -27,7 +27,8 @@ from datetime import datetime, time, timezone
 from theke import core
 from theke import scheduler
 from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
-                        write_default_config, DbError, DbLockedError, MIGRATIONS,
+                        write_default_config, set_config_value, unset_config_value,
+                        DbError, DbLockedError, MIGRATIONS,
                         db_connect, db_get_meta, db_set_meta)
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
@@ -2035,10 +2036,11 @@ def _ns(**kw) -> argparse.Namespace:
 
 
 def _run_pass(conn, cfg) -> dict:
-    """Run fetch -> enrich -> (match + queue) per wish -> download (when
-    auto-approved). Returns one aggregated summary."""
+    """Run fetch -> enrich -> library scan -> (match + queue) per wish -> download
+    (when auto-approved). Returns one aggregated summary."""
     fetch = cmd_fetch(conn, cfg, _ns(force=False))
     enriched = _enrich_run(conn, cfg, _ns(force=False))
+    scan = _run_scan(conn, cfg)
     list_added = 0
     for lid in cfg.tmdb_lists:
         try:
@@ -2063,8 +2065,23 @@ def _run_pass(conn, cfg) -> dict:
     if cfg.queue_auto_approve:
         downloaded = _queue_download(conn, cfg, _ns(all=True, ids=[], force=False))["downloaded"]
     return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
-            "list_added": list_added, "wishes": len(wishes), "failed": failed,
-            "downloaded": downloaded, **totals}
+            "scan": scan, "list_added": list_added, "wishes": len(wishes),
+            "failed": failed, "downloaded": downloaded, **totals}
+
+
+def _run_scan(conn, cfg) -> dict:
+    """Reconcile the on-disk library into the `library` table as part of a pass, so
+    a wish already satisfied on disk is recorded 'L' (never re-acquired) and a
+    vanished file is flagged 'D'. Runs with default args (whole `library_root`, no
+    --allow-empty). A scan failure (e.g. an unmounted root) is caught and reported
+    as {"error": ...}, never aborting the rest of the pass. The verbose duplicate/
+    unresolved path lists collapse to their lengths in the pass summary."""
+    try:
+        totals = _library_scan(conn, cfg, _ns(root=None, allow_empty=False))
+    except Exception as exc:
+        log.warning("scan failed: %s", exc)
+        return {"error": str(exc)}
+    return {k: len(v) if isinstance(v, list) else v for k, v in totals.items()}
 
 
 # -- scheduler (phase 10: loop _run_pass on a schedule) -----------------------
@@ -2083,13 +2100,32 @@ def cmd_run(conn, cfg, args: argparse.Namespace):
     stop = threading.Event()
     _install_signal_handlers(stop)
     log.info("scheduler started (run_schedule=%s)", cfg.run_schedule)
+    state = {"cfg": cfg}                    # reloaded per pass; see _reload_config
+
+    def one_pass():
+        state["cfg"] = _reload_config(args, state["cfg"])
+        return _run_pass(conn, state["cfg"])
+
     scheduler.run_loop(
-        pass_fn=lambda: _run_pass(conn, cfg),
+        pass_fn=one_pass,
         on_result=lambda result: _emit_pass(conn, result, args.json),
         schedule=scheduler.parse_schedule(cfg.run_schedule),
         stop_event=stop)
     log.info("scheduler stopped")
     return None
+
+
+def _reload_config(args, previous: Config) -> Config:
+    """Re-read the config file before a scheduled pass so external edits take
+    effect without a daemon restart. On any load error keep the last good config
+    and warn -- a file caught mid-save must never kill the loop. The schedule and
+    DB connection stay fixed for the process lifetime; only the pass body sees the
+    fresh values."""
+    try:
+        return load_config(args.config, overrides={"db_path": args.db})
+    except ConfigError as exc:
+        log.warning("config reload failed, keeping previous: %s", exc)
+        return previous
 
 
 def _install_signal_handlers(stop: threading.Event):
@@ -2131,9 +2167,24 @@ EXIT_USAGE = 2
 EXIT_LOCKED = 3
 
 
-def cmd_config(cfg) -> dict:
-    """Show the effective configuration (after precedence resolution)."""
-    return dataclasses.asdict(cfg)
+def cmd_config(cfg, args) -> dict:
+    """Dispatch a config action: show / get / set / unset. show and get read the
+    effective config (after precedence); set and unset persist to the file."""
+    match args.config_cmd:
+        case "show":  return dataclasses.asdict(cfg)
+        case "get":   return _config_get(cfg, args.key)
+        case "set":   return {"set": args.key,
+                              "value": set_config_value(args.config, args.key, args.value)}
+        case "unset": return {"unset": args.key,
+                              "removed": unset_config_value(args.config, args.key)}
+        case _: raise DbError(f"unhandled config action: {args.config_cmd}")
+
+
+def _config_get(cfg, key: str) -> dict:
+    """One effective config value as {key: value}; an unknown key is an error."""
+    if not hasattr(cfg, key):
+        raise ConfigError(f"unknown config key: {key}")
+    return {key: getattr(cfg, key)}
 
 
 # -- file (phases 6-8: download / remux / move) -------------------------------
@@ -2206,7 +2257,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.default_actions = {}  # command -> (default action, its subparsers action)
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
 
-    sub.add_parser("config", help="show the effective configuration")
+    configp = sub.add_parser("config", help="show or edit the configuration", description="Show the effective configuration (after CLI > env > file precedence) or edit the config file. set/unset write to the --config path (default: "+ CONFIG_DEFAULT_PATH +"), merging into existing keys; get/show only read.")
+    cfgsub  = configp.add_subparsers(dest="config_cmd", metavar="action")
+    cfgsub.add_parser("show", help="print the effective configuration (default)", description="Print the full effective configuration after precedence resolution.")
+    cfgget  = cfgsub.add_parser("get",   help="print one effective value",        description="Print a single effective config value as {KEY: value}.")
+    cfgset  = cfgsub.add_parser("set",   help="persist one value to the file",     description="Coerce VALUE to KEY's type (strings raw, everything else JSON) and write it into the config file, merging into existing keys.")
+    cfgunset= cfgsub.add_parser("unset", help="remove one value from the file",    description="Remove KEY from the config file, reverting it to its default.")
+    cfgget.add_argument(  "key",              metavar="KEY",   help="config field name")
+    cfgset.add_argument(  "key",              metavar="KEY",   help="config field name")
+    cfgset.add_argument(  "value",            metavar="VALUE", help="new value (string raw; JSON for non-string fields, e.g. '[\"de\",\"en\"]')")
+    cfgunset.add_argument("key",              metavar="KEY",   help="config field name")
 
     fetch = sub.add_parser("fetch", help="refresh the film-list mirror (~30 s)", description="Refresh the film-list mirror; a full download and import takes about 30 seconds. Progress is printed to stderr.")
     fetch.add_argument("-f", "--force", action="store_true", help="always download the full list")
@@ -2344,6 +2404,7 @@ def build_parser() -> argparse.ArgumentParser:
     runp = sub.add_parser("run", help="run the wishlist pipeline, once or on a schedule", description="Loop the whole wishlist pipeline on the configured schedule (run_schedule). One pass: fetch + enrich the mirror, import any configured tmdb_lists into the library (movies only, additive), then for every open wish ('W') match the TMDB id and stage the deduplicated download set; with queue_auto_approve the approved entries are downloaded straight away (recording each finished wish as 'L'), else the pass stops at the approval gate. A failing wish or list does not abort the pass, and a failing pass does not abort the loop. The process holds the single DB writer for its lifetime (a future in-process web UI shares it); SIGINT/SIGTERM stop it cleanly after the current pass. In --json each pass prints one JSON object (JSONL); progress goes to stderr. --once runs a single pass and exits.")
     runp.add_argument("--once", action="store_true", help="run a single pass and exit (no scheduling)")
 
+    _set_default_action(parser, "config",  cfgsub, "show")
     _set_default_action(parser, "enrich",  csub, "run")
     _set_default_action(parser, "match",   msub, "run")
     _set_default_action(parser, "queue",   qsub, "list")
@@ -2420,7 +2481,7 @@ def main(argv=None) -> int:
         cfg = load_config(args.config, overrides={"db_path": args.db})
         match args.command:
             case "config":
-                result = cmd_config(cfg)
+                result = cmd_config(cfg, args)
             case "file":
                 result = cmd_file(cfg, args)
             case "fetch":

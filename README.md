@@ -109,11 +109,32 @@ Docker-Deployment (siehe unten).
 
 ## `theke config`
 
-Zeigt die effektive Konfiguration nach Auflösung der Präzedenz.
+Zeigt die effektive Konfiguration oder bearbeitet die Konfigurationsdatei. Ein
+Unterbefehl wählt die Aktion: `show` (Default) und `get` lesen die effektive
+Konfiguration nach Präzedenz-Auflösung; `set` und `unset` schreiben die
+`--config`-Datei (Standard: `theke.json`) und mergen in vorhandene Schlüssel.
+Ohne Aktion läuft `show`, d. h. `theke config` entspricht `theke config show`.
+
+| Aktion         | Wirkung                                                       |
+| -------------- | ------------------------------------------------------------- |
+| `show`         | Volle effektive Konfiguration ausgeben (Default).             |
+| `get KEY`      | Einen effektiven Wert ausgeben (`{KEY: value}`).              |
+| `set KEY VALUE`| `VALUE` typgerecht in die Datei schreiben (mergt).           |
+| `unset KEY`    | `KEY` aus der Datei entfernen (zurück auf Default).           |
+
+`set` nimmt Strings roh; alle anderen Feldtypen werden als JSON geparst und gegen
+den Feldtyp geprüft (ein Integer wird für ein Float-Feld akzeptiert). Unbekannte
+Schlüssel sind ein Fehler. Nur die effektive Konfiguration wird verändert -- der
+Rest bleibt bei seinen Defaults und steht nicht in der Datei.
 
 ```powershell
-theke config                     # db_path = theke.db, filmliste_url = ...
+theke config                                 # db_path = theke.db, filmliste_url = ...
 theke --db build/theke.db --json config
+theke config set tmdb_api_key abc123         # String roh
+theke config set queue_auto_approve true     # JSON: bool
+theke config set languages '[\"de\",\"en\"]' # JSON: Liste (PowerShell-Escaping)
+theke config get languages                   # {"languages": ["de", "en"]}
+theke config unset match_min_confidence      # zurück auf Default
 ```
 
 ## `theke fetch`
@@ -861,20 +882,30 @@ theke --db build/theke.db --json library scan
 Stufe 9+10: **ein unbeaufsichtigter Durchlauf** der gesamten Pipeline für die
 Wunschliste -- einmalig (`--once`) oder **wiederholt nach einem Zeitplan** (der
 In-App-Scheduler). Ein Durchlauf (Pass) der Reihe nach: `fetch` (Filmliste
-aktualisieren), `enrich` (Metadaten extrahieren), dann -- sofern `tmdb_lists`
-konfiguriert ist -- jede **konfigurierte TMDB-Liste** additiv in die Library
-nachziehen (nur Filme, wie `library add --tmdb-list`; gezählt in `list_added`),
-dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen und passende
+aktualisieren), `enrich` (Metadaten extrahieren), `library scan` (die
+On-Disk-Library mit der `library`-Tabelle abgleichen, s.u.), dann -- sofern
+`tmdb_lists` konfiguriert ist -- jede **konfigurierte TMDB-Liste** additiv in die
+Library nachziehen (nur Filme, wie `library add --tmdb-list`; gezählt in
+`list_added`), dann je offenem Wunsch (`W`) `match` (TMDB-ID auflösen und passende
 `mediathek`-Zeilen taggen) und `queue add` (deduplizierte Download-Menge einreihen).
 Ist `queue_auto_approve` gesetzt, werden die genehmigten Einträge anschließend
 gleich heruntergeladen (jeder fertige Wunsch wird dabei als `L` vermerkt); sonst
 endet der Pass am Genehmigungs-Tor mit `proposed`-Einträgen. Ein einzelner
 fehlschlagender Wunsch oder eine fehlschlagende Liste (z. B. ein TMDB-Fehler)
 bricht den Pass nicht ab, und ein fehlschlagender Pass bricht die Schleife nicht
-ab. Das Pass-Ergebnis fasst `fetch`/`enriched`/`list_added`/`wishes`/`queued`/
-`skipped`/`deduplicated`/`failed`/`downloaded` zusammen; im Loop wird je Pass eine
-Zeile geschrieben (in `--json` ein JSON-Objekt pro Pass, JSONL), Fortschritt geht
-nach stderr.
+ab. Das Pass-Ergebnis fasst `fetch`/`enriched`/`scan`/`list_added`/`wishes`/
+`queued`/`skipped`/`deduplicated`/`failed`/`downloaded` zusammen; im Loop wird je
+Pass eine Zeile geschrieben (in `--json` ein JSON-Objekt pro Pass, JSONL),
+Fortschritt geht nach stderr.
+
+Der **Scan vor dem Wunsch-Loop** hält die `library`-Tabelle am On-Disk-Stand: ein
+Wunsch, dessen Film schon in der Library liegt, wird als `L` vermerkt und nicht
+neu beschafft; verschwundene Dateien werden `D`. Er läuft mit Default-Argumenten
+(ganzer `library_root`, ohne `--allow-empty`) und schreibt selbst nie ins
+Dateisystem. Ein Scan-Fehler (z. B. ein nicht eingehängter `library_root`) wird
+gefangen und unter `scan` als `{"error": ...}` gemeldet, ohne den restlichen Pass
+abzubrechen; die ausführlichen Duplikat-/Unresolved-Pfadlisten von `library scan`
+werden im Pass-Summary auf ihre Anzahl reduziert.
 
 Der Listen-Abgleich ist **nur additiv**: aus einer Liste entfernte Filme werden
 **nicht** aus der Library gelöscht (die Library hat mehrere Quellen, und ein
@@ -895,6 +926,13 @@ ausgerichtet, nicht am Ende des letzten Passes). Einträge:
 Default: `["start", 3600]` (sofort, dann stündlich). Überrennt ein langer Pass
 mehrere Ticks, werden die verpassten zu **einem** Folgepass zusammengefasst
 (Überlappung ist ausgeschlossen -- der Loop ist Single-Thread).
+
+Die config wird **vor jedem Pass neu aus der Datei gelesen**, sodass Änderungen
+(z. B. an `tmdb_lists` oder `queue_auto_approve`) ohne Neustart wirken; eine
+gerade unlesbare Datei (mitten im Speichern erwischt) beendet die Schleife nicht,
+sondern behält die letzte gültige config bei. `run_schedule` und die
+DB-Verbindung stehen dagegen für die Prozesslaufzeit fest (eine Zeitplanänderung
+greift erst nach Neustart).
 
 Der Prozess hält die **einzige DB-Schreibverbindung** für seine Laufzeit (eine
 spätere Web-UI im selben Prozess teilt sie sich); ein zweiter schreibender
@@ -961,8 +999,9 @@ docker compose logs -f            # Scheduler-Ausgabe (ein JSON-Objekt pro Pass)
 
 Beim ersten Start legt `theke` selbst eine Start-`theke.json` mit Defaults in
 `/config` an (die per `--config` angegebene Datei fehlt noch). Danach: Datei
-anpassen (v.a. `tmdb_lists` / `run_schedule`) und den Container neu starten.
-Einzelne Kommandos lassen sich im laufenden Container ausführen, z.B.:
+anpassen (v.a. `tmdb_lists` / `run_schedule`) -- der Scheduler liest sie vor
+jedem Pass neu; nur eine Änderung an `run_schedule` erfordert einen Neustart des
+Containers. Einzelne Kommandos lassen sich im laufenden Container ausführen, z.B.:
 
 ```sh
 docker compose exec theke theke --config /config/theke.json --json config

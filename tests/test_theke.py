@@ -223,8 +223,12 @@ def test_main_creates_starter_config_for_missing_explicit_path(tmp_path):
     assert main(["--json", "--config", str(cfgpath), "config"]) == 0
     assert cfgpath.exists()
     written = json.loads(cfgpath.read_text(encoding="utf-8"))
-    assert written["db_path"] == "theke.db"          # the dataclass defaults
-    assert written["run_schedule"] == ["start", 3600]
+    assert set(written) == {                         # only the user-facing subset
+        "tmdb_api_key", "tmdb_read_token", "tmdb_lists", "tmdb_language",
+        "queue_auto_approve", "languages", "video_ext", "audio_ext",
+        "run_schedule"}
+    assert written["run_schedule"] == ["start", 3600]  # the dataclass defaults
+    assert written["languages"] == ["de"]
 
 
 def test_main_does_not_overwrite_existing_config(tmp_path):
@@ -238,6 +242,103 @@ def test_main_default_path_missing_creates_nothing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # no --config: keep the dev behavior (no stray file)
     assert main(["--json", "config"]) == 0
     assert not (tmp_path / "theke.json").exists()
+
+
+# -- config set / get / unset (persist single keys to the file) --------------
+
+def test_set_config_value_creates_file_and_coerces(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    assert set_config_value(str(path), "queue_auto_approve", "true") is True
+    assert json.loads(path.read_text(encoding="utf-8")) == {"queue_auto_approve": True}
+    assert load_config(str(path)).queue_auto_approve is True
+
+
+def test_set_config_value_string_field_taken_raw(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    assert set_config_value(str(path), "tmdb_api_key", "abc123") == "abc123"
+    assert json.loads(path.read_text(encoding="utf-8")) == {"tmdb_api_key": "abc123"}
+
+
+def test_set_config_value_merges_into_existing(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "keep.db"})
+    set_config_value(str(path), "languages", '["de", "en"]')
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "db_path": "keep.db", "languages": ["de", "en"]}
+
+
+def test_set_config_value_accepts_int_for_float(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    value = set_config_value(str(path), "match_min_confidence", "1")
+    assert value == 1.0 and isinstance(value, float)   # JSON int widened to float
+    assert json.loads(path.read_text(encoding="utf-8")) == {"match_min_confidence": 1.0}
+
+
+def test_set_config_value_unknown_key_is_error(tmp_path):
+    from theke.core import set_config_value
+    with pytest.raises(ConfigError, match="db_pathh"):
+        set_config_value(str(tmp_path / "c.json"), "db_pathh", "x.db")
+
+
+def test_set_config_value_wrong_type_is_error(tmp_path):
+    from theke.core import set_config_value
+    with pytest.raises(ConfigError, match="languages"):
+        set_config_value(str(tmp_path / "c.json"), "languages", '"de"')  # not a list
+
+
+def test_unset_config_value_removes_key(tmp_path):
+    from theke.core import unset_config_value
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "x.db", "video_ext": "mkv"})
+    assert unset_config_value(str(path), "video_ext") is True
+    assert json.loads(path.read_text(encoding="utf-8")) == {"db_path": "x.db"}
+
+
+def test_unset_config_value_absent_key_is_noop(tmp_path):
+    from theke.core import unset_config_value
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "x.db"})
+    assert unset_config_value(str(path), "video_ext") is False
+    assert json.loads(path.read_text(encoding="utf-8")) == {"db_path": "x.db"}
+
+
+def test_unset_config_value_unknown_key_is_error(tmp_path):
+    from theke.core import unset_config_value
+    write_config(tmp_path / "c.json", {"db_path": "x.db"})
+    with pytest.raises(ConfigError, match="nope"):
+        unset_config_value(str(tmp_path / "c.json"), "nope")
+
+
+def test_main_config_set_persists_to_file(tmp_path, capsys):
+    path = tmp_path / "c.json"
+    assert main(["--json", "--config", str(path), "config", "set", "video_ext", "mkv"]) == 0
+    assert json.loads(path.read_text(encoding="utf-8"))["video_ext"] == "mkv"
+    assert json.loads(capsys.readouterr().out) == {"set": "video_ext", "value": "mkv"}
+
+
+def test_main_config_get_reports_effective_value(tmp_path, capsys):
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "file.db"})
+    assert main(["--json", "--config", str(path), "config", "get", "db_path"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"db_path": "file.db"}
+
+
+def test_main_config_unset_reverts_to_default(tmp_path, capsys):
+    path = tmp_path / "c.json"
+    write_config(path, {"video_ext": "mkv"})
+    assert main(["--json", "--config", str(path), "config", "unset", "video_ext"]) == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == {}
+    assert load_config(str(path)).video_ext == "mp4"          # back to the default
+
+
+def test_main_config_bare_still_shows_full_config(tmp_path):
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "file.db"})
+    assert main(["--json", "--config", str(path), "config"]) == 0   # default action: show
 
 
 def test_config_languages_wrong_type_is_error(tmp_path):
@@ -733,6 +834,47 @@ def test_cli_bare_enrich_dispatches_run(tmp_path, monkeypatch):
     db = str(tmp_path / "t.db")
     assert main(["--db", db, "enrich"]) == 0
     assert seen["cmd"] == "run"
+
+
+# -- run: config reloaded per pass ------------------------------------------
+
+def test_cmd_run_reloads_config_each_pass(tmp_path, monkeypatch):
+    # The scheduled loop re-reads theke.json before every pass, so an external
+    # edit to the file takes effect without restarting the daemon.
+    import theke
+    cfg_path = tmp_path / "theke.json"
+    write_config(cfg_path, {"queue_auto_approve": False})
+    seen = []
+    monkeypatch.setattr(theke, "_run_pass",
+                        lambda conn, cfg: seen.append(cfg.queue_auto_approve) or {})
+    monkeypatch.setattr(theke, "_install_signal_handlers", lambda stop: None)
+    captured = {}
+    monkeypatch.setattr(theke.scheduler, "run_loop", lambda **kw: captured.update(kw))
+    args = SimpleNamespace(once=False, config=str(cfg_path), db=None, json=False)
+    theke.cmd_run(object(), load_config(str(cfg_path)), args)
+    captured["pass_fn"]()                              # pass 1: file as loaded
+    write_config(cfg_path, {"queue_auto_approve": True})
+    captured["pass_fn"]()                              # pass 2: sees the edit
+    assert seen == [False, True]
+
+
+def test_cmd_run_keeps_config_when_reload_fails(tmp_path, monkeypatch):
+    # A transient unreadable config (e.g. caught mid-save) must not kill the
+    # loop: the pass falls back to the last good config.
+    import theke
+    cfg_path = tmp_path / "theke.json"
+    write_config(cfg_path, {"queue_auto_approve": True})
+    seen = []
+    monkeypatch.setattr(theke, "_run_pass",
+                        lambda conn, cfg: seen.append(cfg.queue_auto_approve) or {})
+    monkeypatch.setattr(theke, "_install_signal_handlers", lambda stop: None)
+    captured = {}
+    monkeypatch.setattr(theke.scheduler, "run_loop", lambda **kw: captured.update(kw))
+    args = SimpleNamespace(once=False, config=str(cfg_path), db=None, json=False)
+    theke.cmd_run(object(), load_config(str(cfg_path)), args)
+    cfg_path.write_text("{ not json", encoding="utf-8")
+    captured["pass_fn"]()                              # bad file -> keep last good
+    assert seen == [True]
 
 
 # -- fetch: conversions -----------------------------------------------------

@@ -160,8 +160,11 @@ downloads retry (a few times), status in DB, no silent loss. A partial,
 unfinishable download counts as a failure.
 
 **Scheduler (in-app, phase 10):** `theke run` loops one whole pipeline pass
-(`_run_pass`: fetch -> enrich -> list sync -> per-wish match + queue -> download)
-on the `run_schedule`. That config is a single list of triggers, all fixed-rate:
+(`_run_pass`: fetch -> enrich -> library scan -> list sync -> per-wish match +
+queue -> download) on the `run_schedule`. Each pass reloads the config from disk
+first (external edits take effect without a restart; a bad file keeps the last
+good config), and the scan is best-effort (a failure is reported, never aborts
+the pass). That config is a single list of triggers, all fixed-rate:
 `"start"` (a pass at process start), an int (every N seconds, anchored to
 midnight), `"HH:MM"` (daily), `"Weekday HH:MM"` (weekly); the next run is the
 soonest across them. The pure scheduling core (parse/next-fire/loop with injected
