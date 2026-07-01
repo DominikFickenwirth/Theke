@@ -389,14 +389,15 @@ theke --db build/theke.db match reset --status-only  # nur status 2 -> 1
 
 ### `match bulk`
 
-Stufe 15: eager, zeilengetriebenes Matching des ganzen Film-Katalogs. Sucht für
-jede angereicherte Filmzeile per TMDB-Suche nach ihrem eigenen Titel und markiert
-sichere Treffer als `status='3'` (mit `tmdb_id`), alle anderen als `status='2'`
-(bulk-versucht ohne Treffer -- von späteren Bulk-Läufen übersprungen, aber weiter
-lazy-matchbar). Die Gates sind bewusst streng, um Fehl-Matches zu vermeiden:
-Titelähnlichkeit, **Pflicht-Laufzeit** im Toleranzband, bei vorhandenem Jahr die
-Jahresdifferenz (`±match_year_tolerance`), bei fehlendem Jahr nur ein *eindeutiger*
-Suchtreffer, und das Erscheinungsjahr darf nicht nach dem Ausstrahlungsjahr liegen.
+Stufe 15: eager, zeilengetriebenes Matching des ganzen Film-Katalogs. Löst jede
+angereicherte Filmzeile über den gemeinsamen Such-Kern (`theke tmdb search`, s. u.)
+nach ihrem eigenen Titel auf und markiert einen **eindeutigen** sicheren Treffer
+als `status='3'` (mit `tmdb_id`), alle anderen als `status='2'` (bulk-versucht
+ohne Treffer -- von späteren Bulk-Läufen übersprungen, aber weiter lazy-matchbar).
+Die Gates sind bewusst streng, um Fehl-Matches zu vermeiden: Titelähnlichkeit,
+**Pflicht-Laufzeit** im Toleranzband, bei vorhandenem Jahr die Jahresdifferenz
+(`±match_year_tolerance`), das Erscheinungsjahr darf nicht nach dem
+Ausstrahlungsjahr liegen -- und nach all dem muss **genau ein** Treffer übrig sein.
 Braucht einen TMDB-Key. Gibt `scanned`/`matched`/`attempted` aus.
 
 | Option              | Wirkung                                                          |
@@ -411,6 +412,36 @@ theke --db build/theke.db match bulk --limit 500     # gedeckelter Teillauf
 `theke run` ruft dies pro Pass inkrementell auf (Deckel: Config
 `bulk_match_max_per_pass`, Default 500), sodass der `'1'`-Pool über mehrere Passes
 abfließt und Wünsche per `tmdb_id` statt per teurem Einzel-Scan aufgelöst werden.
+
+## `theke tmdb`
+
+Direkte TMDB-Abfragen über den gemeinsamen Film-Such-Kern -- DB-frei, braucht
+einen TMDB-Key. Aktuell eine Aktion: `search`. `theke tmdb --title "..."`
+entspricht `theke tmdb search --title "..."`.
+
+### `tmdb search`
+
+Löst einen Titel gegen TMDB auf: sucht per `/search/movie` (fällt bei führendem
+Artikel einmal auf die artikellose Suche zurück), verwirft Kandidaten außerhalb
+des Jahres- und des Ausstrahlungsfensters und bewertet den Rest vollständig
+(Titel-Floor, Jahr, Laufzeit als hartes Gate, wenn `--runtime` gesetzt ist). Gibt
+die Treffer (`tmdb_id` + Titel + Jahr) aus; passten nicht alle Ergebnisse auf
+Seite 1 der API, meldet es stattdessen *too many matches* mit der Gesamtzahl.
+Derselbe Kern löst auch `library add`/`import` und `match bulk` auf -- die matchen
+genau dann, wenn die Suche **genau einen** Treffer liefert.
+
+| Option                        | Wirkung                                                        |
+| ----------------------------- | -------------------------------------------------------------- |
+| `-t`, `--title TITLE`         | Aufzulösender Filmtitel (Pflicht).                             |
+| `-y`, `--year YEAR`           | Gewünschtes Erscheinungsjahr (tolerant per `--year-tolerance`). |
+| `-b`, `--broadcast-year YEAR` | Ausstrahlungsjahr; verwirft danach erschienene Releases (im Toleranzband). |
+| `-r`, `--runtime MIN`         | Laufzeit in Minuten; hartes Gate, wenn gesetzt.                |
+| `--year-tolerance N`          | Erlaubte Jahresdifferenz (Default: Config `match_year_tolerance`). |
+
+```powershell
+theke tmdb search --title "Das Boot" --year 1981 --broadcast-year 1985 --runtime 149
+theke tmdb --title "Die Klapperschlange"          # search ist die Default-Aktion
+```
 
 ## `theke queue`
 
@@ -722,12 +753,12 @@ vermerkt `theke queue download` ihn als `L` und trägt seinen Bibliotheksordner 
 
 Fügt Filmwünsche (`W`) hinzu -- über TMDB-IDs direkt (`--tmdb`), über einen Titel
 (`--title`), der per TMDB-Suche (`/search/movie`) in eine ID aufgelöst wird, oder
-durch Import einer **ganzen TMDB-Liste** (`--tmdb-list`). Bei `--title` darf das
-Jahr (`--year`) -- wie in `theke match` -- um ein paar Jahre danebenliegen: Aus den
-Treffern wird der mit der kleinsten Jahresdifferenz innerhalb der Toleranz gewählt
-(bei Gleichstand der populärste); ohne `--year` nur, wenn die Suche **genau einen**
-Treffer liefert -- bei mehreren bleibt es mehrdeutig und meldet einen Fehler (wie
-`theke match bulk`). Die erlaubte
+durch Import einer **ganzen TMDB-Liste** (`--tmdb-list`). Bei `--title` läuft die
+Auflösung über den gemeinsamen Such-Kern (`theke tmdb search`): Titel-Floor plus
+Jahr (`--year`), das -- wie in `theke match` -- um ein paar Jahre danebenliegen
+darf. Aufgelöst wird nur, wenn **genau ein** Treffer übrigbleibt; liefern mehrere
+Kandidaten oder passt keiner ins Jahresfenster, bleibt es mehrdeutig bzw. ohne
+Treffer und meldet einen Fehler (wie `theke match bulk`). Die erlaubte
 Differenz steuert `--year-tolerance` (Default: Config `match_year_tolerance`, ab
 Werk `2`). Liefert die Suche zum vollen Titel nichts und beginnt er mit einem
 Artikel (`der`/`die`/`das`/`ein`/`eine`/`the`/`a`/`an`), wird einmal ohne den Artikel
@@ -788,10 +819,11 @@ wird auf eine `tmdb_id` aufgelöst -- direkt angegeben oder per Titel/Jahr-Suche
 **Fehlerprotokoll**, statt den Import abzubrechen; der Rest wird angelegt (`W`,
 idempotent). Erfordert einen TMDB-Key.
 
-Ohne Jahr wird ein Titel nur aufgelöst, wenn die Suche **genau einen** Treffer
-liefert (wie `theke match bulk` und `add --title`); bei mehreren Treffern bleibt
-er mehrdeutig und landet im Fehlerprotokoll (nicht auf den populärsten geraten).
-Ein Jahr macht die Auflösung robuster (tolerante Jahresnähe statt Eindeutigkeit).
+Ein Titel wird nur aufgelöst, wenn nach den Gates **genau ein** Treffer
+übrigbleibt (wie `theke match bulk` und `add --title`); bei mehreren bleibt er
+mehrdeutig und landet im Fehlerprotokoll (nicht auf den populärsten geraten). Ein
+`--year` engt das Feld über die tolerante Jahresnähe ein und macht die
+Eindeutigkeit wahrscheinlicher.
 
 Das Format ergibt sich aus der Endung (`.txt`/`.csv`), `--format` überschreibt:
 
