@@ -32,6 +32,7 @@ SE_A    = re.compile(r'\(S(\d+)/E(\d+)\)')                    # ZDF family + thi
 SE_B    = re.compile(r'\((?:Staffel\s*(\d+),\s*)?Folge\s*(\d+)\)')   # SRF
 LEADC   = re.compile(r'^\s*(\d{1,4})\.\s+')                   # KiKA leading "NN."
 PART    = re.compile(r'\((\d{1,2})/(\d{1,2})\)')             # Mehrteiler "(n/m)"
+BAREPART = re.compile(r'\s*\((\d{1,2})\)\s*$')              # bare running "(n)" at end (A4)
 # Paren-less episode notation (B5), all guarded: "Staffel n, Folge m";
 # "- Teil n" (arabic or roman); a bare "n/m" only at the very end (so dates
 # like "10/06/2026" and "3 1/2 Stunden" never match).
@@ -436,6 +437,9 @@ def enrich(sender, topic, title, description, duration,
         elif mn and int(mn.group(1)) <= int(mn.group(2)) <= 50:   # n<=m, no dates
             r['episode'] = int(mn.group(1)); r['episode_count'] = int(mn.group(2))
             t = t[:mn.start()]
+    if r['episode'] is None:                   # A4: bare running "(n)" at title end
+        mb = BAREPART.search(t)
+        if mb: r['episode'] = int(mb.group(1)); t = t[:mb.start()]
 
     # -- Pass 3: metazeile (category + country + year) --------------------
     src = t if sender in TITLE_META_SENDERS else d
