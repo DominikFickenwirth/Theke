@@ -92,7 +92,8 @@ MARKERS = [
 # parenthetical MARKERS above.
 SUFFIX_MARKERS = [
     (re.compile(r'\s+in\s+Gebärdensprache$', re.I),                          'S'),
-    (re.compile(r'\s+in\s+(?:Einfacher|Leichter)\s+Sprache$', re.I),         'E'),
+    (re.compile(r'\s+in\s+(?:Einfacher|Leichter|Klarer)\s+Sprache$', re.I),  'E'),
+    (re.compile(r'\s*[-–]\s*(?:Audiodeskription|Hörfassung)$', re.I),         'A'),
 ]
 # -- output taxonomy: medium (category) + TMDB genre ------------------------
 # Two orthogonal axes. category is the medium, a small custom set
@@ -368,9 +369,12 @@ def enrich(sender, topic, title, description, duration,
         return re.sub(r'\s*\(([^()]{1,40})\)', repl, s)
 
     def take_suffix(s):                        # bare accessibility suffix (no parens)
-        for rx, flag in SUFFIX_MARKERS:
-            m = rx.search(s)
-            if m: flags.add(flag); s = s[:m.start()]
+        changed = True
+        while changed:                         # repeat: a suffix may appear twice
+            changed = False
+            for rx, flag in SUFFIX_MARKERS:
+                m = rx.search(s)
+                if m: flags.add(flag); s = s[:m.start()]; changed = True
         return s
     t = take_suffix(take_parens(t))
     tp = take_suffix(take_parens(tp))          # markers also live in the topic
