@@ -288,8 +288,14 @@ def find_matches(conn, tmdb_meta, min_conf, year_tolerance=YEAR_TOLERANCE) -> li
     year_tolerance), return the matches (confidence >= min_conf, not rejected)
     sorted by confidence desc, then mediathek_id."""
     start = time.perf_counter()
-    rows = conn.execute("SELECT mediathek_id, clean_title, year, duration, flags "
-                        "FROM mediathek WHERE category='Movie' AND status='1'")
+    sql = ("SELECT mediathek_id, clean_title, year, duration, flags "
+           "FROM mediathek WHERE category='Movie' AND status='1'")
+    params = ()
+    ry = tmdb_meta.get("year")   # year is a near-hard gate -> prune out-of-window
+    if ry is not None:           # rows in SQL; jahrlose rows survive (no gate)
+        sql += " AND (year IS NULL OR year BETWEEN ? AND ?)"
+        params = (ry - year_tolerance, ry + year_tolerance)
+    rows = conn.execute(sql, params)
     out, scanned = [], 0
     for r in rows:
         scanned += 1
