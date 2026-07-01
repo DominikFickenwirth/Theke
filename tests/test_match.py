@@ -3,6 +3,7 @@
 import json
 import logging
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -299,6 +300,37 @@ def test_search_movies_no_results(monkeypatch):
     assert calls["movie"] == 0
 
 
+def test_search_movies_skips_candidate_whose_detail_404s(monkeypatch):
+    # TMDB search can return a stale id (here a collection, id 1703111): its
+    # /movie detail 404s. That candidate is skipped, not fatal -- the real movie
+    # still gets scored. (Regression: a 404 used to abort the whole search.)
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            return json.dumps({"results": [sres(1703111, "Das Boot", None),
+                                           sres(1234, "Das Boot", "1981-09-17")],
+                               "total_pages": 1, "total_results": 2}).encode("utf-8")
+        if "/movie/1703111" in url:
+            raise HTTPError(url, 404, "Not Found", {}, None)
+        return json.dumps(TMDB_BOOT).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    res = search_movies(CFG, "Das Boot")
+    assert [m["tmdb_id"] for m in res["matches"]] == ["1234"]
+
+
+def test_search_movies_propagates_non_404_detail_error(monkeypatch):
+    # Only a 404 is a benign stale-id skip; a 500 (real outage) still propagates.
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            return json.dumps({"results": [sres(1234, "Das Boot", "1981-09-17")],
+                               "total_pages": 1, "total_results": 1}).encode("utf-8")
+        raise HTTPError(url, 500, "Server Error", {}, None)
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    with pytest.raises(HTTPError):
+        search_movies(CFG, "Das Boot")
+
+
 def test_search_movies_retries_without_leading_article(monkeypatch):
     # first query (with "Der") empty; the retry without the article finds the film.
     calls = {"n": 0}
@@ -415,7 +447,7 @@ def test_bulk_match_matches_hits_and_marks_misses(tmp_path, monkeypatch):
         insert_movie(conn, "m_hit", "Das Boot", 1981, 8940)       # 149 min -> match
         insert_movie(conn, "m_miss", "Unknown Film", 2000, 6000)  # no TMDB hit -> '2'
         res = bulk_match(conn, CFG)
-        assert res == {"scanned": 2, "matched": 1, "attempted": 1}
+        assert res == {"scanned": 2, "matched": 1, "attempted": 1, "errored": 0}
         assert status_of(conn, "m_hit") == "3"
         assert tuple(tmdb_of(conn, "m_hit")) == ("1234", 1.0)
         assert status_of(conn, "m_miss") == "2"
@@ -510,6 +542,31 @@ def test_bulk_match_persists_each_decision_before_abort(tmp_path, monkeypatch):
         assert status_of(conn, "m1") == "3"                   # persisted before abort
         assert tuple(tmdb_of(conn, "m1")) == ("1234", 1.0)
         assert status_of(conn, "m2") == "1"                   # never reached
+    finally:
+        conn.close()
+
+
+def test_bulk_match_row_error_is_skipped_not_fatal(tmp_path, monkeypatch):
+    # An unexpected per-row error (not KeyboardInterrupt) must not abort the eager
+    # pass: the failing row is left at '1' (retried next pass), later rows still run.
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            if "boom" in url.lower():
+                raise RuntimeError("unexpected TMDB payload")
+            results = ([{"id": 1234, "title": "Das Boot", "release_date": "1981-09-17"}]
+                       if "boot" in url.lower() else [])
+            return json.dumps({"results": results}).encode("utf-8")
+        return json.dumps(TMDB_BOOT).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Boom Film", 2000, 6000)   # search raises -> left '1'
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)    # still matched after the error
+        res = bulk_match(conn, CFG)
+        assert res == {"scanned": 2, "matched": 1, "attempted": 0, "errored": 1}
+        assert status_of(conn, "m1") == "1"
+        assert status_of(conn, "m2") == "3"
     finally:
         conn.close()
 
@@ -826,7 +883,7 @@ def test_cmd_match_bulk_tags_and_marks(tmp_path, monkeypatch):
         insert_movie(conn, "m_hit", "Das Boot", 1981, 8940)
         insert_movie(conn, "m_miss", "Unknown Film", 2000, 6000)
         res = cmd_match(conn, CFG, margs(match_cmd="bulk", limit=None))
-        assert res == {"scanned": 2, "matched": 1, "attempted": 1}
+        assert res == {"scanned": 2, "matched": 1, "attempted": 1, "errored": 0}
         assert status_of(conn, "m_hit") == "3"
         assert status_of(conn, "m_miss") == "2"
     finally:
