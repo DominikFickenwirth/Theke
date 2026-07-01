@@ -250,6 +250,45 @@ def test_find_matches_year_tolerance_override(tmp_path):
         conn.close()
 
 
+def test_find_matches_year_prefilter_skips_far_rows(tmp_path, caplog):
+    # #1: rows outside the year window are never scored in Python (SQL prunes
+    # them), but jahrlose rows survive (no year gate). BOOT is 1981, tol 2 ->
+    # window 1979..1983: m1 (in) and m3 (no year) are scanned, m2 (1995) is not.
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Das Boot", 1995, 8940)
+        insert_movie(conn, "m3", "Das Boot", None, 8940)
+        with caplog.at_level(logging.DEBUG, logger="theke"):
+            matches = find_matches(conn, BOOT, min_conf=0.6)
+        assert [m["mediathek_id"] for m in matches] == ["m1", "m3"]
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("find_matches: scanned 2") for m in msgs)   # m2 never scored
+
+
+def test_find_matches_normalizes_each_title_once_across_wishes(tmp_path, monkeypatch):
+    # #2: a title is normalized once per process, not once per row per wish. Two
+    # scans over the same rows must not re-normalize an already-seen title.
+    if hasattr(theke.match, "_match_forms"):
+        theke.match._match_forms.cache_clear()
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Heat", 1981, 6000)   # in-window, title misses
+        calls = []
+        real = theke.match.normalize
+        monkeypatch.setattr(theke.match, "normalize",
+                            lambda t: (calls.append(t), real(t))[1])
+        find_matches(conn, BOOT, min_conf=0.6)
+        find_matches(conn, BOOT, min_conf=0.6)   # second wish, same rows
+    finally:
+        conn.close()
+    assert calls.count("Das Boot") == 1   # tmdb title + m1 row + rescan -> still 1
+    assert calls.count("Heat") == 1
+
+
 def test_find_matches_excludes_trailers(tmp_path):
     conn = open_db(tmp_path)
     try:
@@ -904,7 +943,7 @@ def test_find_matches_logs_scan_timing_at_debug(tmp_path, caplog):
     conn = open_db(tmp_path)
     try:
         insert_movie(conn, "m1", "Das Boot", 1981, 8940)
-        insert_movie(conn, "m2", "Heat", 1995, 6000)
+        insert_movie(conn, "m2", "Heat", 1981, 6000)   # in-window so it is scanned (title misses)
         with caplog.at_level(logging.DEBUG, logger="theke"):
             find_matches(conn, BOOT, min_conf=0.6)
     finally:
