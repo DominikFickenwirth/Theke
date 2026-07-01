@@ -836,6 +836,47 @@ def test_cli_bare_enrich_dispatches_run(tmp_path, monkeypatch):
     assert seen["cmd"] == "run"
 
 
+# -- run: config reloaded per pass ------------------------------------------
+
+def test_cmd_run_reloads_config_each_pass(tmp_path, monkeypatch):
+    # The scheduled loop re-reads theke.json before every pass, so an external
+    # edit to the file takes effect without restarting the daemon.
+    import theke
+    cfg_path = tmp_path / "theke.json"
+    write_config(cfg_path, {"queue_auto_approve": False})
+    seen = []
+    monkeypatch.setattr(theke, "_run_pass",
+                        lambda conn, cfg: seen.append(cfg.queue_auto_approve) or {})
+    monkeypatch.setattr(theke, "_install_signal_handlers", lambda stop: None)
+    captured = {}
+    monkeypatch.setattr(theke.scheduler, "run_loop", lambda **kw: captured.update(kw))
+    args = SimpleNamespace(once=False, config=str(cfg_path), db=None, json=False)
+    theke.cmd_run(object(), load_config(str(cfg_path)), args)
+    captured["pass_fn"]()                              # pass 1: file as loaded
+    write_config(cfg_path, {"queue_auto_approve": True})
+    captured["pass_fn"]()                              # pass 2: sees the edit
+    assert seen == [False, True]
+
+
+def test_cmd_run_keeps_config_when_reload_fails(tmp_path, monkeypatch):
+    # A transient unreadable config (e.g. caught mid-save) must not kill the
+    # loop: the pass falls back to the last good config.
+    import theke
+    cfg_path = tmp_path / "theke.json"
+    write_config(cfg_path, {"queue_auto_approve": True})
+    seen = []
+    monkeypatch.setattr(theke, "_run_pass",
+                        lambda conn, cfg: seen.append(cfg.queue_auto_approve) or {})
+    monkeypatch.setattr(theke, "_install_signal_handlers", lambda stop: None)
+    captured = {}
+    monkeypatch.setattr(theke.scheduler, "run_loop", lambda **kw: captured.update(kw))
+    args = SimpleNamespace(once=False, config=str(cfg_path), db=None, json=False)
+    theke.cmd_run(object(), load_config(str(cfg_path)), args)
+    cfg_path.write_text("{ not json", encoding="utf-8")
+    captured["pass_fn"]()                              # bad file -> keep last good
+    assert seen == [True]
+
+
 # -- fetch: conversions -----------------------------------------------------
 
 def test_film_id_matches_utf16le_sha256_spec():
