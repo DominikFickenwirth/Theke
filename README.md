@@ -109,11 +109,32 @@ Docker-Deployment (siehe unten).
 
 ## `theke config`
 
-Zeigt die effektive Konfiguration nach Auflösung der Präzedenz.
+Zeigt die effektive Konfiguration oder bearbeitet die Konfigurationsdatei. Ein
+Unterbefehl wählt die Aktion: `show` (Default) und `get` lesen die effektive
+Konfiguration nach Präzedenz-Auflösung; `set` und `unset` schreiben die
+`--config`-Datei (Standard: `theke.json`) und mergen in vorhandene Schlüssel.
+Ohne Aktion läuft `show`, d. h. `theke config` entspricht `theke config show`.
+
+| Aktion         | Wirkung                                                       |
+| -------------- | ------------------------------------------------------------- |
+| `show`         | Volle effektive Konfiguration ausgeben (Default).             |
+| `get KEY`      | Einen effektiven Wert ausgeben (`{KEY: value}`).              |
+| `set KEY VALUE`| `VALUE` typgerecht in die Datei schreiben (mergt).           |
+| `unset KEY`    | `KEY` aus der Datei entfernen (zurück auf Default).           |
+
+`set` nimmt Strings roh; alle anderen Feldtypen werden als JSON geparst und gegen
+den Feldtyp geprüft (ein Integer wird für ein Float-Feld akzeptiert). Unbekannte
+Schlüssel sind ein Fehler. Nur die effektive Konfiguration wird verändert -- der
+Rest bleibt bei seinen Defaults und steht nicht in der Datei.
 
 ```powershell
-theke config                     # db_path = theke.db, filmliste_url = ...
+theke config                                 # db_path = theke.db, filmliste_url = ...
 theke --db build/theke.db --json config
+theke config set tmdb_api_key abc123         # String roh
+theke config set queue_auto_approve true     # JSON: bool
+theke config set languages '[\"de\",\"en\"]' # JSON: Liste (PowerShell-Escaping)
+theke config get languages                   # {"languages": ["de", "en"]}
+theke config unset match_min_confidence      # zurück auf Default
 ```
 
 ## `theke fetch`

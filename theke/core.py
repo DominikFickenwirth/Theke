@@ -61,16 +61,20 @@ class Config:
     run_schedule:         list  = dataclasses.field(default_factory=lambda: ["start", 3600])
 
 
-def _env_value(var: str, raw: str, ftype: type):
-    """Coerce an env string to a Config field's type (str raw, else JSON)."""
+def _coerce_value(label: str, raw: str, ftype: type):
+    """Coerce a raw string to a Config field's type (str raw, else JSON), type-
+    checked. `label` names the source (env var / config key) for error messages.
+    A JSON int is accepted where a float is expected."""
     if ftype is str:
         return raw
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ConfigError(f"invalid value for env {var}: {exc}") from None
+        raise ConfigError(f"invalid value for {label}: {exc}") from None
+    if ftype is float and isinstance(value, int) and not isinstance(value, bool):
+        value = float(value)
     if not isinstance(value, ftype):
-        raise ConfigError(f"env {var} must be of type {ftype.__name__}")
+        raise ConfigError(f"{label} must be of type {ftype.__name__}")
     return value
 
 
@@ -112,7 +116,7 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
     for name, ftype in fields.items():
         raw = os.environ.get(ENV_PREFIX + name.upper())
         if raw is not None:
-            known[name] = _env_value(ENV_PREFIX + name.upper(), raw, ftype)
+            known[name] = _coerce_value(ENV_PREFIX + name.upper(), raw, ftype)
     for key, value in (overrides or {}).items():
         if value is not None:
             known[key] = value
@@ -135,14 +139,65 @@ def write_default_config(path: str) -> None:
     Only the fields a user commonly sets are emitted (STARTER_CONFIG_FIELDS);
     the rest keep their dataclass defaults and are omitted.
     """
+    defaults = dataclasses.asdict(Config())
+    _dump_config_data(path, {name: defaults[name] for name in STARTER_CONFIG_FIELDS})
+
+
+def _config_field_types() -> dict:
+    """The Config field -> type map, as used for coercion and validation."""
+    return {f.name: f.type for f in dataclasses.fields(Config)}
+
+
+def _load_config_data(path: str) -> dict:
+    """Read the raw config-file dict, or {} if the file is absent."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"invalid JSON in {path}: {exc}") from None
+    if not isinstance(data, dict):
+        raise ConfigError(f"config root in {path} must be a JSON object")
+    return data
+
+
+def _dump_config_data(path: str, data: dict) -> None:
+    """Write a config dict as pretty UTF-8 JSON, creating parent dirs."""
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    defaults = dataclasses.asdict(Config())
-    data = {name: defaults[name] for name in STARTER_CONFIG_FIELDS}
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=4, ensure_ascii=False)
         fh.write("\n")
+
+
+def set_config_value(path: str | None, key: str, raw: str):
+    """Coerce `raw` to `key`'s field type and persist it into the config file,
+    merging into any existing keys. Returns the coerced value."""
+    path = path or CONFIG_DEFAULT_PATH
+    fields = _config_field_types()
+    if key not in fields:
+        raise ConfigError(f"unknown config key: {key}")
+    value = _coerce_value(key, raw, fields[key])
+    data = _load_config_data(path)
+    data[key] = value
+    _dump_config_data(path, data)
+    return value
+
+
+def unset_config_value(path: str | None, key: str) -> bool:
+    """Remove `key` from the config file, reverting it to its default. Returns
+    whether the key was present; an unknown key is rejected."""
+    path = path or CONFIG_DEFAULT_PATH
+    if key not in _config_field_types():
+        raise ConfigError(f"unknown config key: {key}")
+    data = _load_config_data(path)
+    if key not in data:
+        return False
+    del data[key]
+    _dump_config_data(path, data)
+    return True
 
 
 # -- db -----------------------------------------------------------------------
