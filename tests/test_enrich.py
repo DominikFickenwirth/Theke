@@ -1104,6 +1104,45 @@ def test_audiodeskription_doubled_suffix_fully_stripped():
     assert r["clean_title"] == "Räuberhände"
 
 
+# -- enrich improvements A1: redundant "<Title> - <series_name>" suffix -------
+
+def test_redundant_series_suffix_stripped():
+    # A1: ARD-Degeto reihe form "<Episode> - <Serienname>" where the tail exactly
+    # duplicates the routed series_name -> strip the tail, keep the episode head.
+    # (separator is the en-dash U+2013, as in the raw data)
+    r = enrich("ARD", "Anna und ihr Untermieter",
+                 "Volles Haus – Anna und ihr Untermieter", "", 5400)
+    assert r["series_name"] == "Anna und ihr Untermieter"
+    assert r["clean_title"] == "Volles Haus"
+
+
+def test_redundant_series_suffix_case_insensitive():
+    # The tail == series_name check is case-insensitive.
+    r = enrich("ARD", "Billy Kuckuck", "Mutterliebe – billy kuckuck", "", 5400)
+    assert r["clean_title"] == "Mutterliebe"
+
+
+def test_redundant_series_suffix_hyphen_separator():
+    r = enrich("ARD", "Billy Kuckuck", "Aber bitte mit Sahne! - Billy Kuckuck", "", 5400)
+    assert r["clean_title"] == "Aber bitte mit Sahne!"
+
+
+def test_non_redundant_title_subtitle_dash_is_kept():
+    # NEGATIVE: a title/subtitle dash whose tail is NOT the series_name must stay
+    # untouched (documentary "<Title> - <Subtitle>"); series_name here is the slot.
+    r = enrich("ARD", "Dokumentarfilmzeit",
+                 "Stealing Giants – Der grausame Handel mit lebenden Elefanten",
+                 "", 5400)
+    assert r["clean_title"] == "Stealing Giants – Der grausame Handel mit lebenden Elefanten"
+
+
+def test_redundant_series_suffix_not_stripped_without_series_name():
+    # GUARD: with no series_name (slot/format topic) the suffix rule never fires.
+    r = enrich("ARD", "Spielfilm", "Volles Haus – Anna und ihr Untermieter", "", 5400)
+    assert r["series_name"] is None
+    assert r["clean_title"] == "Volles Haus – Anna und ihr Untermieter"
+
+
 # -- cmd_enrich: DB write side ---------------------------------------------
 
 def open_db(tmp_path):
