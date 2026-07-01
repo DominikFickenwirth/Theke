@@ -9,6 +9,7 @@ import logging
 import re
 import time
 from functools import lru_cache
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 
 from theke import core   # http_get; via the module so theke.core.http_get patches apply
@@ -289,7 +290,14 @@ def search_movies(cfg, title, *, year=None, broadcast_year=None, runtime=None,
     for i, c in enumerate(cands):
         if not _in_windows(c["year"], year, broadcast_year, tol):
             continue
-        meta = tmdb_movie(cfg, c["tmdb_id"])
+        try:
+            meta = tmdb_movie(cfg, c["tmdb_id"])
+        except HTTPError as e:
+            if e.code != 404:   # a real outage still propagates
+                raise
+            log.debug("skip candidate %s: /movie 404 (stale search id, e.g. a collection)",
+                      c["tmdb_id"])
+            continue
         conf = _score_candidate(meta, title, year, runtime, tol)
         if conf is not None:
             scored.append((-conf, i, {"tmdb_id": meta["tmdb_id"], "title": meta["title"],
@@ -384,8 +392,9 @@ def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
     '2' (bulk-attempted, no match -- skipped by later bulk passes, still
     lazy-matchable). Memoizes the resolution per identical (title, year,
     broadcast, duration) so repeats cost no extra TMDB calls; `limit` caps rows
-    per call so a backlog drains over several passes. Returns {scanned, matched,
-    attempted}."""
+    per call so a backlog drains over several passes. A row that raises an
+    unexpected error is left at '1' (retried next pass), never aborting the pass
+    (Ctrl+C still does). Returns {scanned, matched, attempted, errored}."""
     tol = cfg.match_year_tolerance if year_tolerance is None else year_tolerance
     start = time.perf_counter()
     sql = ("SELECT mediathek_id, clean_title, year, duration, date, tmdb_id "
@@ -395,31 +404,37 @@ def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
         sql += f" LIMIT {int(limit)}"
     rows = [dict(r) for r in conn.execute(sql)]
     log.info("bulk matching %d movie rows", len(rows))
-    resolved, matched = {}, 0
+    resolved, matched, errored = {}, 0, 0
     for r in rows:
-        by = _broadcast_year(r["date"])
-        rt = r["duration"] / 60 if r["duration"] else None
-        key = (normalize(r["clean_title"]), r["year"], by, r["duration"])
-        if key not in resolved:
-            resolved[key] = resolve_one(cfg, r["clean_title"], year=r["year"],
-                                        broadcast_year=by, runtime=rt, tolerance=tol)
-        res = resolved[key]
-        tid, conf = None, None
-        if "tmdb_id" in res and not (r["tmdb_id"] and r["tmdb_id"] != res["tmdb_id"]):
-            tid, conf = res["tmdb_id"], res["confidence"]
-        # persist per row (autocommit): a Ctrl+C mid-loop keeps the done rows.
-        if tid is not None:
-            conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
-                         "status='3' WHERE mediathek_id=?", (tid, conf, r["mediathek_id"]))
-            matched += 1
-        else:
-            conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id=?",
-                         (r["mediathek_id"],))
-        log.info("bulk %s '%s' (%s): %s", r["mediathek_id"][:7], r["clean_title"],
-                 r["year"], "matched" if tid is not None else "no match")
-    log.debug("bulk_match: %d rows -> %d matched, %.2fs", len(rows), matched,
-              time.perf_counter() - start)
-    return {"scanned": len(rows), "matched": matched, "attempted": len(rows) - matched}
+        try:
+            by = _broadcast_year(r["date"])
+            rt = r["duration"] / 60 if r["duration"] else None
+            key = (normalize(r["clean_title"]), r["year"], by, r["duration"])
+            if key not in resolved:
+                resolved[key] = resolve_one(cfg, r["clean_title"], year=r["year"],
+                                            broadcast_year=by, runtime=rt, tolerance=tol)
+            res = resolved[key]
+            tid, conf = None, None
+            if "tmdb_id" in res and not (r["tmdb_id"] and r["tmdb_id"] != res["tmdb_id"]):
+                tid, conf = res["tmdb_id"], res["confidence"]
+            # persist per row (autocommit): a Ctrl+C mid-loop keeps the done rows.
+            if tid is not None:
+                conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
+                             "status='3' WHERE mediathek_id=?", (tid, conf, r["mediathek_id"]))
+                matched += 1
+            else:
+                conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id=?",
+                             (r["mediathek_id"],))
+            log.info("bulk %s '%s' (%s): %s", r["mediathek_id"][:7], r["clean_title"],
+                     r["year"], "matched" if tid is not None else "no match")
+        except Exception as exc:   # one bad row must not abort the eager pass (Ctrl+C still does)
+            errored += 1
+            log.warning("bulk %s '%s' (%s): error, left at '1': %s",
+                        r["mediathek_id"][:7], r["clean_title"], r["year"], exc)
+    log.debug("bulk_match: %d rows -> %d matched, %d errored, %.2fs", len(rows), matched,
+              errored, time.perf_counter() - start)
+    return {"scanned": len(rows), "matched": matched,
+            "attempted": len(rows) - matched - errored, "errored": errored}
 
 
 # -- candidate search --------------------------------------------------------
