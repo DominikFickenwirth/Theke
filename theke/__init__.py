@@ -34,7 +34,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
-                         pick_by_year, ARTICLES)
+                         pick_by_year, bulk_match, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import index
@@ -880,12 +880,22 @@ def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
         return _match_reset(conn, args)
     if not cfg.tmdb_api_key:
         raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
+    if args.match_cmd == "bulk":
+        return _match_bulk(conn, cfg, args)
     if args.type == "series" and (args.season is None or args.episode is None):
         raise ValueError("--type series requires --season and --episode")
     match args.match_cmd:
         case "run":  return _match_run(conn, cfg, args)
         case "show": return _match_show(conn, cfg, args)
         case _: raise DbError(f"unhandled match action: {args.match_cmd}")
+
+
+def _match_bulk(conn, cfg, args) -> dict:
+    """Eager, row-driven catalog match (phase 15): tag every confidently
+    resolvable movie row with its tmdb_id ('3'), marking the rest '2' (skipped
+    by later bulk passes, still lazy-matchable). --limit caps rows this call
+    (default: all remaining '1' rows)."""
+    return bulk_match(conn, cfg, limit=args.limit)
 
 
 def _match_reset(conn, args) -> dict:
@@ -2044,6 +2054,7 @@ def _run_pass(conn, cfg) -> dict:
     (when auto-approved). Returns one aggregated summary."""
     fetch = cmd_fetch(conn, cfg, _ns(force=False))
     enriched = _enrich_run(conn, cfg, _ns(force=False))
+    bulk = _run_bulk(conn, cfg)
     scan = _run_scan(conn, cfg)
     list_added = 0
     for lid in cfg.tmdb_lists:
@@ -2074,8 +2085,24 @@ def _run_pass(conn, cfg) -> dict:
     if cfg.queue_auto_approve:
         downloaded = _queue_download(conn, cfg, _ns(all=True, ids=[], force=False))["downloaded"]
     return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
-            "scan": scan, "list_added": list_added, "wishes": len(wishes),
-            "failed": failed, "downloaded": downloaded, **totals}
+            "bulk": bulk, "scan": scan, "list_added": list_added,
+            "wishes": len(wishes), "failed": failed, "downloaded": downloaded,
+            **totals}
+
+
+def _run_bulk(conn, cfg) -> dict:
+    """Eagerly bulk-match a capped batch of enriched-and-untried movie rows before
+    the wish loop, draining the '1' pool so wishes resolve by tmdb_id instead of a
+    per-wish scan. Incremental (only '1' rows) and best-effort: no TMDB key ->
+    {"skipped": True}; a failure (e.g. a TMDB outage) is reported, never aborting
+    the pass."""
+    if not cfg.tmdb_api_key:
+        return {"skipped": True}
+    try:
+        return bulk_match(conn, cfg, limit=cfg.bulk_match_max_per_pass)
+    except Exception as exc:
+        log.warning("bulk match failed: %s", exc)
+        return {"error": str(exc)}
 
 
 def _run_scan(conn, cfg) -> dict:
@@ -2317,6 +2344,8 @@ def build_parser() -> argparse.ArgumentParser:
     msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate rows with their score breakdown without writing. Defaults to listing everything not rejected.")
     mrst = msub.add_parser("reset", help="undo match: status 2/3 -> 1",                            description="Take matched ('3') and bulk-attempted ('2') rows back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
     mrst.add_argument("-s", "--status-only", action="store_true",                                        help="only flip status, keep tmdb_id + match_confidence")
+    mblk = msub.add_parser("bulk", help="eager: match the whole movie catalog by search",           description="Row-driven eager match (phase 15): search TMDB by each enriched movie row's own title and tag confident hits (hard gates: title, runtime, year, release-before-broadcast) status '3', marking the rest '2' (bulk-attempted, still lazy-matchable). Needs a TMDB key.")
+    mblk.add_argument("-l", "--limit", type=int, metavar="N",                                            help="cap rows matched this call (default: all remaining '1' rows)")
     mrun.add_argument("-t", "--tmdb",     required=True, metavar="ID",                                  help="TMDB id to match (movie id, or series id for --type series)")
     mrun.add_argument("-T", "--type",     default="movie", choices=["movie", "series"],                 help="media type (default movie)")
     mrun.add_argument("-s", "--season",   type=int, metavar="N",                                        help="season number (required for --type series)")

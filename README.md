@@ -387,6 +387,31 @@ theke --db build/theke.db match reset                # reset = N (IDs geleert)
 theke --db build/theke.db match reset --status-only  # nur status 2 -> 1
 ```
 
+### `match bulk`
+
+Stufe 15: eager, zeilengetriebenes Matching des ganzen Film-Katalogs. Sucht für
+jede angereicherte Filmzeile per TMDB-Suche nach ihrem eigenen Titel und markiert
+sichere Treffer als `status='3'` (mit `tmdb_id`), alle anderen als `status='2'`
+(bulk-versucht ohne Treffer -- von späteren Bulk-Läufen übersprungen, aber weiter
+lazy-matchbar). Die Gates sind bewusst streng, um Fehl-Matches zu vermeiden:
+Titelähnlichkeit, **Pflicht-Laufzeit** im Toleranzband, bei vorhandenem Jahr die
+Jahresdifferenz (`±match_year_tolerance`), bei fehlendem Jahr nur ein *eindeutiger*
+Suchtreffer, und das Erscheinungsjahr darf nicht nach dem Ausstrahlungsjahr liegen.
+Braucht einen TMDB-Key. Gibt `scanned`/`matched`/`attempted` aus.
+
+| Option              | Wirkung                                                          |
+| ------------------- | --------------------------------------------------------------- |
+| `-l`, `--limit N`   | Nur N Zeilen pro Aufruf matchen (Default: alle offenen `'1'`).   |
+
+```powershell
+theke --db build/theke.db match bulk                 # ganzer Backlog auf einmal
+theke --db build/theke.db match bulk --limit 500     # gedeckelter Teillauf
+```
+
+`theke run` ruft dies pro Pass inkrementell auf (Deckel: Config
+`bulk_match_max_per_pass`, Default 500), sodass der `'1'`-Pool über mehrere Passes
+abfließt und Wünsche per `tmdb_id` statt per teurem Einzel-Scan aufgelöst werden.
+
 ## `theke queue`
 
 Stufen 5-8: stellt Downloads in die Tabelle `queue` (Review-Queue + Download-Akte

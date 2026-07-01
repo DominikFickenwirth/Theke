@@ -50,6 +50,7 @@ class Config:
     tmdb_lists:           list  = dataclasses.field(default_factory=list)
     match_min_confidence: float = 0.6
     match_year_tolerance: int   = 2
+    bulk_match_max_per_pass: int = 500
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     fiction_topics:       list  = dataclasses.field(default_factory=list)
