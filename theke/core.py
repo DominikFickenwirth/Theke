@@ -119,6 +119,20 @@ def load_config(path: str | None, overrides: dict | None = None) -> Config:
     return Config(**known)
 
 
+def write_default_config(path: str) -> None:
+    """Write a starter config file with all defaults (pretty JSON, UTF-8).
+
+    Used to seed a config on first run when an explicit --config path is absent
+    (the container's first start), analogous to the DB being created on demand.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(dataclasses.asdict(Config()), fh, indent=4, ensure_ascii=False)
+        fh.write("\n")
+
+
 # -- db -----------------------------------------------------------------------
 # Thin SQLite layer; keep all SQLite specifics here so the backend could be
 # swapped later. Single-writer design: exactly one process writes the DB, but

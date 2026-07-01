@@ -27,8 +27,8 @@ from datetime import datetime, time, timezone
 from theke import core
 from theke import scheduler
 from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
-                        DbError, DbLockedError, MIGRATIONS, db_connect,
-                        db_get_meta, db_set_meta)
+                        write_default_config, DbError, DbLockedError, MIGRATIONS,
+                        db_connect, db_get_meta, db_set_meta)
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
@@ -2414,6 +2414,9 @@ def main(argv=None) -> int:
         return EXIT_USAGE if exc.code else EXIT_OK
 
     try:
+        if args.config is not None and not os.path.exists(args.config):
+            log.info(f"config {args.config} not found -- writing defaults")
+            write_default_config(args.config)
         cfg = load_config(args.config, overrides={"db_path": args.db})
         match args.command:
             case "config":
