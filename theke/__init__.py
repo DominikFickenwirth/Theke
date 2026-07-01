@@ -34,7 +34,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
-                         pick_by_year, bulk_match, ARTICLES)
+                         pick_by_year, bulk_pick, bulk_match, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import index
@@ -1455,10 +1455,12 @@ def _drop_leading_article(title) -> str:
 
 def _search_title(cfg, title, year, tol) -> tuple:
     """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
-    year tolerant by `tol` years (smallest distance wins, ties keep popularity).
-    Raises ValueError when nothing qualifies, naming the cause: no title hit at
-    all vs. hits whose years all miss the tolerance (listing the years found).
-    The pure-input core shared by `library add --title` and `library import`."""
+    pick sharing `match bulk`'s bulk_pick rule: with a year the tolerant nearest
+    (smallest distance, ties keep popularity); without a year only an unambiguous
+    single hit. Raises ValueError when nothing qualifies, naming the cause: no
+    title hit at all, an ambiguous yearless search, or hits whose years all miss
+    the tolerance (listing the years found). The pure-input core shared by
+    `library add --title` and `library import`."""
     cands = tmdb_search(cfg, title)
     if not cands:
         stripped = _drop_leading_article(title)
@@ -1466,8 +1468,11 @@ def _search_title(cfg, title, year, tol) -> tuple:
             cands = tmdb_search(cfg, stripped)
     if not cands:
         raise ValueError(f"no TMDB title matches {title!r}")
-    cand = pick_by_year(cands, year, tol)
+    cand = bulk_pick(cands, year, tol)
     if cand is None:
+        if year is None:
+            raise ValueError(f"{len(cands)} TMDB title matches for {title!r}; "
+                             f"give a year to disambiguate")
         years = sorted({c["year"] for c in cands if c["year"] is not None})
         found = ", ".join(map(str, years)) if years else "none dated"
         raise ValueError(f"{len(cands)} TMDB title match(es) for {title!r}, but "
@@ -1979,14 +1984,12 @@ def _read_import_file(path):
 
 def _resolve_entry(cfg, entry, tol) -> tuple:
     """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
-    id is verified via TMDB (a bad id propagates as 404); a title is searched, but
-    only with a year -- a yearless title is too ambiguous to import, so it raises
-    rather than guessing the most popular hit (unlike interactive `add --title`)."""
+    id is verified via TMDB (a bad id propagates as 404); a title is searched via
+    `_search_title` (bulk_pick rule): with a year the tolerant nearest, without a
+    year only an unambiguous single hit (an ambiguous yearless title raises)."""
     if entry["kind"] == "id":
         meta = tmdb_movie(cfg, entry["id"])
         return str(entry["id"]), meta["title"] or "", meta["year"]
-    if entry["year"] is None:
-        raise ValueError(f"year missing for title {entry['title']!r}")
     return _search_title(cfg, entry["title"], entry["year"], tol)
 
 
