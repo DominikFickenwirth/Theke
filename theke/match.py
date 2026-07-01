@@ -383,9 +383,10 @@ def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
 
 
 # -- bulk match (phase 15: row-driven, eager, hard-gated) --------------------
-# Reverse of the lazy id-driven match: search TMDB by a row's own title and
-# accept only on hard gates (title + mandatory runtime + confirmed year +
-# release-not-after-broadcast), so the eager catalog stays free of false hits.
+# Reverse of the lazy id-driven match: resolve a row's own title against TMDB
+# via the shared search core (resolve_one -- title + mandatory runtime +
+# confirmed year + release-not-after-broadcast), so the eager catalog stays free
+# of false hits.
 
 
 def _drop_article(title) -> str:
@@ -395,17 +396,6 @@ def _drop_article(title) -> str:
     return rest if rest and head.casefold() in ARTICLES else title
 
 
-def _search_candidates(cfg, title) -> list:
-    """TMDB search for a title, retrying without a leading article when the first
-    query finds nothing (mirrors library's _search_title)."""
-    cands = tmdb_search(cfg, title)
-    if not cands:
-        stripped = _drop_article(title)
-        if stripped != title:
-            cands = tmdb_search(cfg, stripped)
-    return cands
-
-
 def _broadcast_year(date):
     """The airing year from a mediathek `date` (leading 'YYYY...'); None when
     absent or unparseable."""
@@ -413,32 +403,16 @@ def _broadcast_year(date):
     return int(s) if s.isdigit() else None
 
 
-def bulk_accept(meta, row, tol) -> dict:
-    """Decide whether to eagerly tag `row` with TMDB `meta`, on hard gates (all
-    must hold): the lazy score must not reject (title floor + year within tol);
-    runtime is mandatory and within RUNTIME_TOLERANCE (not the soft lazy
-    confirmer); a row year needs a TMDB year to confirm against; and the release
-    year must not sit past the broadcast year (within tol). Returns
-    {"accepted", "confidence"} with the lazy confidence when accepted."""
-    s = score_match(meta, row, year_tolerance=tol)
-    runtime, dur = meta.get("runtime"), row["duration"]
-    my, ry = row["year"], meta.get("year")
-    by = _broadcast_year(row.get("date"))
-    ok = (not s["rejected"]
-          and runtime and dur and abs(dur / 60 - runtime) / runtime <= RUNTIME_TOLERANCE
-          and (my is None or ry is not None)
-          and (by is None or ry is None or ry <= by + tol))
-    return {"accepted": bool(ok), "confidence": s["confidence"] if ok else 0.0}
-
-
 def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
     """Eager, row-driven movie match (phase 15): for each enriched-and-untried
-    movie row ('1', non-trailer) search TMDB by its own clean_title, confirm on
-    the hard gates (pick_by_year + bulk_accept) and tag a confident hit '3' (with
-    tmdb_id) or mark the row '2' (bulk-attempted, no match -- skipped by later
-    bulk passes, still lazy-matchable). Deduplicates the search per distinct
-    title and caches TMDB movie lookups by id; `limit` caps rows per call so a
-    backlog drains over several passes. Returns {scanned, matched, attempted}."""
+    movie row ('1', non-trailer) resolve its own clean_title against TMDB via the
+    shared search core (resolve_one, hard-gated on title/year/broadcast/runtime)
+    and tag a single confident hit '3' (with tmdb_id + confidence) or mark the row
+    '2' (bulk-attempted, no match -- skipped by later bulk passes, still
+    lazy-matchable). Memoizes the resolution per identical (title, year,
+    broadcast, duration) so repeats cost no extra TMDB calls; `limit` caps rows
+    per call so a backlog drains over several passes. Returns {scanned, matched,
+    attempted}."""
     tol = cfg.match_year_tolerance if year_tolerance is None else year_tolerance
     start = time.perf_counter()
     sql = ("SELECT mediathek_id, clean_title, year, duration, date, tmdb_id "
@@ -448,20 +422,18 @@ def bulk_match(conn, cfg, limit=None, year_tolerance=None) -> dict:
         sql += f" LIMIT {int(limit)}"
     rows = [dict(r) for r in conn.execute(sql)]
     log.info("bulk matching %d movie rows", len(rows))
-    searches, movies, matched = {}, {}, 0
+    resolved, matched = {}, 0
     for r in rows:
-        key = normalize(r["clean_title"])
-        if key not in searches:
-            searches[key] = _search_candidates(cfg, r["clean_title"])
-        cand = pick_by_year(searches[key], r["year"], tol)
+        by = _broadcast_year(r["date"])
+        rt = r["duration"] / 60 if r["duration"] else None
+        key = (normalize(r["clean_title"]), r["year"], by, r["duration"])
+        if key not in resolved:
+            resolved[key] = resolve_one(cfg, r["clean_title"], year=r["year"],
+                                        broadcast_year=by, runtime=rt, tolerance=tol)
+        res = resolved[key]
         tid, conf = None, None
-        if cand is not None and not (r["tmdb_id"] and r["tmdb_id"] != cand["tmdb_id"]):
-            cid = cand["tmdb_id"]
-            if cid not in movies:
-                movies[cid] = tmdb_movie(cfg, cid)
-            a = bulk_accept(movies[cid], r, tol)
-            if a["accepted"]:
-                tid, conf = cid, a["confidence"]
+        if "tmdb_id" in res and not (r["tmdb_id"] and r["tmdb_id"] != res["tmdb_id"]):
+            tid, conf = res["tmdb_id"], res["confidence"]
         # persist per row (autocommit): a Ctrl+C mid-loop keeps the done rows.
         if tid is not None:
             conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "

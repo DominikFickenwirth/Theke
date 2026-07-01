@@ -12,7 +12,7 @@ from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
-                         find_arte_links, pick_by_year, bulk_accept, bulk_match,
+                         find_arte_links, pick_by_year, bulk_match,
                          search_movies, resolve_one)
 
 
@@ -376,40 +376,15 @@ def test_cmd_tmdb_requires_key():
         cmd_tmdb(Config(), targs())
 
 
-# -- bulk match: bulk_accept (pure gate; candidate pick -> pick_by_year) -----
+# -- search_movies hard gate (migrated from bulk_accept) ---------------------
 
 
-def brow(clean_title="Das Boot", year=1981, duration=8940, date="1985-01-01"):
-    return {"clean_title": clean_title, "year": year, "duration": duration, "date": date}
-
-
-def test_bulk_accept_all_gates_pass():
-    a = bulk_accept(BOOT, brow(), 2)
-    assert a["accepted"] is True
-    assert a["confidence"] == 1.0   # exact title * year 1.0 * runtime 1.0
-
-
-def test_bulk_accept_runtime_is_a_hard_gate():
-    # 120 min vs 149 min: above the clip floor (score_match would only soft-
-    # penalise, conf 0.9) but rel dist 0.194 > RUNTIME_TOLERANCE 0.15 -> reject.
-    assert bulk_accept(BOOT, brow(duration=7200), 2)["accepted"] is False
-
-
-def test_bulk_accept_rejects_when_runtime_missing():
-    assert bulk_accept({"titles": ["Das Boot"], "year": 1981, "runtime": None},
-                       brow(), 2)["accepted"] is False
-    assert bulk_accept(BOOT, brow(duration=None), 2)["accepted"] is False
-
-
-def test_bulk_accept_year_present_requires_tmdb_year():
-    # row has a year but the TMDB candidate has none -> cannot confirm -> reject.
-    assert bulk_accept({"titles": ["Das Boot"], "year": None, "runtime": 149},
-                       brow(year=1981), 2)["accepted"] is False
-
-
-def test_bulk_accept_rejects_release_after_broadcast():
-    # release 1981 but aired 1978 (+-2 -> 1980): a film cannot air before release.
-    assert bulk_accept(BOOT, brow(year=None, date="1978-01-01"), 2)["accepted"] is False
+def test_search_movies_rejects_candidate_without_runtime(monkeypatch):
+    # a wanted runtime is mandatory: a TMDB candidate with no runtime cannot
+    # confirm it -> no match (the detail is fetched, then rejected).
+    movie_search_stub(monkeypatch, [sres(1234, "Das Boot", "1981-09-17")],
+                      {"1234": {**TMDB_BOOT, "runtime": None}})
+    assert search_movies(CFG, "Das Boot", year=1981, runtime=149)["matches"] == []
 
 
 # -- bulk_match orchestrator (row-driven, DB + stubbed TMDB IO) --------------
