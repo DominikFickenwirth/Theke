@@ -725,7 +725,9 @@ Fügt Filmwünsche (`W`) hinzu -- über TMDB-IDs direkt (`--tmdb`), über einen 
 durch Import einer **ganzen TMDB-Liste** (`--tmdb-list`). Bei `--title` darf das
 Jahr (`--year`) -- wie in `theke match` -- um ein paar Jahre danebenliegen: Aus den
 Treffern wird der mit der kleinsten Jahresdifferenz innerhalb der Toleranz gewählt
-(bei Gleichstand der populärste); ohne `--year` der populärste Treffer. Die erlaubte
+(bei Gleichstand der populärste); ohne `--year` nur, wenn die Suche **genau einen**
+Treffer liefert -- bei mehreren bleibt es mehrdeutig und meldet einen Fehler (wie
+`theke match bulk`). Die erlaubte
 Differenz steuert `--year-tolerance` (Default: Config `match_year_tolerance`, ab
 Werk `2`). Liefert die Suche zum vollen Titel nichts und beginnt er mit einem
 Artikel (`der`/`die`/`das`/`ein`/`eine`/`the`/`a`/`an`), wird einmal ohne den Artikel
@@ -786,22 +788,25 @@ wird auf eine `tmdb_id` aufgelöst -- direkt angegeben oder per Titel/Jahr-Suche
 **Fehlerprotokoll**, statt den Import abzubrechen; der Rest wird angelegt (`W`,
 idempotent). Erfordert einen TMDB-Key.
 
-Eine Titel-Zeile braucht **immer ein Jahr** (anders als interaktiv bei
-`add --title`): ohne Jahr ist ein Titel zu mehrdeutig, daher wird er nicht auf
-den populärsten Treffer geraten, sondern als Fehler `year missing` protokolliert.
+Ohne Jahr wird ein Titel nur aufgelöst, wenn die Suche **genau einen** Treffer
+liefert (wie `theke match bulk` und `add --title`); bei mehreren Treffern bleibt
+er mehrdeutig und landet im Fehlerprotokoll (nicht auf den populärsten geraten).
+Ein Jahr macht die Auflösung robuster (tolerante Jahresnähe statt Eindeutigkeit).
 
 Das Format ergibt sich aus der Endung (`.txt`/`.csv`), `--format` überschreibt:
 
 - **txt**: eine Zeile je Eintrag, entweder `Titel (Jahr)` oder eine `tmdb_id`;
   Leerzeilen werden übersprungen. `--mode` steuert die Deutung: `auto` (Default --
   reine Ziffern = `tmdb_id`, sonst Titel), `id` (alles als IDs) oder `title`
-  (alles als Titel). Eine Titel-Zeile ohne `(Jahr)` ist ein Fehler.
+  (alles als Titel). Eine Titel-Zeile ohne `(Jahr)` löst nur bei genau einem
+  Suchtreffer auf, sonst ist sie ein Fehler.
 - **csv**: Kopfzeile aus den Spalten `tmdb_id`, `title`, `year` (jede darf
   fehlen). `title` und `year` müssen **beide** oder **keine** vorhanden sein;
   Spalten namens `dummy` werden ignoriert, andere Namen sind ein Fehler. Pro
-  Zeile gewinnt eine gefüllte `tmdb_id`, sonst der Titel; eine Zeile ohne beides,
-  mit ungültigem oder mit fehlendem Jahr (bei vorhandenem Titel) kommt ins
-  Fehlerprotokoll. Der Trenner (`,` oder `;`) wird aus der Kopfzeile erkannt; die
+  Zeile gewinnt eine gefüllte `tmdb_id`, sonst der Titel; eine Zeile ohne beides
+  oder mit ungültigem Jahr kommt ins Fehlerprotokoll. Ein fehlendes Jahr (bei
+  vorhandenem Titel) ist erlaubt und löst wie oben nur bei genau einem Treffer
+  auf. Der Trenner (`,` oder `;`) wird aus der Kopfzeile erkannt; die
   Datei darf UTF-8 (auch mit BOM) **oder** ANSI/CP-1252 sein.
 
 Direkt angegebene IDs werden gegen TMDB geprüft (eine ungültige ID landet im
@@ -809,7 +814,8 @@ Fehlerprotokoll). Während des Imports meldet jede Zeile ihren Fortschritt
 (`[n/total]`) auf stderr, damit ein langer Import sichtbar bleibt, gefolgt von
 ihrer Auflösung (TMDB-ID + Titel + Jahr) -- so sieht man je Zeile, was hinter
 einer ID steckt bzw. welchen Treffer eine Titel-Suche gewählt hat. Eine Titel-
-Suche ohne Treffer nennt den Grund: gar kein Titel-Treffer vs. Treffer, deren
+Suche ohne Auflösung nennt den Grund: gar kein Titel-Treffer, ein mehrdeutiger
+jahrloser Titel (mehrere Treffer, kein Jahr zum Eingrenzen) oder Treffer, deren
 Jahre alle außerhalb der Toleranz liegen (mit Auflistung der gefundenen Jahre).
 Am Ende kommen `added`/`skipped`/`failed` und die `errors`-Liste (`line`,
 `input`, `reason`) auf stdout; mit `--json` als Objekt, sonst als Bericht.
