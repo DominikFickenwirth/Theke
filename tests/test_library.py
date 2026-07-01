@@ -984,7 +984,7 @@ def test_download_records_library_as_L(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         cfg = download_cfg(tmp_path)
-        insert_movie(conn, "m_de", tmdb_id="100", status="2")
+        insert_movie(conn, "m_de", tmdb_id="100", status="3")
         cmd_queue(conn, cfg, qargs("add", tmdb=["100"]))
         conn.execute("UPDATE queue SET status='A'")
         cmd_queue(conn, cfg, qargs("download", all=True))
@@ -1007,7 +1007,7 @@ def test_download_flips_existing_wish_to_L(tmp_path, monkeypatch):
     try:
         cfg = download_cfg(tmp_path)
         cmd_library(conn, cfg, libargs("add", tmdb=["100"]))   # a 'W' wish
-        insert_movie(conn, "m_de", tmdb_id="100", status="2")
+        insert_movie(conn, "m_de", tmdb_id="100", status="3")
         cmd_queue(conn, cfg, qargs("add", tmdb=["100"]))
         conn.execute("UPDATE queue SET status='A'")
         cmd_queue(conn, cfg, qargs("download", all=True))
@@ -1078,7 +1078,7 @@ def test_update_skips_already_satisfied_wish(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         cfg = download_cfg(tmp_path, queue_auto_approve=True)
-        insert_movie(conn, "m_de", tmdb_id="100", status="2")
+        insert_movie(conn, "m_de", tmdb_id="100", status="3")
         conn.execute("INSERT INTO library (tmdb_id, status, title, created_at, "
                      "updated_at) VALUES ('100','L','',?,?)",
                      (theke._now(), theke._now()))

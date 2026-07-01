@@ -1140,12 +1140,12 @@ def reset_args(status_only=False):
 def test_cmd_enrich_reset_flips_status_and_clears_columns(tmp_path):
     conn = open_db(tmp_path)
     try:
-        # one enriched ('1') and one matched ('2') row, both with derived data
+        # one enriched ('1') and one matched ('3') row, both with derived data
         insert_enriched(conn, "a", clean_title="Der Fall", year=2003,
                         category="Movie", language="de", enrich_confidence=0.9)
         insert_enriched(conn, "b", clean_title="Das Boot", year=1981,
                         category="Movie", language="de", enrich_confidence=0.9)
-        conn.execute("UPDATE mediathek SET status='2', tmdb_id='123', "
+        conn.execute("UPDATE mediathek SET status='3', tmdb_id='123', "
                      "match_confidence=0.8 WHERE mediathek_id='b'")
         result = cmd_enrich(conn, Config(), reset_args())
         assert result == {"reset": 2}

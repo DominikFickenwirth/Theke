@@ -197,7 +197,7 @@ def open_db(tmp_path):
     return db_connect(str(tmp_path / "theke.db"))
 
 
-def insert_mediathek(conn, mediathek_id, status="2", tmdb_id="100", language="de",
+def insert_mediathek(conn, mediathek_id, status="3", tmdb_id="100", language="de",
                      duration=6000, size_mb=700, url_video="http://v",
                      url_video_hd="", url_video_small="", url_subtitle="",
                      url_website="", date="2026-01-01 20:00:00",
