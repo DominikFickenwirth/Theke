@@ -79,7 +79,7 @@ INTERVIEW = re.compile(r'^\s*(?:Interview mit|Rencontre avec|Entretien avec|Gesp
 MARKERS = [
     (re.compile(r'^Audiodeskription$|^Hörfassung$', re.I),                       ('flag', 'A')),
     (re.compile(r'^(?:mit\s+)?Gebärdensprache$|^ÖGS$', re.I),                     ('flag', 'S')),
-    (re.compile(r'^(?:in\s+)?(?:Einfache[r]?|Leichte[r]?)\s+Sprache$', re.I),     ('flag', 'E')),
+    (re.compile(r'^(?:in\s+)?(?:Einfache[r]?|Leichte[r]?|Klare[r]?)\s+Sprache$', re.I), ('flag', 'E')),
     (re.compile(r'^Originalversion mit Untertitel$|^OmU$|^OmdU$', re.I),          ('sub_ov', 'U')),
     (re.compile(r'^mit Untertitel$', re.I),                                       ('flag', 'U')),
     (re.compile(r'^Originalversion$|^OV$', re.I),                                 ('language', 'ov')),
