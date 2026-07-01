@@ -192,21 +192,27 @@ def tmdb_movie(cfg, tmdb_id) -> dict:
             "original_language": data.get("original_language")}
 
 
-def tmdb_search(cfg, title) -> list:
-    """Search TMDB movies by title, popularity-ordered, as {tmdb_id, title,
-    year} candidates. The wanted year is NOT sent to the API (we want a tolerant
-    local match); pick_by_year refines the pick afterwards."""
+def _tmdb_search_page(cfg, title):
+    """One page of TMDB movie search as (candidates, total_results, total_pages):
+    candidates are {tmdb_id, title, year} (year from the release_date), in TMDB's
+    popularity order. The wanted year is NOT sent (tolerant local match)."""
     params = urlencode({"api_key": cfg.tmdb_api_key, "language": cfg.tmdb_language,
                         "query": title})
     url = f"{cfg.tmdb_api_url}/search/movie?{params}"
     data = json.loads(core.http_get(url, cfg.download_timeout).decode("utf-8"))
-    out = []
+    cands = []
     for r in data.get("results", []):
         rel = r.get("release_date") or ""
         year = int(rel[:4]) if rel[:4].isdigit() else None
-        out.append({"tmdb_id": str(r["id"]), "title": r.get("title") or "",
-                    "year": year})
-    return out
+        cands.append({"tmdb_id": str(r["id"]), "title": r.get("title") or "",
+                      "year": year})
+    return cands, data.get("total_results") or len(cands), data.get("total_pages") or 1
+
+
+def tmdb_search(cfg, title) -> list:
+    """Page-1 TMDB movie candidates ({tmdb_id, title, year}) for a title, thin
+    wrapper over _tmdb_search_page dropping the pagination totals."""
+    return _tmdb_search_page(cfg, title)[0]
 
 
 def tmdb_list(cfg, list_id) -> list:
@@ -252,6 +258,92 @@ def pick_by_year(candidates, year, tolerance):
             continue
         best, best_delta = c, delta
     return best
+
+
+# -- unified movie search (the one title->TMDB choke point) ------------------
+# search_movies does the whole job for every caller (tmdb search, library add/
+# import, match bulk): search + article retry, cheap year/broadcast prefilter,
+# per-survivor detail fetch, and full scoring (title floor + year + a hard
+# runtime gate). Callers only pass the signals they have and read the result.
+
+
+def _in_windows(cand_year, year, broadcast_year, tol) -> bool:
+    """Cheap pre-detail filter on a candidate's release year: inside the wanted
+    year window (undated candidates only survive when no year is wanted) and not
+    released past the broadcast year within tolerance (undated candidates
+    survive)."""
+    if year is not None and (cand_year is None or abs(cand_year - year) > tol):
+        return False
+    if broadcast_year is not None and cand_year is not None \
+            and cand_year > broadcast_year + tol:
+        return False
+    return True
+
+
+def _score_candidate(meta, title, year, runtime, tol):
+    """Confidence for one fetched candidate against the wanted title/year/runtime,
+    or None when a hard gate rejects it: score_match's title floor + year gate, a
+    wanted year needs a TMDB year to confirm, and a wanted runtime is mandatory
+    and within RUNTIME_TOLERANCE. `runtime` is in minutes."""
+    row = {"clean_title": title, "year": year,
+           "duration": runtime * 60 if runtime is not None else None}
+    s = score_match(meta, row, year_tolerance=tol)
+    if s["rejected"] or (year is not None and meta.get("year") is None):
+        return None
+    if runtime is not None:
+        mr = meta.get("runtime")
+        if not mr or abs(runtime - mr) / mr > RUNTIME_TOLERANCE:
+            return None
+    return s["confidence"]
+
+
+def search_movies(cfg, title, *, year=None, broadcast_year=None, runtime=None,
+                  tolerance=None) -> dict:
+    """Resolve a movie title against TMDB, doing the whole job: search (retrying
+    without a leading article), drop candidates outside the year/broadcast
+    windows cheaply, then fetch each survivor's detail and fully score it (title
+    floor, year, runtime as a hard gate when a wanted runtime is given). Returns
+    {matches, total, truncated}: matches ({tmdb_id,title,year,runtime,confidence})
+    sorted by confidence desc (ties keep TMDB popularity), the raw total_results,
+    and whether results spilled past page 1 (truncated -> never a safe auto-match)."""
+    tol = cfg.match_year_tolerance if tolerance is None else tolerance
+    cands, total, pages = _tmdb_search_page(cfg, title)
+    if not cands:
+        stripped = _drop_article(title)
+        if stripped != title:
+            cands, total, pages = _tmdb_search_page(cfg, stripped)
+    scored = []
+    for i, c in enumerate(cands):
+        if not _in_windows(c["year"], year, broadcast_year, tol):
+            continue
+        meta = tmdb_movie(cfg, c["tmdb_id"])
+        conf = _score_candidate(meta, title, year, runtime, tol)
+        if conf is not None:
+            scored.append((-conf, i, {"tmdb_id": meta["tmdb_id"], "title": meta["title"],
+                                      "year": meta["year"], "runtime": meta["runtime"],
+                                      "confidence": conf}))
+    scored.sort(key=lambda s: (s[0], s[1]))
+    return {"matches": [s[2] for s in scored], "total": total, "truncated": pages > 1}
+
+
+def resolve_one(cfg, title, *, year=None, broadcast_year=None, runtime=None,
+                tolerance=None) -> dict:
+    """Auto-match adapter over search_movies: a single, non-truncated match ->
+    {tmdb_id,title,year,confidence}; otherwise a typed miss {error: 'none' |
+    'ambiguous'(+count) | 'truncated'(+total)}. Never raises (the tmdb search
+    command needs the structured result)."""
+    res = search_movies(cfg, title, year=year, broadcast_year=broadcast_year,
+                        runtime=runtime, tolerance=tolerance)
+    if res["truncated"]:
+        return {"error": "truncated", "total": res["total"]}
+    ms = res["matches"]
+    if not ms:
+        return {"error": "none"}
+    if len(ms) > 1:
+        return {"error": "ambiguous", "count": len(ms)}
+    m = ms[0]
+    return {"tmdb_id": m["tmdb_id"], "title": m["title"], "year": m["year"],
+            "confidence": m["confidence"]}
 
 
 def tmdb_tv(cfg, tmdb_id, season, episode) -> dict:
