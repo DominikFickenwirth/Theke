@@ -516,6 +516,12 @@ def enrich(sender, topic, title, description, duration,
     if my:
         if not r['year']: r['year'] = int(my.group(0).strip('() '))
         t = t[:my.start()]
+
+    if r['series_name']:                                 # A1: redundant reihe suffix
+        redun = re.search(r'\s*[-–]\s*' + re.escape(r['series_name']) + r'$', t, re.I)
+        if redun and t[:redun.start()].strip(' -–|:,·'):  # keep a non-empty head
+            t = t[:redun.start()]
+
     r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:,·') or None
 
     r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
