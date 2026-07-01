@@ -2,8 +2,10 @@
 cmd_library (add/list/remove), download -> library recording, and the
 single pipeline pass (_run_pass, the body the scheduler loops)."""
 
+import dataclasses
 import json
 import logging
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -62,11 +64,13 @@ def library_rows(conn):
 
 def libargs(library_cmd="list", tmdb=None, all=False, status=None, json=False,
             title=None, year=None, year_tolerance=None, path=None, format=None,
-            mode="auto", tmdb_list=None):
+            mode="auto", tmdb_list=None, allow_empty=False, deleted=False,
+            root=None):
     return SimpleNamespace(library_cmd=library_cmd, tmdb=tmdb, all=all,
                            status=status, json=json, title=title, year=year,
                            year_tolerance=year_tolerance, path=path,
-                           format=format, mode=mode, tmdb_list=tmdb_list)
+                           format=format, mode=mode, tmdb_list=tmdb_list,
+                           allow_empty=allow_empty, deleted=deleted, root=root)
 
 
 def write_file(tmp_path, name, content):
@@ -150,10 +154,12 @@ def stub_stages(monkeypatch):
 def test_library_migration_creates_table(tmp_path):
     conn = open_db(tmp_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(library)")}
         assert cols == {"tmdb_id", "status", "title", "year", "path",
-                        "created_at", "updated_at"}
+                        "created_at", "updated_at",
+                        "resolution", "languages", "duration", "file_size",
+                        "indexed_at", "source"}   # phase 12 indexer columns
     finally:
         conn.close()
 
@@ -1240,3 +1246,363 @@ def test_run_once_cli_runs(tmp_path, monkeypatch, capsys):
     assert main(["--json", "--config", str(cfgpath), "run", "--once"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["queued"] == 0   # no wishes
+
+
+# -- library scan (phase 12 indexer) -----------------------------------------
+
+# A run_ffprobe dict: 1920x1080, 5400 s (= 90 min), German + English audio.
+SCAN_PROBE = {
+    "streams": [{"codec_type": "video", "width": 1920, "height": 1080},
+                {"codec_type": "audio", "tags": {"language": "deu"}},
+                {"codec_type": "audio", "tags": {"language": "eng"}}],
+    "format": {"duration": "5400.000000"},
+}
+
+
+def stub_ffprobe(monkeypatch, data=SCAN_PROBE):
+    """Patch the ffprobe seam; return a list that records each probed path."""
+    calls = []
+    def fake(ffprobe_path, path):
+        calls.append(path)
+        return data
+    monkeypatch.setattr("theke.index.run_ffprobe", fake)
+    return calls
+
+
+def make_movie(root, folder, *, nfo=None, files=("film.mp4",)):
+    d = root / folder
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (d / f).write_bytes(b"\0" * 10)
+    if nfo is not None:
+        (d / "movie.nfo").write_text(nfo, encoding="utf-8")
+    return str(d)
+
+
+def scan_cfg(root):
+    return dataclasses.replace(CFG, library_root=str(root), ffprobe_path="ffprobe")
+
+
+def test_scan_inserts_from_nfo(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)   # no http_get stub: nfo must not call TMDB
+    folder = make_movie(tmp_path, "Mein Film (2020)",
+                        nfo='<movie><uniqueid type="tmdb">100</uniqueid></movie>')
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["added"] == 1
+        rows = library_rows(conn)
+        assert len(rows) == 1
+        r = rows[0]
+        assert (r["tmdb_id"], r["status"], r["path"]) == ("100", "L", folder)
+        assert r["resolution"] == "1920x1080"
+        assert r["duration"] == 5400
+        assert r["languages"] == "de,en"
+        assert r["year"] == 2020
+        assert r["source"] == "scan"
+        assert r["indexed_at"]
+    finally:
+        conn.close()
+
+
+def test_scan_resolves_by_name_via_tmdb(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    stub_search(monkeypatch)   # SEARCH: id 9268, "Die Klapperschlange" (1981)
+    make_movie(tmp_path, "Die Klapperschlange (1981)")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["added"] == 1
+        assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
+
+
+def test_scan_unresolved_when_no_year(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    folder = make_movie(tmp_path, "Random Junk")   # no (Year), no nfo -> no TMDB call
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["unresolved"] == [folder]
+        assert result["added"] == 0
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
+
+
+def test_scan_counts_ignored_folder(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    folder = make_movie(tmp_path, "Parodie (2021)")
+    (tmp_path / "Parodie (2021)" / ".thekeignore").write_text("", encoding="utf-8")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["ignored"] == 1
+        assert result["unresolved"] == []
+        assert library_rows(conn) == []
+    finally:
+        conn.close()
+
+
+NFO100 = '<movie><uniqueid type="tmdb">100</uniqueid></movie>'
+
+
+def insert_lib(conn, tmdb_id, status="L", path="x",
+               indexed_at="2000-01-01T00:00:00Z", year=None):
+    ts = "2000-01-01T00:00:00Z"
+    conn.execute("INSERT INTO library (tmdb_id, status, title, year, path, "
+                 "indexed_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                 (tmdb_id, status, "", year, path, indexed_at, ts, ts))
+    conn.commit()
+
+
+def lib_get(conn, tmdb_id):
+    r = conn.execute("SELECT * FROM library WHERE tmdb_id=?", (tmdb_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def test_scan_sweeps_vanished_film_to_deleted(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "777", path=str(tmp_path / "gone (1999)"))   # path not on disk
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["deleted"] == 1
+        assert lib_get(conn, "777")["status"] == "D"
+        assert lib_get(conn, "100")["status"] == "L"
+    finally:
+        conn.close()
+
+
+def test_scan_follows_a_move(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    new = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=str(tmp_path / "old place (2020)"))  # gone
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert result["moved"] == 1
+        assert result["deleted"] == 0
+        row = lib_get(conn, "100")
+        assert row["status"] == "L" and row["path"] == new
+    finally:
+        conn.close()
+
+
+def test_scan_flags_duplicate_keeps_existing(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    a = make_movie(tmp_path, "Film A (2020)", nfo=NFO100)
+    b = make_movie(tmp_path, "Film B (2020)", nfo=NFO100)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=a)   # already at A (which exists on disk)
+        result = cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert len(result["duplicates"]) == 1
+        dup = result["duplicates"][0]
+        assert dup["kept"] == a and dup["duplicate"] == b
+        assert lib_get(conn, "100")["path"] == a   # existing row untouched
+    finally:
+        conn.close()
+
+
+def test_scan_logs_each_outcome_to_stderr(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    stub_ffprobe(monkeypatch)
+    added = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)         # -> added
+    junk = make_movie(tmp_path, "Random Junk")                          # -> unresolved
+    make_movie(tmp_path, "Parodie", files=("p.mp4", ".thekeignore"))    # -> ignored
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("added 100") and added in m for m in msgs)
+    assert any(m.startswith("unresolved:") and junk in m for m in msgs)
+    assert any(m.startswith("ignored:") and "Parodie" in m for m in msgs)
+
+
+def test_scan_logs_move_with_both_paths(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="theke")
+    stub_ffprobe(monkeypatch)
+    new = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    old = str(tmp_path / "old place (2020)")
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=old)   # gone from disk
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("moved 100") and old in m and new in m for m in msgs)
+
+
+def test_scan_hard_guard_missing_root_raises_no_sweep(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=str(tmp_path / "whatever"))
+        cfg = dataclasses.replace(CFG, library_root=str(tmp_path / "nope"))
+        with pytest.raises(ConfigError):
+            cmd_library(conn, cfg, libargs("scan"))
+        assert lib_get(conn, "100")["status"] == "L"   # untouched
+    finally:
+        conn.close()
+
+
+def test_scan_soft_guard_empty_root(tmp_path):
+    empty = tmp_path / "lib"
+    empty.mkdir()
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", path=str(tmp_path / "gone"))
+        cfg = dataclasses.replace(CFG, library_root=str(empty))
+        result = cmd_library(conn, cfg, libargs("scan"))
+        assert result.get("library_empty") is True
+        assert result["deleted"] == 0
+        assert lib_get(conn, "100")["status"] == "L"   # spared without --allow-empty
+        result = cmd_library(conn, cfg, libargs("scan", allow_empty=True))
+        assert lib_get(conn, "100")["status"] == "D"   # forced sweep
+    finally:
+        conn.close()
+
+
+def test_scan_root_arg_overrides_config(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    real = tmp_path / "real"
+    real.mkdir()
+    make_movie(real, "Mein Film (2020)", nfo=NFO100)
+    cfg = dataclasses.replace(CFG, library_root=str(tmp_path / "wrong"),
+                              ffprobe_path="ffprobe")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, cfg, libargs("scan", root=str(real)))
+        assert result["scanned"] == 1 and result["added"] == 1
+    finally:
+        conn.close()
+
+
+def test_scan_root_arg_lets_config_root_be_empty(tmp_path, monkeypatch):
+    stub_ffprobe(monkeypatch)
+    real = tmp_path / "real"
+    real.mkdir()
+    make_movie(real, "Mein Film (2020)", nfo=NFO100)
+    cfg = dataclasses.replace(CFG, library_root="", ffprobe_path="ffprobe")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, cfg, libargs("scan", root=str(real)))
+        assert result["scanned"] == 1
+    finally:
+        conn.close()
+
+
+def test_scan_skips_ffprobe_for_unchanged_file(tmp_path, monkeypatch):
+    calls = stub_ffprobe(monkeypatch)
+    folder = make_movie(tmp_path, "Mein Film (2020)", nfo=NFO100)
+    anchor = os.path.join(folder, "film.mp4")
+    conn = open_db(tmp_path)
+    try:
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert len(calls) == 1
+        os.utime(anchor, (1_000_000_000, 1_000_000_000))   # mtime well in the past
+        cmd_library(conn, scan_cfg(tmp_path), libargs("scan"))
+        assert len(calls) == 1   # unchanged file -> ffprobe not re-run
+    finally:
+        conn.close()
+
+
+# -- D-entry management (rewish / purge) -------------------------------------
+
+def test_add_tmdb_rewishes_a_deleted_entry(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="D", path=str(tmp_path / "old"))
+        result = cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
+        assert result == {"added": 1, "skipped": 0}   # D -> W counts as added
+        row = lib_get(conn, "100")
+        assert row["status"] == "W"
+        assert row["path"] is None   # stale scan attributes cleared
+    finally:
+        conn.close()
+
+
+def test_add_tmdb_skips_a_library_entry(tmp_path, monkeypatch):
+    stub_tmdb(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="L", path=str(tmp_path / "film"))
+        result = cmd_library(conn, CFG, libargs("add", tmdb=["100"]))
+        assert result == {"added": 0, "skipped": 1}
+        assert lib_get(conn, "100")["status"] == "L"   # never reset from 'L'
+    finally:
+        conn.close()
+
+
+def test_add_deleted_rewishes_all(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="D", path="a")
+        insert_lib(conn, "200", status="D", path="b")
+        insert_lib(conn, "300", status="L", path="c")
+        result = cmd_library(conn, CFG, libargs("add", deleted=True))
+        assert result == {"rewished": 2}
+        assert lib_get(conn, "100")["status"] == "W"
+        assert lib_get(conn, "200")["status"] == "W"
+        assert lib_get(conn, "300")["status"] == "L"
+    finally:
+        conn.close()
+
+
+def test_remove_deleted_purges_only_d(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_lib(conn, "100", status="D", path="a")
+        insert_lib(conn, "200", status="L", path="b")
+        result = cmd_library(conn, CFG, libargs("remove", deleted=True))
+        assert result == {"removed": 1}
+        assert lib_get(conn, "100") is None
+        assert lib_get(conn, "200")["status"] == "L"
+    finally:
+        conn.close()
+
+
+# -- CLI wiring (argparse) ---------------------------------------------------
+
+def _cfg_file(tmp_path, **extra):
+    cfgpath = tmp_path / "theke.json"
+    cfgpath.write_text(json.dumps({"db_path": str(tmp_path / "theke.db"), **extra}),
+                       encoding="utf-8")
+    return str(cfgpath)
+
+
+def test_library_scan_cli(tmp_path, capsys):
+    root = tmp_path / "lib"
+    root.mkdir()
+    cfgpath = _cfg_file(tmp_path, library_root=str(root))
+    assert main(["--json", "--config", cfgpath, "library", "scan"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["scanned"] == 0 and out["deleted"] == 0
+
+
+def test_library_scan_root_flag_cli(tmp_path, capsys):
+    root = tmp_path / "elsewhere"
+    root.mkdir()
+    cfgpath = _cfg_file(tmp_path)   # no library_root in config
+    assert main(["--json", "--config", cfgpath,
+                 "library", "scan", "--root", str(root)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["scanned"] == 0 and out["deleted"] == 0
+
+
+def test_library_add_deleted_cli(tmp_path, capsys):
+    cfgpath = _cfg_file(tmp_path)
+    assert main(["--json", "--config", cfgpath, "library", "add", "--deleted"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"rewished": 0}
+
+
+def test_library_remove_deleted_cli(tmp_path, capsys):
+    cfgpath = _cfg_file(tmp_path)
+    assert main(["--json", "--config", cfgpath, "library", "remove", "--deleted"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"removed": 0}

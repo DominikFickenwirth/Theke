@@ -1,14 +1,17 @@
 # Theke
 
 Selbstgehosteter Medienmanager, der deutsche öffentlich-rechtliche Inhalte
-automatisch aus der MediathekView-Filmliste bezieht und in eine
-Jellyfin-Bibliothek einsortiert. Die gesamte Logik steckt in einer Python-CLI;
-eine dünne Delphi-Desktop-GUI steuert dieselbe CLI.
+automatisch aus der MediathekView-Filmliste bezieht und in eine Filmbibliothek
+auf der Platte einsortiert (Layout `Titel (Jahr)/Titel (Jahr).ext`, optional mit
+Kodi-nfo-Sidecars -- von gängigen Medienservern (Kodi, Emby, Jellyfin, Plex)
+gleichermaßen gelesen; Theke zielt auf das Layout, nicht auf einen bestimmten
+Medienserver). Die gesamte Logik
+steckt in einer Python-CLI; eine dünne Delphi-Desktop-GUI steuert dieselbe CLI.
 
 Architektur und Phasenplan siehe `CLAUDE.md`.
 
-Status: Phasen 1-8 fertig -- verfügbar sind die Befehle `config`, `fetch`,
-`enrich`, `match`, `queue` und `file`.
+Status: Phasen 1-10 + 12 fertig -- verfügbar sind die Befehle `config`, `fetch`,
+`enrich`, `match`, `queue`, `file`, `library` (inkl. `scan`) und `run`.
 
 ## Voraussetzungen
 
@@ -637,14 +640,17 @@ theke file move --in build/film.mp4 --out "M:/Filme/Film (2020)/Film (2020).mp4"
 
 ## `theke library`
 
-Stufe 9: verwaltet die **Wunschliste** -- TMDB-Film-IDs, die automatisch
-beschafft werden sollen. Die Tabelle `library` ist Wunschliste und Bibliotheks-
-Akte in einem (Schlüssel `tmdb_id`); die Spalte `status` (ein Zeichen) ist `W`
-(Wunsch), `M` (fehlende Folge, später) oder `L` (in Bibliothek). Daneben hält der
-Eintrag das TMDB-Erscheinungsjahr `year` (beim Hinzufügen erfasst) und nach dem
-Download den `path` zum Bibliotheksordner, in dem die Video-Datei(en) liegen.
-Reine DB-Operation; nichts hier berührt das Dateisystem. Ohne Aktion läuft der
-Default `list`, d. h. `theke library` entspricht `theke library list`.
+Stufe 9 + 12: verwaltet die **Wunschliste** und den **Bibliotheks-Index**. Die
+Tabelle `library` ist Wunschliste und Bibliotheks-Akte in einem (Schlüssel
+`tmdb_id`); die Spalte `status` (ein Zeichen) ist `W` (Wunsch), `M` (fehlende
+Folge, später), `L` (in Bibliothek) oder `D` (gelöscht -- ein `L`, dessen Datei
+von der Platte verschwunden ist). Daneben hält der Eintrag das TMDB-Erscheinungs-
+jahr `year` (beim Hinzufügen erfasst) und -- nach Download oder `scan` -- den
+`path` zum Bibliotheksordner sowie die physischen Attribute der Datei
+(`resolution`, `languages`, `duration`, `file_size`, `indexed_at`, `source`).
+Alle Aktionen außer `scan` sind reine DB-Operationen; `scan` liest das Dateisystem,
+schreibt aber nur in die DB. Ohne Aktion läuft der Default `list`, d. h.
+`theke library` entspricht `theke library list`.
 
 Ein Wunsch verlässt `W` erst, wenn sein Download tatsächlich fertig ist: dann
 vermerkt `theke queue download` ihn als `L` und trägt seinen Bibliotheksordner als
@@ -695,11 +701,19 @@ Jahr): bei `--tmdb`/`--tmdb-list` sieht man so, was hinter einer ID steckt, bei
 | `--title TITLE`         | Filmtitel, per Suche in eine TMDB-ID aufgelöst.          |
 | `-y`, `--year YEAR`     | Erscheinungsjahr zur Disambiguierung von `--title`.      |
 | `--year-tolerance N`    | Erlaubte Jahresdifferenz (Default: `match_year_tolerance`). |
+| `--deleted`             | Jeden `D`-Eintrag zurück auf `W` setzen (ohne TMDB-Abruf). |
+
+Eine Ausnahme zur Idempotenz: ein `D`-Eintrag (von `scan` als gelöscht markiert)
+wird durch `add --tmdb <id>` **wieder zu `W`** (zählt als `added`, die alten
+Scan-Attribute werden geleert). `--deleted` macht das in einem Rutsch für alle
+`D`-Einträge (gibt `rewished = N` aus). `--deleted` steht allein, nicht mit
+`--tmdb`/`--title`/`--tmdb-list`.
 
 ```powershell
 theke --db build/theke.db library add --tmdb 1474601
 theke --db build/theke.db library add --title "Die Klapperschlange" --year 1981
 theke --db build/theke.db library add --tmdb-list 8334221
+theke --db build/theke.db library add --deleted
 ```
 
 ### `library import`
@@ -758,26 +772,82 @@ Listet Einträge (älteste Erstellung zuerst), optional nach Zustand gefiltert.
 
 | Option                 | Wirkung                                          |
 | ---------------------- | ------------------------------------------------ |
-| `-s`, `--status STATE` | Nur diesen Zustand: `wish`, `missing`, `library`. |
+| `-s`, `--status STATE` | Nur diesen Zustand: `wish`, `missing`, `library`, `deleted`. |
 
 ```powershell
 theke --db build/theke.db library list
 theke --db build/theke.db --json library list --status wish
+theke --db build/theke.db library list --status deleted
 ```
 
 ### `library remove`
 
-Löscht Einträge über genau einen Selektor: angegebene `tmdb_id`s oder `--all`.
-Gibt `removed = N` aus.
+Löscht Einträge über genau einen Selektor: angegebene `tmdb_id`s, `--all` oder
+alle `D`-Einträge (`--deleted`). Gibt `removed = N` aus.
 
 | Option            | Wirkung                                     |
 | ----------------- | ------------------------------------------- |
 | `-t`, `--tmdb ID` | Zu entfernende `tmdb_id` (wiederholbar).    |
 | `-a`, `--all`     | Alle Einträge entfernen.                    |
+| `--deleted`       | Alle `D`-Einträge (gelöscht) entfernen.     |
 
 ```powershell
 theke --db build/theke.db library remove --tmdb 1474601
 theke --db build/theke.db library remove --all
+theke --db build/theke.db library remove --deleted
+```
+
+### `library scan`
+
+Stufe 12: durchläuft `library_root` und gleicht die Platte mit der `library`-
+Tabelle ab. Jeder Filmordner wird identifiziert -- in dieser Reihenfolge: (1) ein
+bereits bekannter `L`-Eintrag mit genau diesem Pfad (so wird ein noch vorhandener
+Film nie neu aufgelöst und nie fälschlich gelöscht), (2) eine Kodi-nfo mit
+`<uniqueid type="tmdb">`, (3) der Ordnername `Titel (Jahr)` + TMDB-Suche. Zu jedem
+erkannten Film werden via **ffprobe** die physischen Attribute ermittelt
+(Auflösung, Audiosprachen, Laufzeit, Größe) und als `L` eingetragen; unveränderte
+Dateien (gleicher Pfad, gleiche Größe, mtime <= letztem Scan) werden **nicht** neu
+geprobt. Ein verschobener Film (alter Pfad weg, neuer gefunden) wird als Move-
+Aktualisierung verbucht; ein **zweiter** Pfad zum selben Film als Duplikat gemeldet,
+ohne den vorhandenen Eintrag zu überschreiben.
+
+**Löscherkennung (Mark-and-Sweep):** Jeder beim Scan gesehene `L`-Eintrag wird mit
+`indexed_at` gestempelt; danach werden alle `L`-Einträge mit veraltetem Stempel
+(Pfad nicht mehr gefunden) auf `D` gesetzt. `D`-Einträge lassen sich mit
+`library remove --deleted` löschen oder mit `library add --deleted` wieder zu
+Wünschen machen.
+
+**Ignorieren:** Ein Ordner mit einer Datei `.thekeignore` (samt Unterbaum) wird
+übersprungen (gezählt als `ignored`, nicht als unresolved). Anders als `.nomedia`
+bleibt der Ordner für Kodi & Co. sichtbar -- nur Theke ignoriert ihn. Nützlich für
+Filme, die es in keiner Datenbank gibt (Eigenproduktionen, Parodien).
+
+**Nicht identifizierte** Ordner werden nur **gemeldet** (`unresolved`-Liste), nicht
+in die DB geschrieben. Sie lassen sich auflösen, indem man eine nfo mit TMDB-ID
+hineinlegt oder den Ordner auf `Titel (Jahr)` umbenennt und erneut scannt.
+
+**Sicherungen gegen Massen-Löschung:** Ist `library_root` nicht gesetzt oder nicht
+lesbar (z. B. abgehängter NAS-Mount), bricht der Scan **vor** jeder Änderung ab.
+Findet der Durchlauf **gar keinen** Film, während die Bibliothek nicht leer ist,
+bleibt der Bestand unangetastet (Ergebnis `library_empty`) -- eine absichtlich
+geleerte Bibliothek erzwingt man mit `--allow-empty`.
+
+Braucht `library_root` (Wurzelverzeichnis der Bibliothek, per `--root` überschreibbar)
+und ein `ffprobe` (`ffprobe_path`, ab Werk `ffprobe`). Gibt die Zähler `scanned`,
+`added`, `updated`, `moved`, `duplicates`, `unresolved`, `ignored`, `deleted` aus.
+Pro Ordner geht das Ergebnis (`added`/`updated`/`moved`/`duplicate`/`unresolved`/
+`ignored`) auf **stderr** -- so ist nachvollziehbar, woher jeder Zähler im stdout
+stammt (analog `library import`).
+
+| Option          | Wirkung                                                       |
+| --------------- | ------------------------------------------------------------ |
+| `--root PATH`   | Zu durchlaufendes Verzeichnis, überschreibt `library_root` aus der Config. |
+| `--allow-empty` | Auch dann aufräumen (sweepen), wenn der Durchlauf keinen Film findet. |
+
+```powershell
+theke --db build/theke.db library scan
+theke --db build/theke.db library scan --root D:\Filme
+theke --db build/theke.db --json library scan
 ```
 
 ## `theke run`

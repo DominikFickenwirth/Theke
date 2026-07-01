@@ -35,6 +35,7 @@ from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches
                          pick_by_year, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
+from theke import index
 from theke import subtitle
 
 # Progress and diagnostics go to this logger; main() routes it to stderr so the
@@ -1266,8 +1267,8 @@ def _url_ext(url) -> str:
 
 
 def _subtitle_lang(row) -> str:
-    """Sidecar language tag (Jellyfin convention): the queue language when it is a
-    2-letter code, else 'de' (covers '', 'ov' and original-language fallbacks)."""
+    """Sidecar language tag (Kodi/media-server convention): the queue language when
+    it is a 2-letter code, else 'de' (covers '', 'ov' and original-language fallbacks)."""
     lang = (row["language"] or "").strip()
     return lang if len(lang) == 2 and lang.isalpha() else "de"
 
@@ -1406,7 +1407,7 @@ def _print_queue(rows):
 # library. cmd_library manages wishes; a finished queue download records its
 # tmdb_id as 'L' via _library_record (called from _download_entry).
 
-LIBRARY_STATUS = {"wish": "W", "missing": "M", "library": "L"}
+LIBRARY_STATUS = {"wish": "W", "missing": "M", "library": "L", "deleted": "D"}
 
 
 def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
@@ -1416,6 +1417,7 @@ def cmd_library(conn, cfg, args: argparse.Namespace) -> dict:
         case "import": return _library_import(conn, cfg, args)
         case "list":   return _library_list(conn, args)
         case "remove": return _library_remove(conn, args)
+        case "scan":   return _library_scan(conn, cfg, args)
         case _: raise DbError(f"unhandled library action: {args.library_cmd}")
 
 
@@ -1482,8 +1484,13 @@ def _library_add(conn, cfg, args) -> dict:
     via --tmdb, by a title/year lookup via --title, or in bulk from a TMDB list via
     --tmdb-list (movies only; series skipped). Idempotent: an existing tmdb_id is
     left untouched (counted as skipped, never reset from 'L' back to 'W'). Each
-    resolution is logged to stderr (what the id/title resolved to)."""
+    resolution is logged to stderr (what the id/title resolved to). --deleted
+    re-wishes every 'D' (deleted) entry back to 'W' in bulk (no TMDB lookup)."""
     lists = getattr(args, "tmdb_list", None)
+    if getattr(args, "deleted", False):
+        if args.title or args.tmdb or lists:
+            raise ValueError("give --deleted alone, not with --tmdb/--title/--tmdb-list")
+        return _rewish_deleted(conn)
     if sum(map(bool, (args.title, args.tmdb, lists))) > 1:
         raise ValueError("give only one of --tmdb, --title or --tmdb-list")
     if lists:
@@ -1506,9 +1513,9 @@ def _library_add(conn, cfg, args) -> dict:
 
 def _insert_wishes(conn, wishes) -> dict:
     """Insert (tmdb_id, title, year) wishes as status 'W' in one transaction.
-    Idempotent: an existing tmdb_id is left untouched (counted as skipped and
-    logged to stderr by id, never reset from 'L' back to 'W'). Returns the
-    added/skipped counts."""
+    Idempotent: a 'W'/'M'/'L' tmdb_id is left untouched (counted as skipped, never
+    reset from 'L'); a 'D' (deleted) entry is re-wished back to 'W' with its stale
+    scan attributes cleared, counted as added. Returns the added/skipped counts."""
     totals = {"added": 0, "skipped": 0}
     conn.execute("BEGIN")
     try:
@@ -1516,10 +1523,15 @@ def _insert_wishes(conn, wishes) -> dict:
             ts = _now()
             cur = conn.execute(
                 "INSERT INTO library (tmdb_id, status, title, year, created_at, updated_at) "
-                "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO NOTHING",
+                "VALUES (?, 'W', ?, ?, ?, ?) ON CONFLICT(tmdb_id) DO UPDATE SET "
+                "status='W', title=excluded.title, "
+                "year=COALESCE(library.year, excluded.year), "
+                "path=NULL, resolution=NULL, languages=NULL, duration=NULL, "
+                "file_size=NULL, indexed_at=NULL, source=NULL, "
+                "updated_at=excluded.updated_at WHERE library.status='D'",
                 (tid, title, year, ts, ts))
             if cur.rowcount:
-                totals["added"] += 1
+                totals["added"] += 1   # fresh insert or a 'D' -> 'W' re-wish
             else:
                 totals["skipped"] += 1
                 log.info("skip %s: already in library", _resolved_label(tid, title, year))
@@ -1528,6 +1540,22 @@ def _insert_wishes(conn, wishes) -> dict:
         conn.execute("ROLLBACK")
         raise
     return totals
+
+
+def _rewish_deleted(conn) -> dict:
+    """Re-wish every 'D' (deleted) entry back to 'W' in one transaction, clearing
+    the stale scan attributes (a re-acquired film is re-indexed). Returns the count."""
+    conn.execute("BEGIN")
+    try:
+        n = conn.execute(
+            "UPDATE library SET status='W', path=NULL, resolution=NULL, "
+            "languages=NULL, duration=NULL, file_size=NULL, indexed_at=NULL, "
+            "source=NULL, updated_at=? WHERE status='D'", (_now(),)).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return {"rewished": n}
 
 
 def _add_list_wishes(conn, cfg, list_id) -> dict:
@@ -1566,13 +1594,15 @@ def _library_list(conn, args) -> dict:
 
 
 def _library_remove(conn, args) -> dict:
-    """Delete library entries by exactly one selector: given tmdb_ids or --all."""
-    if args.all and args.tmdb:
-        raise ValueError("give --tmdb or --all, not both")
-    if not args.all and not args.tmdb:
-        raise ValueError("give --tmdb or --all")
+    """Delete library entries by exactly one selector: given tmdb_ids, every entry
+    (--all), or every 'D' (deleted) entry (--deleted)."""
+    deleted = getattr(args, "deleted", False)
+    if sum((bool(args.tmdb), args.all, deleted)) != 1:
+        raise ValueError("give --tmdb, --all or --deleted (exactly one)")
     if args.all:
         sql, params = "DELETE FROM library", ()
+    elif deleted:
+        sql, params = "DELETE FROM library WHERE status='D'", ()
     else:
         ids = [str(t) for t in args.tmdb]
         sql = "DELETE FROM library WHERE tmdb_id IN (" + ",".join("?" * len(ids)) + ")"
@@ -1616,6 +1646,185 @@ def _library_record(conn, tmdb_id, path, year):
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+# -- library scan (phase 12: the indexer) ------------------------------------
+# Walk library_root, identify each movie (known path / Kodi nfo / folder-name +
+# TMDB search), probe physical attributes (ffprobe, skipped for unchanged files),
+# and reconcile the `library` table: insert/refresh 'L' rows, follow moves, flag
+# duplicates, and mark vanished films 'D' (mark-and-sweep over indexed_at). Two
+# guards stop a dropped mount from wiping the catalogue: an unreadable root aborts
+# before any write, and a walk that finds no film leaves existing 'L' rows alone
+# unless --allow-empty. DB + TMDB access live here; pure walking/parsing is
+# theke.index. The DB is the authority -- the media server is never read as one.
+
+def _library_scan(conn, cfg, args) -> dict:
+    """Index the on-disk library under args.root or cfg.library_root into `library`.
+    The whole scan is one transaction (atomic, and self-writes are visible to the
+    duplicate/move checks). Returns the per-category counts (+ the unresolved and
+    duplicate paths)."""
+    root = args.root or cfg.library_root
+    if not root:
+        raise ConfigError("library scan needs library_root (set it in the config or pass --root)")
+    if not os.path.isdir(root):
+        raise ConfigError(f"library_root is not a readable directory: {root}")
+    scan_start = _now()
+    totals = {"scanned": 0, "added": 0, "updated": 0, "moved": 0,
+              "duplicates": [], "unresolved": [], "ignored": 0, "deleted": 0}
+    saw_movie = False
+    conn.execute("BEGIN")
+    try:
+        for kind, dirpath, videos in index.walk_library(root):
+            if kind == "ignored":
+                totals["ignored"] += 1
+                log.info("ignored: %s", dirpath)
+                continue
+            saw_movie = True
+            totals["scanned"] += 1
+            _scan_movie(conn, cfg, dirpath, videos, totals)
+        _scan_sweep(conn, scan_start, saw_movie, args.allow_empty, totals)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    log.info("scan: %d added, %d updated, %d moved, %d duplicate, %d unresolved, "
+             "%d ignored, %d deleted", totals["added"], totals["updated"],
+             totals["moved"], len(totals["duplicates"]), len(totals["unresolved"]),
+             totals["ignored"], totals["deleted"])
+    return totals
+
+
+def _scan_movie(conn, cfg, dirpath, videos, totals):
+    """Resolve one movie folder to a tmdb_id, probe its anchor file (or reuse cached
+    attributes), and upsert its library row. An unresolvable folder is recorded as
+    unresolved and left out of the DB."""
+    anchor = index.pick_anchor(videos)
+    identity = _scan_identify(conn, cfg, dirpath)
+    if identity is None:
+        totals["unresolved"].append(dirpath)
+        log.warning("unresolved: %s", dirpath)
+        return
+    existing = conn.execute("SELECT * FROM library WHERE tmdb_id=?",
+                            (identity["tmdb_id"],)).fetchone()
+    attrs = _scan_probe(cfg, anchor, existing, dirpath)
+    _scan_upsert(conn, identity, dirpath, attrs, existing, totals)
+
+
+def _scan_identify(conn, cfg, dirpath):
+    """Resolve a movie folder to {tmdb_id, title, year}. A known 'L' row at this path
+    wins first -- so a film still on disk is never re-resolved and never swept,
+    regardless of whether nfo/name would resolve. Then a Kodi nfo uniqueid, then a
+    'Title (Year)' folder name + TMDB search. None when nothing identifies it."""
+    row = conn.execute("SELECT tmdb_id, title, year FROM library "
+                       "WHERE path=? AND status='L'", (dirpath,)).fetchone()
+    if row:
+        return {"tmdb_id": row["tmdb_id"], "title": row["title"], "year": row["year"]}
+    parsed = index.parse_folder_title(os.path.basename(dirpath))
+    title = parsed[0] if parsed else os.path.basename(dirpath)
+    year = parsed[1] if parsed else None
+    tid = _scan_nfo_id(dirpath)
+    if tid:
+        return {"tmdb_id": tid, "title": title, "year": year}
+    if parsed and cfg.tmdb_api_key:
+        try:
+            tid, title, year = _search_title(cfg, title, year, cfg.match_year_tolerance)
+            return {"tmdb_id": tid, "title": title, "year": year}
+        except (ValueError, ConfigError):
+            return None
+    return None
+
+
+def _scan_nfo_id(dirpath):
+    """The TMDB id from a Kodi nfo in the folder, or None. 'movie.nfo' and
+    '<folder>.nfo' are tried first, then any other .nfo; a parse miss falls through."""
+    base = os.path.basename(dirpath).lower()
+    names = sorted(f for f in os.listdir(dirpath) if f.lower().endswith(".nfo"))
+    names.sort(key=lambda n: (n.lower() != "movie.nfo", n.lower() != base + ".nfo"))
+    for name in names:
+        try:
+            with open(os.path.join(dirpath, name), encoding="utf-8", errors="ignore") as fh:
+                tid = index.nfo_tmdb_id(fh.read())
+        except OSError:
+            continue
+        if tid:
+            return tid
+    return None
+
+
+def _scan_probe(cfg, anchor, existing, dirpath):
+    """Physical attributes for the anchor file. Reuses the stored ones when the file
+    is unchanged since the last scan (same path, same size, mtime <= the row's
+    indexed_at), so ffprobe is not re-run across a large unchanged library."""
+    size = os.path.getsize(anchor)
+    if (existing and existing["path"] == dirpath and existing["indexed_at"]
+            and existing["file_size"] == size
+            and os.path.getmtime(anchor) <= _iso_epoch(existing["indexed_at"])):
+        return {"resolution": existing["resolution"], "duration": existing["duration"],
+                "languages": existing["languages"], "file_size": size}
+    attrs = index.probe_attrs(index.run_ffprobe(cfg.ffprobe_path, anchor))
+    attrs["file_size"] = size
+    return attrs
+
+
+def _iso_epoch(ts) -> float:
+    """Epoch seconds for an ISO-8601 'Z' timestamp (the _now() format)."""
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc).timestamp()
+
+
+def _scan_upsert(conn, identity, dirpath, attrs, existing, totals):
+    """Reconcile one resolved film into the library. New -> insert 'L'. An existing
+    wish/missing/deleted row -> flip to 'L' at this path. An existing 'L' row ->
+    refresh in place (same path), follow a move (stored path gone), or flag a
+    duplicate (stored path still present and different) without overwriting it.
+    Every touched row's indexed_at is stamped, sparing it from the sweep."""
+    ts = _now()
+    label = _resolved_label(identity["tmdb_id"], identity["title"], identity["year"])
+    if (existing and existing["status"] == "L" and existing["path"] != dirpath
+            and existing["path"] and os.path.exists(existing["path"])):
+        conn.execute("UPDATE library SET indexed_at=? WHERE tmdb_id=?",
+                     (ts, identity["tmdb_id"]))
+        totals["duplicates"].append({"tmdb_id": identity["tmdb_id"],
+                                     "kept": existing["path"], "duplicate": dirpath})
+        log.warning("duplicate %s: %s (kept %s)", label, dirpath, existing["path"])
+        return
+    fields = {"tmdb_id": identity["tmdb_id"], "title": identity["title"] or "",
+              "year": identity["year"], "path": dirpath, "source": "scan",
+              "indexed_at": ts, "created_at": ts, "updated_at": ts, **attrs}
+    if existing is None:
+        cols = ["tmdb_id", "title", "year", "path", "resolution", "languages",
+                "duration", "file_size", "indexed_at", "source",
+                "created_at", "updated_at"]
+        conn.execute(f"INSERT INTO library (status, {', '.join(cols)}) VALUES "
+                     f"('L', {', '.join(':' + c for c in cols)})", fields)
+        totals["added"] += 1
+        log.info("added %s <- %s", label, dirpath)
+        return
+    moved = existing["status"] == "L" and existing["path"] != dirpath
+    conn.execute(
+        "UPDATE library SET status='L', path=:path, resolution=:resolution, "
+        "languages=:languages, duration=:duration, file_size=:file_size, "
+        "year=COALESCE(year, :year), indexed_at=:indexed_at, source=:source, "
+        "updated_at=:updated_at WHERE tmdb_id=:tmdb_id", fields)
+    totals["moved" if moved else "updated"] += 1
+    if moved:
+        log.info("moved %s: %s -> %s", label, existing["path"], dirpath)
+    else:
+        log.info("updated %s <- %s", label, dirpath)
+
+
+def _scan_sweep(conn, scan_start, saw_movie, allow_empty, totals):
+    """Mark every 'L' row not seen this scan (stale indexed_at) as 'D'. Skipped --
+    leaving the catalogue intact -- when the walk found no film and the library is
+    non-empty, unless allow_empty, so a vanished/unmounted root never mass-deletes."""
+    has_library = conn.execute(
+        "SELECT 1 FROM library WHERE status='L' LIMIT 1").fetchone()
+    if not saw_movie and has_library and not allow_empty:
+        totals["library_empty"] = True
+        return
+    totals["deleted"] = conn.execute(
+        "UPDATE library SET status='D', updated_at=? WHERE status='L' AND "
+        "(indexed_at IS NULL OR indexed_at < ?)", (_now(), scan_start)).rowcount
 
 
 # -- library import (phase 9: bulk wishes from a txt/csv file) ----------------
@@ -2108,17 +2317,19 @@ def build_parser() -> argparse.ArgumentParser:
     fmv.add_argument("-o", "--out",   required=True, metavar="PATH",                 help="destination file path")
     fmv.add_argument("-f", "--force", action="store_true",                           help="overwrite an existing destination")
 
-    libp = sub.add_parser("library", help="manage the wishlist (TMDB ids to acquire)", description="Manage the wishlist: TMDB movie ids to acquire automatically. Entries are status 'W' (wish) until a finished download records them as 'L' (in library). DB-only: nothing here touches the filesystem.")
+    libp = sub.add_parser("library", help="manage the wishlist + on-disk library index", description="Manage the wishlist and the on-disk library index. Wishes are TMDB movie ids to acquire automatically (status 'W'); a finished download or a `scan` of the library records a film as 'L' (in library). `scan` reads the filesystem but never writes to it; everything else is DB-only.")
     lsub = libp.add_subparsers(dest="library_cmd", required=True, metavar="action")
-    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id, title or list",  description="Add movie wishes (status 'W'): give TMDB ids directly via --tmdb, resolve a title via --title (with a tolerant --year), or import a whole TMDB list via --tmdb-list (movies only -- series are skipped with a warning). Idempotent: an existing id is left untouched. The film title is captured as a label when a TMDB key is configured. A list import needs a tmdb_api_key (public lists) or tmdb_read_token (also private lists).")
+    ladd = lsub.add_parser("add",    help="add wishes by tmdb_id, title or list",  description="Add movie wishes (status 'W'): give TMDB ids directly via --tmdb, resolve a title via --title (with a tolerant --year), or import a whole TMDB list via --tmdb-list (movies only -- series are skipped with a warning). Idempotent: an existing id is left untouched, except a 'D' (deleted) entry, which is re-wished. --deleted re-wishes every 'D' entry in bulk. The film title is captured as a label when a TMDB key is configured. A list import needs a tmdb_api_key (public lists) or tmdb_read_token (also private lists).")
     limp = lsub.add_parser("import", help="bulk-add wishes from a txt/csv file", description="Bulk-add movie wishes from a file. Each entry resolves to a TMDB id -- given directly or searched from a title/year -- and entries that do not resolve are reported in an error log rather than aborting the import; the rest are added (status 'W', idempotent). Format is taken from the extension (.txt/.csv), overridable with --format. txt: one 'Title (Year)' or tmdb_id per line (see --mode). csv: a header row of 'tmdb_id', 'title', 'year' columns (any may be missing; 'title'/'year' both or neither; 'dummy' columns ignored, other names rejected). Needs a TMDB key.")
     llst = lsub.add_parser("list",   help="list library entries (default)", description="List library entries, oldest creation first. Filter by lifecycle state with --status.")
-    lrem = lsub.add_parser("remove", help="remove library entries",         description="Delete library entries by exactly one selector: given tmdb_ids or --all.")
+    lrem = lsub.add_parser("remove", help="remove library entries",         description="Delete library entries by exactly one selector: given tmdb_ids, every entry (--all), or every 'D' (deleted) entry (--deleted).")
+    lscn = lsub.add_parser("scan",   help="index the on-disk library",      description="Walk library_root and reconcile it with the library table: identify each movie (known path / Kodi nfo uniqueid / 'Title (Year)' folder + TMDB search), probe physical attributes via ffprobe (skipped for unchanged files), record films as 'L', follow moves, flag duplicates, and mark vanished films 'D'. A folder holding a '.thekeignore' file is skipped. Reads the filesystem; writes only the DB. Refuses to run on an unreadable library_root, and leaves the catalogue untouched when the walk finds no film at all unless --allow-empty.")
     ladd.add_argument("-t", "--tmdb",            action="append", metavar="ID",    help="TMDB movie id to wish for (repeatable)")
     ladd.add_argument(      "--tmdb-list",       action="append", metavar="ID", dest="tmdb_list", help="TMDB list id to import (movies only; series skipped; repeatable)")
     ladd.add_argument(      "--title",           metavar="TITLE",                  help="movie title to resolve to a TMDB id via search (instead of --tmdb)")
     ladd.add_argument("-y", "--year",            type=int, metavar="YEAR",         help="release year to disambiguate --title (may be off by --year-tolerance)")
     ladd.add_argument(      "--year-tolerance",  type=int, metavar="N", dest="year_tolerance", help="accepted year difference for --title (default: config match_year_tolerance)")
+    ladd.add_argument(      "--deleted",         action="store_true",              help="re-wish every 'D' (deleted) entry back to 'W'")
     limp.add_argument("path",                    metavar="PATH",                   help="the txt/csv wishlist file to import")
     limp.add_argument("-F", "--format",          choices=["txt", "csv"],           help="file format (default: inferred from the extension)")
     limp.add_argument("-m", "--mode",            choices=["auto", "id", "title"], default="auto", help="txt line interpretation: auto (digits=id, else title), id, or title (default auto)")
@@ -2126,6 +2337,9 @@ def build_parser() -> argparse.ArgumentParser:
     llst.add_argument("-s", "--status", choices=list(LIBRARY_STATUS), metavar="STATE", help="filter by state: " + ", ".join(LIBRARY_STATUS))
     lrem.add_argument("-t", "--tmdb",   action="append", metavar="ID",                 help="tmdb_id to remove (repeatable)")
     lrem.add_argument("-a", "--all",    action="store_true",                           help="remove every library entry")
+    lrem.add_argument(      "--deleted", action="store_true",                          help="remove every 'D' (deleted) entry")
+    lscn.add_argument(      "--root",        metavar="PATH",                         help="directory to walk, overriding library_root from the config")
+    lscn.add_argument(      "--allow-empty", action="store_true", dest="allow_empty",  help="sweep even when the walk finds no film (an intentional empty library)")
 
     runp = sub.add_parser("run", help="run the wishlist pipeline, once or on a schedule", description="Loop the whole wishlist pipeline on the configured schedule (run_schedule). One pass: fetch + enrich the mirror, import any configured tmdb_lists into the library (movies only, additive), then for every open wish ('W') match the TMDB id and stage the deduplicated download set; with queue_auto_approve the approved entries are downloaded straight away (recording each finished wish as 'L'), else the pass stops at the approval gate. A failing wish or list does not abort the pass, and a failing pass does not abort the loop. The process holds the single DB writer for its lifetime (a future in-process web UI shares it); SIGINT/SIGTERM stop it cleanly after the current pass. In --json each pass prints one JSON object (JSONL); progress goes to stderr. --once runs a single pass and exits.")
     runp.add_argument("--once", action="store_true", help="run a single pass and exit (no scheduling)")
