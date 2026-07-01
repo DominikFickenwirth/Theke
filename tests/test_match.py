@@ -1,6 +1,7 @@
 """Tests for the match stage (wish-first TMDB matching, movies)."""
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -895,3 +896,44 @@ def test_cmd_match_run_links_mysteries_of_lisbon(tmp_path, monkeypatch):
             assert status_of(conn, mid) == "2"
     finally:
         conn.close()
+
+
+# -- scan timing (DEBUG, the per-wish full-scan cost) ------------------------
+
+def test_find_matches_logs_scan_timing_at_debug(tmp_path, caplog):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Heat", 1995, 6000)
+        with caplog.at_level(logging.DEBUG, logger="theke"):
+            find_matches(conn, BOOT, min_conf=0.6)
+    finally:
+        conn.close()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("find_matches: scanned 2") for m in msgs)   # rows scanned reported
+
+
+def test_find_matches_scan_timing_silent_above_debug(tmp_path, caplog):
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        with caplog.at_level(logging.INFO, logger="theke"):
+            find_matches(conn, BOOT, min_conf=0.6)
+    finally:
+        conn.close()
+    assert not any("find_matches" in r.getMessage() for r in caplog.records)
+
+
+def test_find_arte_links_logs_scan_timing_at_debug(tmp_path, caplog):
+    conn = open_db(tmp_path)
+    try:
+        insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
+                    "https://www.arte.tv/de/videos/100000-000-A/das-boot/")
+        insert_arte(conn, "a2", "Le Bateau", "ARTE.FR",
+                    "https://www.arte.tv/fr/videos/100000-000-A/le-bateau/")
+        with caplog.at_level(logging.DEBUG, logger="theke"):
+            find_arte_links(conn, {"100000-000-A": 1.0}, exclude_ids={"a1"})
+    finally:
+        conn.close()
+    assert any(r.getMessage().startswith("find_arte_links: scanned 2")
+               for r in caplog.records)

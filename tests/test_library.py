@@ -1714,3 +1714,22 @@ def test_scan_announces_root(tmp_path, monkeypatch, caplog):
         conn.close()
     msgs = [r.getMessage() for r in caplog.records]
     assert any(m.startswith("scanning library at") and str(tmp_path) in m for m in msgs)
+
+
+def test_run_pass_logs_per_wish_elapsed(tmp_path, monkeypatch, caplog):
+    stub_tmdb(monkeypatch)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=False)
+        insert_movie(conn, "m_de", tmdb_id="", status="1")
+        cmd_library(conn, cfg, libargs("add", tmdb=["100"]))
+        with caplog.at_level(logging.INFO, logger="theke"):
+            _run_pass(conn, cfg)
+        msgs = [r.getMessage() for r in caplog.records]
+        # one per-wish line naming the id, its counts and the elapsed seconds.
+        assert any(m.startswith("wish 100:") and "queued" in m and "s)" in m
+                   for m in msgs)
+    finally:
+        conn.close()
