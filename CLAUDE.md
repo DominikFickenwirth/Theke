@@ -38,7 +38,7 @@ targets the layout, not any one media server). The only source is the public Med
    flips `status` '0' -> '1'. It is local and cheap (no API) and is the search base
    for everything below.
 4. **Match** (done) -- `theke match` matches a given TMDB ID with mediathek rows
-   by resolving the ID's metadata via TMDB API, and flips `status` '1' -> '2'.
+   by resolving the ID's metadata via TMDB API, and flips `status` -> '3' (matched).
 5. **Download queue** (done) -- staging of downloads via `mediathek_id` or `tmdb_id`
    into SQLite table `queue`. Depending on config, queue entries may need manual
    approval before download. Staging via `tmdb_id` is deduplicated automatically.
@@ -47,8 +47,8 @@ targets the layout, not any one media server). The only source is the public Med
 8. **Move** (done) -- Move into movie library. **Manual path complete here.**
 9. **Wishlist** (done) -- `theke library` keeps wishes by TMDB ID in the
    `library` table (status 'W'); one pipeline pass (`_run_pass`) runs the whole
-   chain for every open wish (fetch -> enrich -> match -> queue add -> download
-   when auto-approved). A finished download records the film as 'L' (in library),
+   chain for every open wish (fetch -> enrich -> bulk match -> match -> queue add
+   -> download when auto-approved). A finished download records the film as 'L' (in library),
    so a satisfied wish is never re-acquired. Movies only; series follow in phase 13.
 10. **Scheduler** (done) -- `theke run` loops one pipeline pass on the
     `run_schedule` (a single list of `"start"` / interval-seconds / `"HH:MM"` /
@@ -71,9 +71,14 @@ targets the layout, not any one media server). The only source is the public Med
     missing episodes (needs the indexer).
 14. **Web UI** -- user friendly wrapper for the CLI (via REST API): dashboard,
     approvals, settings, browsing mediathek and wishlist.
-15. **Catalog-wide ID browse** (`theke match --bulk`) -- eager bulk-match of the
-    movie subset, so the whole movie catalog is browsable by TMDB ID, not just
-    wish-resolved rows.
+15. **Catalog-wide bulk match** (done) -- `theke match bulk` eagerly, row-driven,
+    matches the movie subset: search TMDB by each enriched row's own title and tag
+    confident hits (hard gates: title, mandatory runtime, confirmed year, release
+    not after broadcast) status '3', marking the rest '2' (bulk-attempted, still
+    lazy-matchable). Drains the '1' pool so `_run_pass` resolves wishes by tmdb_id
+    instead of a per-wish scan; wired into the pass incrementally (capped by
+    `bulk_match_max_per_pass`). The whole movie catalog becomes browsable by TMDB
+    id, not just wish-resolved rows.
 
 ## Architecture / pipeline
 
@@ -106,12 +111,14 @@ queue table                              |
 Single SQLite file `theke.db`. Field lists and status names are indicative.
 
 - **mediathek** -- film-list mirror, refreshed periodically. `status` is one char
-  ('0' new, '1' enriched, '2' matched, possibly: 'D' downloaded, 'N' not needed).
+  ('0' new, '1' enriched, '2' bulk-attempted-but-unmatched, '3' matched).
   `enrich` fills language/clean_title/series_name/season/episode/episode_count/
   category/year/country/flags/enrich_confidence and flips status to '1';
-  `match` fills tmdb_id/match_confidence on demand (only for rows a wishlist entry
-  or manual pick resolves) and flips status to '2'. All enriched columns survive
-  refreshes via `fetch`.
+  `match` fills tmdb_id/match_confidence and flips status to '3' -- lazy (on demand
+  for rows a wish or manual pick resolves) or eager (`match bulk`, phase 15). Bulk
+  match marks a row it cannot confidently match '2' (skipped by later bulk passes
+  but still lazy-matchable: `find_matches` scans '1' and '2'). All enriched columns
+  survive refreshes via `fetch`.
 - **queue** -- review queue + download record in one. `status` is one char
   (Lifecycle `proposed -> approved -> downloading -> done / failed / cancelled`).
 - **library** -- wishlist + current library record in one. `status` is one char
@@ -134,7 +141,9 @@ two steps:
    that entry's title variants + year + season/episode info (via TMDB API),
    searches the enrich-normalized columns for matching mediathek rows, and
    caches the ID in those rows.
-   Bulk matching the whole (movie) catalog is planned for phase 15.
+   `match bulk` (phase 15) is the **eager** counterpart, driven the other way
+   round: per movie row, search TMDB by the row's own title and confirm on hard
+   gates. It drains the lazy scan's pool (hits -> '3', misses -> '2').
 
 **Deduplication rules (phase 5):** One TMDB ID maps to **many** mediathek rows
 (senders, SD/HD, languages, repeats). When being added to the queue, a TMDB ID
@@ -160,8 +169,8 @@ downloads retry (a few times), status in DB, no silent loss. A partial,
 unfinishable download counts as a failure.
 
 **Scheduler (in-app, phase 10):** `theke run` loops one whole pipeline pass
-(`_run_pass`: fetch -> enrich -> library scan -> list sync -> per-wish match +
-queue -> download) on the `run_schedule`. Each pass reloads the config from disk
+(`_run_pass`: fetch -> enrich -> bulk match -> library scan -> list sync ->
+per-wish match + queue -> download) on the `run_schedule`. Each pass reloads the config from disk
 first (external edits take effect without a restart; a bad file keeps the last
 good config), and the scan is best-effort (a failure is reported, never aborts
 the pass). That config is a single list of triggers, all fixed-rate:

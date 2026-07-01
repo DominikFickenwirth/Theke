@@ -34,7 +34,7 @@ NEW_COLS = {
 def test_enrich_migration_adds_columns_on_fresh_db(tmp_path):
     conn = db_connect(str(tmp_path / "theke.db"))  # real MIGRATIONS
     try:
-        assert user_version(conn) == 11              # ... + phase 9 library (+year/path) + queue.year
+        assert user_version(conn) == 12              # ... + phase 12 indexer + phase 15 status remap
         assert NEW_COLS <= column_names(conn)
     finally:
         conn.close()
@@ -45,7 +45,7 @@ def test_enrich_migration_upgrades_v1_db(tmp_path):
     db_connect(db, migrations=MIGRATIONS[:1]).close()   # stop at phase-2 schema
     conn = db_connect(db)                               # apply phase-3 migrations
     try:
-        assert user_version(conn) == 11
+        assert user_version(conn) == 12
         cols = column_names(conn)
         assert NEW_COLS <= cols
         # a row written under v1 has the new columns, all NULL
@@ -62,7 +62,7 @@ def test_enrich_migration_upgrades_v2_db_adds_genre_slot(tmp_path):
     db_connect(db, migrations=MIGRATIONS[:2]).close()   # stop at phase-3 part-1
     conn = db_connect(db)                               # apply the genre/slot step
     try:
-        assert user_version(conn) == 11
+        assert user_version(conn) == 12
         assert {"genre", "slot"} <= column_names(conn)
         conn.execute("INSERT INTO mediathek (status, mediathek_id) VALUES ('0','x')")
         row = conn.execute("SELECT * FROM mediathek").fetchone()
@@ -80,12 +80,28 @@ def test_enrich_migration_renames_confidence_column(tmp_path):
     conn.close()
     conn = db_connect(db)                                # apply entry 4 (the rename)
     try:
-        assert user_version(conn) == 11
+        assert user_version(conn) == 12
         cols = column_names(conn)
         assert "enrich_confidence" in cols
         assert "classify_confidence" not in cols
         row = conn.execute("SELECT enrich_confidence FROM mediathek").fetchone()
         assert row["enrich_confidence"] == 0.9          # 0.9 written under the old name
+    finally:
+        conn.close()
+
+
+def test_migration_remaps_matched_status_2_to_3(tmp_path):
+    # phase 15: matched rows move from '2' to '3'. A row written under the old
+    # scheme (matched '2') is remapped to '3' by the last migration step.
+    db = str(tmp_path / "theke.db")
+    conn = db_connect(db, migrations=MIGRATIONS[:-1])    # stop before the remap
+    conn.execute("INSERT INTO mediathek (status, mediathek_id) VALUES ('2','x')")
+    conn.close()
+    conn = db_connect(db)                                # apply the remap
+    try:
+        assert user_version(conn) == 12
+        row = conn.execute("SELECT status FROM mediathek WHERE mediathek_id='x'").fetchone()
+        assert row["status"] == "3"
     finally:
         conn.close()
 
@@ -1140,12 +1156,12 @@ def reset_args(status_only=False):
 def test_cmd_enrich_reset_flips_status_and_clears_columns(tmp_path):
     conn = open_db(tmp_path)
     try:
-        # one enriched ('1') and one matched ('2') row, both with derived data
+        # one enriched ('1') and one matched ('3') row, both with derived data
         insert_enriched(conn, "a", clean_title="Der Fall", year=2003,
                         category="Movie", language="de", enrich_confidence=0.9)
         insert_enriched(conn, "b", clean_title="Das Boot", year=1981,
                         category="Movie", language="de", enrich_confidence=0.9)
-        conn.execute("UPDATE mediathek SET status='2', tmdb_id='123', "
+        conn.execute("UPDATE mediathek SET status='3', tmdb_id='123', "
                      "match_confidence=0.8 WHERE mediathek_id='b'")
         result = cmd_enrich(conn, Config(), reset_args())
         assert result == {"reset": 2}

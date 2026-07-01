@@ -31,6 +31,11 @@ SEARCH = {"results": [
     {"id": 999,  "title": "Escape Remake",       "release_date": "2013-01-01"},
 ]}
 
+# A /search/movie response with a single, unambiguous hit.
+SEARCH_ONE = {"results": [
+    {"id": 9268, "title": "Die Klapperschlange", "release_date": "1981-04-22"},
+]}
+
 
 def open_db(tmp_path):
     return db_connect(str(tmp_path / "theke.db"))
@@ -154,7 +159,7 @@ def stub_stages(monkeypatch):
 def test_library_migration_creates_table(tmp_path):
     conn = open_db(tmp_path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(library)")}
         assert cols == {"tmdb_id", "status", "title", "year", "path",
                         "created_at", "updated_at",
@@ -423,8 +428,10 @@ def test_pick_by_year_none_when_all_out_of_tolerance():
     assert pick_by_year(CANDS, 1990, 2) is None   # deltas 20/9/7
 
 
-def test_pick_by_year_no_year_takes_most_popular():
-    assert pick_by_year(CANDS, None, 2)["tmdb_id"] == "1"
+def test_pick_by_year_no_year_only_when_single_candidate():
+    only = [{"tmdb_id": "9", "title": "X", "year": 2000}]
+    assert pick_by_year(only, None, 2)["tmdb_id"] == "9"   # exactly one -> take it
+    assert pick_by_year(CANDS, None, 2) is None            # ambiguous -> no match
 
 
 def test_pick_by_year_skips_candidates_without_year():
@@ -678,6 +685,29 @@ def test_library_add_by_title_year_tolerance_override(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_library_add_by_title_yearless_single_candidate_resolves(tmp_path, monkeypatch):
+    # No --year: a single TMDB hit is taken (unified with match bulk / import).
+    stub_search(monkeypatch, payload=SEARCH_ONE)
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("add", title="Die Klapperschlange"))
+        assert result == {"added": 1, "skipped": 0}
+        assert library_rows(conn)[0]["tmdb_id"] == "9268"
+    finally:
+        conn.close()
+
+
+def test_library_add_by_title_yearless_multiple_candidates_raises(tmp_path, monkeypatch):
+    # No --year and several hits -> ambiguous, raises (no most-popular guess).
+    stub_search(monkeypatch)   # two results
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            cmd_library(conn, CFG, libargs("add", title="Escape"))
+    finally:
+        conn.close()
+
+
 def test_library_add_by_title_no_results_raises(tmp_path, monkeypatch):
     stub_search(monkeypatch, payload={"results": []})
     conn = open_db(tmp_path)
@@ -915,9 +945,44 @@ def test_search_title_no_article_does_not_retry(monkeypatch):
     assert len(calls) == 1
 
 
-def test_import_title_without_year_is_error(tmp_path, monkeypatch):
-    # A txt title line with no "(YYYY)" must fail (no guessing without a year).
-    stub_import(monkeypatch)
+def test_search_title_yearless_single_candidate_resolves(monkeypatch):
+    # No year given but exactly one TMDB hit -> take it (match bulk's rule).
+    stub_search(monkeypatch, payload=SEARCH_ONE)
+    tid, title, year = theke._search_title(CFG, "Die Klapperschlange", None, 2)
+    assert (tid, title, year) == ("9268", "Die Klapperschlange", 1981)
+
+
+def test_search_title_yearless_multiple_candidates_raises(monkeypatch):
+    # No year and more than one hit -> ambiguous, no guessing; the message names
+    # the count and the title.
+    stub_search(monkeypatch)   # SEARCH has two results
+    with pytest.raises(ValueError) as exc:
+        theke._search_title(CFG, "Escape", None, 2)
+    msg = str(exc.value)
+    assert msg.startswith("2 ") and "Escape" in msg
+
+
+def test_import_yearless_title_single_match_resolves(tmp_path, monkeypatch):
+    # A yearless title with exactly one TMDB hit is imported (match bulk's rule).
+    def fake(url, timeout=None):
+        if "/search/movie" in url:
+            return json.dumps(SEARCH_ONE).encode("utf-8")
+        raise AssertionError(f"unexpected url {url}")
+    monkeypatch.setattr(theke.core, "http_get", fake)
+    path = write_file(tmp_path, "wishes.txt", "Die Klapperschlange")
+    conn = open_db(tmp_path)
+    try:
+        result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
+        assert result["added"] == 1 and result["failed"] == 0
+        assert [r["tmdb_id"] for r in library_rows(conn)] == ["9268"]
+    finally:
+        conn.close()
+
+
+def test_import_yearless_title_multiple_matches_is_error(tmp_path, monkeypatch):
+    # A yearless title with >1 TMDB hit stays ambiguous -> error log (no guess);
+    # the id line still imports.
+    stub_import(monkeypatch)   # /search returns two results
     path = write_file(tmp_path, "wishes.txt", "Heat\n100")
     conn = open_db(tmp_path)
     try:
@@ -925,14 +990,13 @@ def test_import_title_without_year_is_error(tmp_path, monkeypatch):
         assert result["added"] == 1 and result["failed"] == 1
         assert result["errors"][0]["line"] == 1
         assert result["errors"][0]["input"] == "Heat"
-        assert "year" in result["errors"][0]["reason"].lower()
         assert [r["tmdb_id"] for r in library_rows(conn)] == ["100"]
     finally:
         conn.close()
 
 
-def test_import_csv_title_without_year_is_error(tmp_path, monkeypatch):
-    stub_import(monkeypatch)
+def test_import_csv_yearless_title_multiple_matches_is_error(tmp_path, monkeypatch):
+    stub_import(monkeypatch)   # /search returns two results
     path = write_file(tmp_path, "wishes.csv",
                       "title,year\nDie Klapperschlange,1981\nHeat,")
     conn = open_db(tmp_path)
@@ -940,7 +1004,6 @@ def test_import_csv_title_without_year_is_error(tmp_path, monkeypatch):
         result = cmd_library(conn, CFG, libargs("import", path=path, json=True))
         assert result["added"] == 1 and result["failed"] == 1
         assert result["errors"][0]["line"] == 3
-        assert "year" in result["errors"][0]["reason"].lower()
     finally:
         conn.close()
 
@@ -984,7 +1047,7 @@ def test_download_records_library_as_L(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         cfg = download_cfg(tmp_path)
-        insert_movie(conn, "m_de", tmdb_id="100", status="2")
+        insert_movie(conn, "m_de", tmdb_id="100", status="3")
         cmd_queue(conn, cfg, qargs("add", tmdb=["100"]))
         conn.execute("UPDATE queue SET status='A'")
         cmd_queue(conn, cfg, qargs("download", all=True))
@@ -1007,7 +1070,7 @@ def test_download_flips_existing_wish_to_L(tmp_path, monkeypatch):
     try:
         cfg = download_cfg(tmp_path)
         cmd_library(conn, cfg, libargs("add", tmdb=["100"]))   # a 'W' wish
-        insert_movie(conn, "m_de", tmdb_id="100", status="2")
+        insert_movie(conn, "m_de", tmdb_id="100", status="3")
         cmd_queue(conn, cfg, qargs("add", tmdb=["100"]))
         conn.execute("UPDATE queue SET status='A'")
         cmd_queue(conn, cfg, qargs("download", all=True))
@@ -1051,6 +1114,25 @@ def test_update_auto_approve_downloads_and_marks_library(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_run_pass_bulk_matches_before_wishes(tmp_path, monkeypatch):
+    # the pass eagerly bulk-matches enriched-and-untried movie rows before the
+    # wish loop, so the '1' pool is drained (here the search finds nothing -> '2').
+    stub_tmdb(monkeypatch)
+    stub_files(monkeypatch)
+    stub_stages(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        cfg = download_cfg(tmp_path, queue_auto_approve=True)
+        insert_movie(conn, "m_x", tmdb_id="", status="1")   # enriched, untried
+        result = _run_pass(conn, cfg)
+        assert result["bulk"]["scanned"] == 1
+        assert result["bulk"]["matched"] + result["bulk"]["attempted"] == 1
+        st = conn.execute("SELECT status FROM mediathek WHERE mediathek_id='m_x'").fetchone()
+        assert st["status"] in ("2", "3")                   # no longer '1'
+    finally:
+        conn.close()
+
+
 def test_update_without_auto_approve_stops_at_proposed(tmp_path, monkeypatch):
     stub_tmdb(monkeypatch)
     stub_files(monkeypatch)
@@ -1078,7 +1160,7 @@ def test_update_skips_already_satisfied_wish(tmp_path, monkeypatch):
     conn = open_db(tmp_path)
     try:
         cfg = download_cfg(tmp_path, queue_auto_approve=True)
-        insert_movie(conn, "m_de", tmdb_id="100", status="2")
+        insert_movie(conn, "m_de", tmdb_id="100", status="3")
         conn.execute("INSERT INTO library (tmdb_id, status, title, created_at, "
                      "updated_at) VALUES ('100','L','',?,?)",
                      (theke._now(), theke._now()))

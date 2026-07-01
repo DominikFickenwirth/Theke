@@ -12,7 +12,7 @@ from theke.match import (normalize, strip_articles, title_similarity,
                          score_match, tmdb_movie, find_matches,
                          tmdb_tv, score_episode, find_episode_matches,
                          is_arte_sender, arte_video_id, arte_anchor_ids,
-                         find_arte_links)
+                         find_arte_links, pick_by_year, bulk_accept, bulk_match)
 
 
 # -- normalize / strip_articles ----------------------------------------------
@@ -199,6 +199,169 @@ def test_tmdb_movie_parses_titles_year_runtime(monkeypatch):
     assert meta["titles"] == ["Das Boot", "Das Boot - Director's Cut"]
 
 
+# -- bulk match: bulk_accept (pure gate; candidate pick -> pick_by_year) -----
+
+
+def brow(clean_title="Das Boot", year=1981, duration=8940, date="1985-01-01"):
+    return {"clean_title": clean_title, "year": year, "duration": duration, "date": date}
+
+
+def test_bulk_accept_all_gates_pass():
+    a = bulk_accept(BOOT, brow(), 2)
+    assert a["accepted"] is True
+    assert a["confidence"] == 1.0   # exact title * year 1.0 * runtime 1.0
+
+
+def test_bulk_accept_runtime_is_a_hard_gate():
+    # 120 min vs 149 min: above the clip floor (score_match would only soft-
+    # penalise, conf 0.9) but rel dist 0.194 > RUNTIME_TOLERANCE 0.15 -> reject.
+    assert bulk_accept(BOOT, brow(duration=7200), 2)["accepted"] is False
+
+
+def test_bulk_accept_rejects_when_runtime_missing():
+    assert bulk_accept({"titles": ["Das Boot"], "year": 1981, "runtime": None},
+                       brow(), 2)["accepted"] is False
+    assert bulk_accept(BOOT, brow(duration=None), 2)["accepted"] is False
+
+
+def test_bulk_accept_year_present_requires_tmdb_year():
+    # row has a year but the TMDB candidate has none -> cannot confirm -> reject.
+    assert bulk_accept({"titles": ["Das Boot"], "year": None, "runtime": 149},
+                       brow(year=1981), 2)["accepted"] is False
+
+
+def test_bulk_accept_rejects_release_after_broadcast():
+    # release 1981 but aired 1978 (+-2 -> 1980): a film cannot air before release.
+    assert bulk_accept(BOOT, brow(year=None, date="1978-01-01"), 2)["accepted"] is False
+
+
+# -- bulk_match orchestrator (row-driven, DB + stubbed TMDB IO) --------------
+
+def bulk_stub(monkeypatch):
+    """Stub http_get: /search/movie yields the Boot hit for any 'boot' query
+    (else no results), /movie/<id> the canned Boot payload. Counts calls."""
+    calls = {"search": 0, "movie": 0}
+
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            calls["search"] += 1
+            hit = "boot" in url.lower()
+            results = ([{"id": 1234, "title": "Das Boot", "release_date": "1981-09-17"}]
+                       if hit else [])
+            return json.dumps({"results": results}).encode("utf-8")
+        calls["movie"] += 1
+        return json.dumps(TMDB_BOOT).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    return calls
+
+
+def test_bulk_match_matches_hits_and_marks_misses(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m_hit", "Das Boot", 1981, 8940)       # 149 min -> match
+        insert_movie(conn, "m_miss", "Unknown Film", 2000, 6000)  # no TMDB hit -> '2'
+        res = bulk_match(conn, CFG)
+        assert res == {"scanned": 2, "matched": 1, "attempted": 1}
+        assert status_of(conn, "m_hit") == "3"
+        assert tuple(tmdb_of(conn, "m_hit")) == ("1234", 1.0)
+        assert status_of(conn, "m_miss") == "2"
+        assert tmdb_of(conn, "m_miss")["tmdb_id"] == ""
+    finally:
+        conn.close()
+
+
+def test_bulk_match_dedupes_search_by_title(tmp_path, monkeypatch):
+    calls = bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        bulk_match(conn, CFG)
+        assert calls["search"] == 1   # one search for the shared title
+        assert calls["movie"] == 1    # one movie fetch for the shared id
+        assert status_of(conn, "m1") == "3" and status_of(conn, "m2") == "3"
+    finally:
+        conn.close()
+
+
+def test_bulk_match_only_status_1(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)                     # '1'
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m2'")
+        insert_movie(conn, "m3", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='m3'")
+        res = bulk_match(conn, CFG)
+        assert res["scanned"] == 1                      # only the '1' row
+        assert status_of(conn, "m2") == "2" and status_of(conn, "m3") == "3"
+    finally:
+        conn.close()
+
+
+def test_bulk_match_respects_limit(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m3", "Das Boot", 1981, 8940)
+        res = bulk_match(conn, CFG, limit=2)
+        assert res["scanned"] == 2
+        remaining = [r["mediathek_id"] for r in conn.execute(
+            "SELECT mediathek_id FROM mediathek WHERE status='1'")]
+        assert remaining == ["m3"]                       # ordered by id, m3 left
+    finally:
+        conn.close()
+
+
+def test_bulk_match_skips_trailers(tmp_path, monkeypatch):
+    calls = bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET flags='T' WHERE mediathek_id='m1'")
+        res = bulk_match(conn, CFG)
+        assert res["scanned"] == 0
+        assert status_of(conn, "m1") == "1"              # trailer untouched
+        assert calls["search"] == 0                      # never searched
+    finally:
+        conn.close()
+
+
+def test_bulk_match_persists_each_decision_before_abort(tmp_path, monkeypatch):
+    # A Ctrl+C mid-loop must leave already-decided rows persisted (no end-of-run
+    # batch): row m1 matches and commits, then row m2's search raises -> m1 stays
+    # '3', m2 untouched at '1'.
+    calls = {"search": 0}
+
+    def fake_get(url, timeout=None, headers=None):
+        if "/search/movie" in url:
+            calls["search"] += 1
+            if calls["search"] == 2:
+                raise KeyboardInterrupt
+            return json.dumps({"results": [
+                {"id": 1234, "title": "Das Boot", "release_date": "1981-09-17"}]
+            }).encode("utf-8")
+        return json.dumps(TMDB_BOOT).encode("utf-8")
+
+    monkeypatch.setattr(theke.core, "http_get", fake_get)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)      # matches -> committed
+        insert_movie(conn, "m2", "Anderer Film", 2000, 6000)  # search raises Ctrl+C
+        with pytest.raises(KeyboardInterrupt):
+            bulk_match(conn, CFG)
+        assert status_of(conn, "m1") == "3"                   # persisted before abort
+        assert tuple(tmdb_of(conn, "m1")) == ("1234", 1.0)
+        assert status_of(conn, "m2") == "1"                   # never reached
+    finally:
+        conn.close()
+
+
 # -- find_matches (DB scan over category='Movie') ----------------------------
 
 def open_db(tmp_path):
@@ -299,19 +462,21 @@ def test_find_matches_excludes_trailers(tmp_path):
         conn.close()
 
 
-def test_find_matches_only_status_1(tmp_path):
-    # match only touches enriched-and-unmatched rows: a status '0' (not yet
-    # enriched) and a status '2' (already matched) row are both skipped, even
-    # though they'd otherwise score 1.0.
+def test_find_matches_scans_enriched_and_bulk_failed(tmp_path):
+    # lazy match scans enriched ('1') AND bulk-attempted-but-unmatched ('2')
+    # rows (both still need a match); a status '0' (unenriched) and a status '3'
+    # (already matched) row are skipped, even though they'd score 1.0.
     conn = open_db(tmp_path)
     try:
         insert_movie(conn, "m1", "Das Boot", 1981, 8940)   # status '1' -> match
+        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m2'")  # bulk-failed -> still matched
         insert_movie(conn, "m0", "Das Boot", 1981, 8940)
         conn.execute("UPDATE mediathek SET status='0' WHERE mediathek_id='m0'")
-        insert_movie(conn, "m2", "Das Boot", 1981, 8940)
-        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m2'")
+        insert_movie(conn, "m3", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='m3'")  # already matched -> skipped
         matches = find_matches(conn, BOOT, min_conf=0.6)
-        assert [m["mediathek_id"] for m in matches] == ["m1"]
+        assert [m["mediathek_id"] for m in matches] == ["m1", "m2"]
     finally:
         conn.close()
 
@@ -359,8 +524,8 @@ def test_cmd_match_run_writes_id_and_confidence(tmp_path, monkeypatch):
         assert tuple(tmdb_of(conn, "m1")) == ("1234", 1.0)
         assert tuple(tmdb_of(conn, "m2")) == ("1234", 0.95)
         assert tmdb_of(conn, "m3")["tmdb_id"] == ""   # rejected, untouched
-        assert status_of(conn, "m1") == "2"           # written -> matched
-        assert status_of(conn, "m2") == "2"
+        assert status_of(conn, "m1") == "3"           # written -> matched
+        assert status_of(conn, "m2") == "3"
         assert status_of(conn, "m3") == "1"           # rejected, status untouched
     finally:
         conn.close()
@@ -386,7 +551,7 @@ def test_cmd_match_run_keeps_existing_other_id(tmp_path, monkeypatch):
         assert tmdb_of(conn, "m1")["tmdb_id"] == "999"
         assert tmdb_of(conn, "m2")["tmdb_id"] == "1234"
         assert status_of(conn, "m1") == "1"      # conflict-skipped, status untouched
-        assert status_of(conn, "m2") == "2"
+        assert status_of(conn, "m2") == "3"
     finally:
         conn.close()
 
@@ -426,7 +591,7 @@ def test_cmd_match_show_is_read_only(tmp_path, monkeypatch):
         conn.close()
 
 
-# -- match reset (status 2 -> 1) ---------------------------------------------
+# -- match reset (status 2/3 -> 1) -------------------------------------------
 
 def reset_margs(status_only=False):
     return SimpleNamespace(match_cmd="reset", status_only=status_only)
@@ -436,7 +601,7 @@ def test_cmd_match_reset_flips_status_and_clears_id(tmp_path):
     conn = open_db(tmp_path)
     try:
         insert_movie(conn, "m1", "Das Boot", 1981, 8940)
-        conn.execute("UPDATE mediathek SET status='2', tmdb_id='1234', "
+        conn.execute("UPDATE mediathek SET status='3', tmdb_id='1234', "
                      "match_confidence=1.0 WHERE mediathek_id='m1'")
         result = cmd_match(conn, CFG, reset_margs())
         assert result == {"reset": 1}
@@ -453,7 +618,7 @@ def test_cmd_match_reset_status_only_keeps_id(tmp_path):
     conn = open_db(tmp_path)
     try:
         insert_movie(conn, "m1", "Das Boot", 1981, 8940)
-        conn.execute("UPDATE mediathek SET status='2', tmdb_id='1234', "
+        conn.execute("UPDATE mediathek SET status='3', tmdb_id='1234', "
                      "match_confidence=1.0 WHERE mediathek_id='m1'")
         result = cmd_match(conn, CFG, reset_margs(status_only=True))
         assert result == {"reset": 1}
@@ -465,12 +630,25 @@ def test_cmd_match_reset_status_only_keeps_id(tmp_path):
         conn.close()
 
 
+def test_cmd_match_reset_also_clears_bulk_attempted(tmp_path):
+    # reset returns bulk-attempted-but-unmatched rows ('2') to enriched ('1') too,
+    # so a fresh bulk pass can retry them.
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m1'")
+        assert cmd_match(conn, CFG, reset_margs()) == {"reset": 1}
+        assert status_of(conn, "m1") == "1"
+    finally:
+        conn.close()
+
+
 def test_cmd_match_reset_leaves_non_matched_rows(tmp_path):
     conn = open_db(tmp_path)
     try:
         insert_movie(conn, "m1", "Das Boot", 1981, 8940)   # status '1'
         result = cmd_match(conn, CFG, reset_margs())
-        assert result == {"reset": 0}                       # nothing at status '2'
+        assert result == {"reset": 0}                       # nothing at status '2'/'3'
         assert status_of(conn, "m1") == "1"
     finally:
         conn.close()
@@ -481,8 +659,33 @@ def test_cmd_match_reset_needs_no_api_key(tmp_path):
     conn = open_db(tmp_path)
     try:
         insert_movie(conn, "m1", "Das Boot", 1981, 8940)
-        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m1'")
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='m1'")
         assert cmd_match(conn, Config(), reset_margs()) == {"reset": 1}
+    finally:
+        conn.close()
+
+
+# -- match bulk (phase 15, eager row-driven catalog match) -------------------
+
+def test_cmd_match_bulk_tags_and_marks(tmp_path, monkeypatch):
+    bulk_stub(monkeypatch)
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m_hit", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m_miss", "Unknown Film", 2000, 6000)
+        res = cmd_match(conn, CFG, margs(match_cmd="bulk", limit=None))
+        assert res == {"scanned": 2, "matched": 1, "attempted": 1}
+        assert status_of(conn, "m_hit") == "3"
+        assert status_of(conn, "m_miss") == "2"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_bulk_needs_api_key(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        with pytest.raises(ConfigError):
+            cmd_match(conn, Config(), margs(match_cmd="bulk", limit=None))
     finally:
         conn.close()
 
@@ -527,8 +730,8 @@ def test_cmd_match_run_series_writes_id_and_confidence(tmp_path, monkeypatch):
         assert tuple(tmdb_of(conn, "e1")) == ("55", 1.0)
         assert tuple(tmdb_of(conn, "e5")) == ("55", 0.9)
         assert tmdb_of(conn, "e2")["tmdb_id"] == ""   # wrong series, untouched
-        assert status_of(conn, "e1") == "2"
-        assert status_of(conn, "e5") == "2"
+        assert status_of(conn, "e1") == "3"
+        assert status_of(conn, "e5") == "3"
         assert status_of(conn, "e2") == "1"
     finally:
         conn.close()
@@ -732,7 +935,7 @@ def test_find_episode_matches_only_status_1(tmp_path):
         insert_episode(conn, "e0", "Der rote Schatten", "Tatort", 2, 6)
         conn.execute("UPDATE mediathek SET status='0' WHERE mediathek_id='e0'")
         insert_episode(conn, "e2", "Der rote Schatten", "Tatort", 2, 6)
-        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='e2'")
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='e2'")  # matched -> skipped
         matches = find_episode_matches(conn, TATORT, min_conf=0.6)
         assert [m["mediathek_id"] for m in matches] == ["e1"]
     finally:
@@ -815,8 +1018,8 @@ def test_find_arte_links_fans_out_to_variants(tmp_path):
 
 
 def test_find_arte_links_only_status_1(tmp_path):
-    # the second pass also touches only status '1' rows: a variant already
-    # matched (status '2') is left alone, even when it shares the anchor's id.
+    # the second pass touches only unmatched rows ('1'/'2'): a variant already
+    # matched (status '3') is left alone, even when it shares the anchor's id.
     conn = open_db(tmp_path)
     try:
         insert_arte(conn, "a1", "Das Boot", "ARTE.DE",
@@ -825,7 +1028,7 @@ def test_find_arte_links_only_status_1(tmp_path):
                     "https://www.arte.tv/fr/videos/100000-000-A/le-bateau/")
         insert_arte(conn, "a3", "El Submarino", "ARTE.ES",
                     "https://www.arte.tv/es/videos/100000-000-A/el-submarino/")
-        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='a2'")
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='a2'")
         links = find_arte_links(conn, {"100000-000-A": 1.0}, exclude_ids={"a1"})
         assert [l["mediathek_id"] for l in links] == ["a3"]
     finally:
@@ -866,7 +1069,7 @@ def test_cmd_match_run_links_arte_language_variants(tmp_path, monkeypatch):
         assert tuple(tmdb_of(conn, "a1")) == ("1234", 1.0)   # pass-1 German hit
         assert tuple(tmdb_of(conn, "a2")) == ("1234", 1.0)   # variants inherit conf
         assert tuple(tmdb_of(conn, "a3")) == ("1234", 1.0)
-        assert status_of(conn, "a2") == "2" and status_of(conn, "a3") == "2"
+        assert status_of(conn, "a2") == "3" and status_of(conn, "a3") == "3"
     finally:
         conn.close()
 
@@ -932,7 +1135,7 @@ def test_cmd_match_run_links_mysteries_of_lisbon(tmp_path, monkeypatch):
         # all five language variants linked by id, inheriting the anchor's 1.0
         for mid, *_ in LISBON_VARIANTS:
             assert tuple(tmdb_of(conn, mid)) == ("49348", 1.0)
-            assert status_of(conn, mid) == "2"
+            assert status_of(conn, mid) == "3"
     finally:
         conn.close()
 

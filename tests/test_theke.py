@@ -1113,7 +1113,7 @@ def test_migration_creates_mediathek_and_meta(tmp_path):
     conn = open_db(tmp_path)
     try:
         assert {"mediathek", "meta"} <= table_names(conn)
-        assert user_version(conn) == 11   # +phase 12 library indexer columns
+        assert user_version(conn) == 12   # +phase 12 indexer, +phase 15 status remap
     finally:
         conn.close()
 

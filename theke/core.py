@@ -50,6 +50,7 @@ class Config:
     tmdb_lists:           list  = dataclasses.field(default_factory=list)
     match_min_confidence: float = 0.6
     match_year_tolerance: int   = 2
+    bulk_match_max_per_pass: int = 500
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     fiction_topics:       list  = dataclasses.field(default_factory=list)
@@ -333,6 +334,11 @@ MIGRATIONS: list[tuple[str, ...]] = [
         "ALTER TABLE library ADD COLUMN file_size  INTEGER",# bytes of the anchor file
         "ALTER TABLE library ADD COLUMN indexed_at TEXT",   # last scan sighting (sweep watermark)
         "ALTER TABLE library ADD COLUMN source     TEXT",   # provenance (e.g. "scan")
+    ),
+    (  # phase 15: bulk match re-purposes the mediathek status alphabet. Matched
+       # rows move to '3' (freeing '2' for "bulk-attempted, no confident match",
+       # which stays lazy-matchable). Migrate existing matched rows.
+        "UPDATE mediathek SET status='3' WHERE status='2'",
     ),
 ]
 

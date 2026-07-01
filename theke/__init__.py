@@ -34,7 +34,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
 from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_search, tmdb_list,
-                         pick_by_year, ARTICLES)
+                         pick_by_year, bulk_match, ARTICLES)
 from theke.queue import select_downloads, resolution_of
 from theke.files import is_hls, download_file, download_hls, run_remux, check_ffmpeg, move_file
 from theke import index
@@ -424,7 +424,7 @@ def _enrich_reset(conn, args) -> dict:
     """Undo enrich: take enriched/matched rows (status '1'/'2') back to '0', as
     if freshly fetched. Clears the enrich + match columns unless --status-only."""
     sets = "status='0'" if args.status_only else f"status='0', {_ENRICH_CLEAR}"
-    return _reset(conn, sets, "status IN ('1','2')")
+    return _reset(conn, sets, "status IN ('1','2','3')")
 
 
 def _reset(conn, sets, where) -> dict:
@@ -880,6 +880,8 @@ def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
         return _match_reset(conn, args)
     if not cfg.tmdb_api_key:
         raise ConfigError("no TMDB API key configured (set tmdb_api_key)")
+    if args.match_cmd == "bulk":
+        return _match_bulk(conn, cfg, args)
     if args.type == "series" and (args.season is None or args.episode is None):
         raise ValueError("--type series requires --season and --episode")
     match args.match_cmd:
@@ -888,11 +890,20 @@ def cmd_match(conn, cfg, args: argparse.Namespace) -> dict:
         case _: raise DbError(f"unhandled match action: {args.match_cmd}")
 
 
+def _match_bulk(conn, cfg, args) -> dict:
+    """Eager, row-driven catalog match (phase 15): tag every confidently
+    resolvable movie row with its tmdb_id ('3'), marking the rest '2' (skipped
+    by later bulk passes, still lazy-matchable). --limit caps rows this call
+    (default: all remaining '1' rows)."""
+    return bulk_match(conn, cfg, limit=args.limit)
+
+
 def _match_reset(conn, args) -> dict:
-    """Undo match: take matched rows (status '2') back to enriched ('1').
-    Clears tmdb_id + match_confidence unless --status-only."""
+    """Undo match: take matched ('3') and bulk-attempted ('2') rows back to
+    enriched ('1'), so a fresh match/bulk pass can retry them. Clears tmdb_id +
+    match_confidence unless --status-only."""
     sets = "status='1'" if args.status_only else f"status='1', {_MATCH_CLEAR}"
-    return _reset(conn, sets, "status='2'")
+    return _reset(conn, sets, "status IN ('2','3')")
 
 
 def _match_resolve(conn, cfg, args, min_conf) -> tuple:
@@ -937,7 +948,7 @@ def _match_run(conn, cfg, args) -> dict:
                     log.warning("skip %s: already tmdb_id %s", m["mediathek_id"], cur)
                     continue
                 conn.execute("UPDATE mediathek SET tmdb_id=?, match_confidence=?, "
-                             "status='2' WHERE mediathek_id=?",
+                             "status='3' WHERE mediathek_id=?",
                              (meta["tmdb_id"], m["confidence"], m["mediathek_id"]))
                 written += 1
             conn.execute("COMMIT")
@@ -1053,7 +1064,7 @@ def _queue_add_tmdb(conn, cfg, tmdb_id, status, overrides, totals):
     meta = tmdb_movie(cfg, tmdb_id)
     fields = _path_fields(meta["title"], meta["year"])
     rows = {r["mediathek_id"]: dict(r) for r in conn.execute(
-        "SELECT * FROM mediathek WHERE status='2' AND tmdb_id=?", (tmdb_id,))}
+        "SELECT * FROM mediathek WHERE status='3' AND tmdb_id=?", (tmdb_id,))}
     picks = select_downloads(list(rows.values()), cfg.languages, meta["original_language"])
     totals["deduplicated"] += len(rows) - len(picks)
     for i, p in enumerate(picks):
@@ -1444,10 +1455,12 @@ def _drop_leading_article(title) -> str:
 
 def _search_title(cfg, title, year, tol) -> tuple:
     """Resolve a (title, year) to one (tmdb_id, title, year) via TMDB search, the
-    year tolerant by `tol` years (smallest distance wins, ties keep popularity).
-    Raises ValueError when nothing qualifies, naming the cause: no title hit at
-    all vs. hits whose years all miss the tolerance (listing the years found).
-    The pure-input core shared by `library add --title` and `library import`."""
+    pick sharing `match bulk`'s pick_by_year rule: with a year the tolerant nearest
+    (smallest distance, ties keep popularity); without a year only an unambiguous
+    single hit. Raises ValueError when nothing qualifies, naming the cause: no
+    title hit at all, an ambiguous yearless search, or hits whose years all miss
+    the tolerance (listing the years found). The pure-input core shared by
+    `library add --title` and `library import`."""
     cands = tmdb_search(cfg, title)
     if not cands:
         stripped = _drop_leading_article(title)
@@ -1457,6 +1470,9 @@ def _search_title(cfg, title, year, tol) -> tuple:
         raise ValueError(f"no TMDB title matches {title!r}")
     cand = pick_by_year(cands, year, tol)
     if cand is None:
+        if year is None:
+            raise ValueError(f"{len(cands)} TMDB title matches for {title!r}; "
+                             f"give a year to disambiguate")
         years = sorted({c["year"] for c in cands if c["year"] is not None})
         found = ", ".join(map(str, years)) if years else "none dated"
         raise ValueError(f"{len(cands)} TMDB title match(es) for {title!r}, but "
@@ -1968,14 +1984,12 @@ def _read_import_file(path):
 
 def _resolve_entry(cfg, entry, tol) -> tuple:
     """Resolve one parsed entry to (tmdb_id, title, year); raises on failure. An
-    id is verified via TMDB (a bad id propagates as 404); a title is searched, but
-    only with a year -- a yearless title is too ambiguous to import, so it raises
-    rather than guessing the most popular hit (unlike interactive `add --title`)."""
+    id is verified via TMDB (a bad id propagates as 404); a title is searched via
+    `_search_title` (pick_by_year rule): with a year the tolerant nearest, without a
+    year only an unambiguous single hit (an ambiguous yearless title raises)."""
     if entry["kind"] == "id":
         meta = tmdb_movie(cfg, entry["id"])
         return str(entry["id"]), meta["title"] or "", meta["year"]
-    if entry["year"] is None:
-        raise ValueError(f"year missing for title {entry['title']!r}")
     return _search_title(cfg, entry["title"], entry["year"], tol)
 
 
@@ -2043,6 +2057,7 @@ def _run_pass(conn, cfg) -> dict:
     (when auto-approved). Returns one aggregated summary."""
     fetch = cmd_fetch(conn, cfg, _ns(force=False))
     enriched = _enrich_run(conn, cfg, _ns(force=False))
+    bulk = _run_bulk(conn, cfg)
     scan = _run_scan(conn, cfg)
     list_added = 0
     for lid in cfg.tmdb_lists:
@@ -2073,8 +2088,24 @@ def _run_pass(conn, cfg) -> dict:
     if cfg.queue_auto_approve:
         downloaded = _queue_download(conn, cfg, _ns(all=True, ids=[], force=False))["downloaded"]
     return {"fetch": fetch.get("action"), "enriched": enriched["enriched"],
-            "scan": scan, "list_added": list_added, "wishes": len(wishes),
-            "failed": failed, "downloaded": downloaded, **totals}
+            "bulk": bulk, "scan": scan, "list_added": list_added,
+            "wishes": len(wishes), "failed": failed, "downloaded": downloaded,
+            **totals}
+
+
+def _run_bulk(conn, cfg) -> dict:
+    """Eagerly bulk-match a capped batch of enriched-and-untried movie rows before
+    the wish loop, draining the '1' pool so wishes resolve by tmdb_id instead of a
+    per-wish scan. Incremental (only '1' rows) and best-effort: no TMDB key ->
+    {"skipped": True}; a failure (e.g. a TMDB outage) is reported, never aborting
+    the pass."""
+    if not cfg.tmdb_api_key:
+        return {"skipped": True}
+    try:
+        return bulk_match(conn, cfg, limit=cfg.bulk_match_max_per_pass)
+    except Exception as exc:
+        log.warning("bulk match failed: %s", exc)
+        return {"error": str(exc)}
 
 
 def _run_scan(conn, cfg) -> dict:
@@ -2283,7 +2314,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich = sub.add_parser("enrich", help="extract metadata and inspect the result", description="Extract structured metadata from the free-text fields (run) and inspect the result with read-only reports. Progress is printed to stderr.")
     csub = enrich.add_subparsers(dest="enrich_cmd", required=True, metavar="action")
     crun = csub.add_parser("run",    help="enrich mirrored rows (default)",                      description="Extract structured metadata (title, series/season/episode, category, year, country, language, flags) into the enrich columns and flip status 0 -> 1.")
-    crst = csub.add_parser("reset",  help="undo enrich: status 1/2 -> 0",                         description="Take enriched/matched rows (status '1'/'2') back to '0', as if freshly fetched. Clears the enrich + match columns unless --status-only.")
+    crst = csub.add_parser("reset",  help="undo enrich: status 1/2/3 -> 0",                       description="Take enriched/bulk-attempted/matched rows (status '1'/'2'/'3') back to '0', as if freshly fetched. Clears the enrich + match columns unless --status-only.")
     crep = csub.add_parser("report", help="read-only per-sender coverage report",                description="Per-sender coverage of the enrich fields. Reads the stored columns by default; --live re-runs enrich() without writing.")
     caud = csub.add_parser("audit",  help="read-only findings scan for wrong/suspicious values", description="Scan for rows a heuristic visibly mishandled (coverage counts filled, not correct). country-shape/title-credit/episodic-unparsed only fire on already-enriched rows. Checks: "+ ", ".join(AUDIT_CHECKS) +".")
     csho = csub.add_parser("show",   help="read-only sample of rows with their enrich columns",  description="Dump the enrich columns of matching rows. Filters are ANDed; FIELD must be a mediathek column.")
@@ -2314,8 +2345,10 @@ def build_parser() -> argparse.ArgumentParser:
     msub = matchp.add_subparsers(dest="match_cmd", required=True, metavar="action")
     mrun = msub.add_parser("run",  help="tag matching rows with tmdb_id + confidence (default)",  description="Resolve the TMDB id and write tmdb_id + match_confidence onto matching rows. For --type series, pass the (--tmdb, --season, --episode) triple. An existing different tmdb_id is preserved, not overwritten.")
     msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate rows with their score breakdown without writing. Defaults to listing everything not rejected.")
-    mrst = msub.add_parser("reset", help="undo match: status 2 -> 1",                              description="Take matched rows (status '2') back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
+    mrst = msub.add_parser("reset", help="undo match: status 2/3 -> 1",                            description="Take matched ('3') and bulk-attempted ('2') rows back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
     mrst.add_argument("-s", "--status-only", action="store_true",                                        help="only flip status, keep tmdb_id + match_confidence")
+    mblk = msub.add_parser("bulk", help="eager: match the whole movie catalog by search",           description="Row-driven eager match (phase 15): search TMDB by each enriched movie row's own title and tag confident hits (hard gates: title, runtime, year, release-before-broadcast) status '3', marking the rest '2' (bulk-attempted, still lazy-matchable). Needs a TMDB key.")
+    mblk.add_argument("-l", "--limit", type=int, metavar="N",                                            help="cap rows matched this call (default: all remaining '1' rows)")
     mrun.add_argument("-t", "--tmdb",     required=True, metavar="ID",                                  help="TMDB id to match (movie id, or series id for --type series)")
     mrun.add_argument("-T", "--type",     default="movie", choices=["movie", "series"],                 help="media type (default movie)")
     mrun.add_argument("-s", "--season",   type=int, metavar="N",                                        help="season number (required for --type series)")
