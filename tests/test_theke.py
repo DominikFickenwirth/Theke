@@ -244,6 +244,103 @@ def test_main_default_path_missing_creates_nothing(tmp_path, monkeypatch):
     assert not (tmp_path / "theke.json").exists()
 
 
+# -- config set / get / unset (persist single keys to the file) --------------
+
+def test_set_config_value_creates_file_and_coerces(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    assert set_config_value(str(path), "queue_auto_approve", "true") is True
+    assert json.loads(path.read_text(encoding="utf-8")) == {"queue_auto_approve": True}
+    assert load_config(str(path)).queue_auto_approve is True
+
+
+def test_set_config_value_string_field_taken_raw(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    assert set_config_value(str(path), "tmdb_api_key", "abc123") == "abc123"
+    assert json.loads(path.read_text(encoding="utf-8")) == {"tmdb_api_key": "abc123"}
+
+
+def test_set_config_value_merges_into_existing(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "keep.db"})
+    set_config_value(str(path), "languages", '["de", "en"]')
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "db_path": "keep.db", "languages": ["de", "en"]}
+
+
+def test_set_config_value_accepts_int_for_float(tmp_path):
+    from theke.core import set_config_value
+    path = tmp_path / "c.json"
+    value = set_config_value(str(path), "match_min_confidence", "1")
+    assert value == 1.0 and isinstance(value, float)   # JSON int widened to float
+    assert json.loads(path.read_text(encoding="utf-8")) == {"match_min_confidence": 1.0}
+
+
+def test_set_config_value_unknown_key_is_error(tmp_path):
+    from theke.core import set_config_value
+    with pytest.raises(ConfigError, match="db_pathh"):
+        set_config_value(str(tmp_path / "c.json"), "db_pathh", "x.db")
+
+
+def test_set_config_value_wrong_type_is_error(tmp_path):
+    from theke.core import set_config_value
+    with pytest.raises(ConfigError, match="languages"):
+        set_config_value(str(tmp_path / "c.json"), "languages", '"de"')  # not a list
+
+
+def test_unset_config_value_removes_key(tmp_path):
+    from theke.core import unset_config_value
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "x.db", "video_ext": "mkv"})
+    assert unset_config_value(str(path), "video_ext") is True
+    assert json.loads(path.read_text(encoding="utf-8")) == {"db_path": "x.db"}
+
+
+def test_unset_config_value_absent_key_is_noop(tmp_path):
+    from theke.core import unset_config_value
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "x.db"})
+    assert unset_config_value(str(path), "video_ext") is False
+    assert json.loads(path.read_text(encoding="utf-8")) == {"db_path": "x.db"}
+
+
+def test_unset_config_value_unknown_key_is_error(tmp_path):
+    from theke.core import unset_config_value
+    write_config(tmp_path / "c.json", {"db_path": "x.db"})
+    with pytest.raises(ConfigError, match="nope"):
+        unset_config_value(str(tmp_path / "c.json"), "nope")
+
+
+def test_main_config_set_persists_to_file(tmp_path, capsys):
+    path = tmp_path / "c.json"
+    assert main(["--json", "--config", str(path), "config", "set", "video_ext", "mkv"]) == 0
+    assert json.loads(path.read_text(encoding="utf-8"))["video_ext"] == "mkv"
+    assert json.loads(capsys.readouterr().out) == {"set": "video_ext", "value": "mkv"}
+
+
+def test_main_config_get_reports_effective_value(tmp_path, capsys):
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "file.db"})
+    assert main(["--json", "--config", str(path), "config", "get", "db_path"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"db_path": "file.db"}
+
+
+def test_main_config_unset_reverts_to_default(tmp_path, capsys):
+    path = tmp_path / "c.json"
+    write_config(path, {"video_ext": "mkv"})
+    assert main(["--json", "--config", str(path), "config", "unset", "video_ext"]) == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == {}
+    assert load_config(str(path)).video_ext == "mp4"          # back to the default
+
+
+def test_main_config_bare_still_shows_full_config(tmp_path):
+    path = tmp_path / "c.json"
+    write_config(path, {"db_path": "file.db"})
+    assert main(["--json", "--config", str(path), "config"]) == 0   # default action: show
+
+
 def test_config_languages_wrong_type_is_error(tmp_path):
     path = tmp_path / "ql.json"
     write_config(path, {"languages": "de"})   # must be a list, not a string
