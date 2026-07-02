@@ -422,10 +422,22 @@ def _enrich_run(conn, cfg, args) -> dict:
 
 
 def _enrich_reset(conn, args) -> dict:
-    """Undo enrich: take enriched/matched rows (status '1'/'2') back to '0', as
-    if freshly fetched. Clears the enrich + match columns unless --status-only."""
+    """Undo enrich: take enriched/bulk-attempted/matched rows (status '1'/'2'/'3')
+    back to '0', as if freshly fetched. Clears the enrich + match columns unless
+    --status-only. --status DIGITS restricts which statuses to reset."""
     sets = "status='0'" if args.status_only else f"status='0', {_ENRICH_CLEAR}"
-    return _reset(conn, sets, "status IN ('1','2','3')")
+    return _reset(conn, sets, _reset_where(args.status, "123"))
+
+
+def _reset_where(status, allowed) -> str:
+    """Build the `status IN (...)` clause for a reset from a --status digit string
+    (each char one status to reset); default is the whole allowed set. Every char
+    must be in allowed, else ValueError."""
+    picked = status if status else allowed
+    bad = [c for c in picked if c not in allowed]
+    if bad:
+        raise ValueError(f"--status: {''.join(bad)} not in {{{','.join(allowed)}}}")
+    return "status IN (" + ", ".join(f"'{c}'" for c in dict.fromkeys(picked)) + ")"
 
 
 def _reset(conn, sets, where) -> dict:
@@ -932,9 +944,10 @@ def _match_bulk(conn, cfg, args) -> dict:
 def _match_reset(conn, args) -> dict:
     """Undo match: take matched ('3') and bulk-attempted ('2') rows back to
     enriched ('1'), so a fresh match/bulk pass can retry them. Clears tmdb_id +
-    match_confidence unless --status-only."""
+    match_confidence unless --status-only. --status DIGITS restricts which
+    statuses to reset."""
     sets = "status='1'" if args.status_only else f"status='1', {_MATCH_CLEAR}"
-    return _reset(conn, sets, "status IN ('2','3')")
+    return _reset(conn, sets, _reset_where(args.status, "23"))
 
 
 def _match_resolve(conn, cfg, args, min_conf) -> tuple:
@@ -2323,6 +2336,7 @@ def build_parser() -> argparse.ArgumentParser:
     cdis = csub.add_parser("dist",   help="read-only value distribution of one field",           description="Top-N value frequencies of a single enrich field (or any mediathek column).")
     crun.add_argument("-f", "--force",         action="store_true",                                    help="re-enrich all rows, not just unenriched")
     crst.add_argument("-s", "--status-only",   action="store_true",                                    help="only flip status, keep the enrich + match columns")
+    crst.add_argument(      "--status",        metavar="DIGITS",                                       help="which statuses to reset (e.g. 23 = status 2 and 3; default 123)")
     crep.add_argument("-s", "--sender",        metavar="X[,Y]",                                        help="restrict to these senders (comma-separated)")
     crep.add_argument("-m", "--min-rows",      metavar="N", type=int, default=REPORT_MIN_ROWS,         help=f"omit senders with fewer rows (default {REPORT_MIN_ROWS}; 0 shows all)")
     crep.add_argument("-l", "--live",          action="store_true",                                    help="run enrich() live instead of reading the stored columns")
@@ -2349,6 +2363,7 @@ def build_parser() -> argparse.ArgumentParser:
     msho = msub.add_parser("show", help="read-only: explain candidate scores",                    description="List candidate rows with their score breakdown without writing. Defaults to listing everything not rejected.")
     mrst = msub.add_parser("reset", help="undo match: status 2/3 -> 1",                            description="Take matched ('3') and bulk-attempted ('2') rows back to enriched ('1'). Clears tmdb_id + match_confidence unless --status-only. Pure DB op: no TMDB key needed.")
     mrst.add_argument("-s", "--status-only", action="store_true",                                        help="only flip status, keep tmdb_id + match_confidence")
+    mrst.add_argument(      "--status",      metavar="DIGITS",                                          help="which statuses to reset (e.g. 3 = only status 3; default 23)")
     mblk = msub.add_parser("bulk", help="eager: match the whole movie catalog by search",           description="Row-driven eager match (phase 15): search TMDB by each enriched movie row's own title and tag confident hits (hard gates: title, runtime, year, release-before-broadcast) status '3', marking the rest '2' (bulk-attempted, still lazy-matchable). Needs a TMDB key.")
     mblk.add_argument("-l", "--limit", type=int, metavar="N",                                            help="cap rows matched this call (default: all remaining '1' rows)")
     mrun.add_argument("-t", "--tmdb",     required=True, metavar="ID",                                  help="TMDB id to match (movie id, or series id for --type series)")
