@@ -277,19 +277,35 @@ def route_topic(topic) -> dict:
 # Ersten, ...) keep series_name = slot for now; moving them to FORMAT_TOPICS for a
 # cleaner NULL series_name is a separate later cleanup. Matched casefold == topic.
 FICTION_TOPICS = {t.casefold() for t in (
-    'Tatort', 'Polizeiruf 110', 'Märchen in der ARD', 'Debüt im Dritten',
+    'Märchen in der ARD', 'Debüt im Dritten',
     'Dokumentarfilmzeit', 'FilmMittwoch im Ersten', 'Spielfilm-Highlights',
-    'Der Usedom-Krimi', 'Filme im Ersten', 'Donna Leon', 'Praxis mit Meerblick',
-    'Der Kroatien-Krimi', 'Krause', 'Daheim in den Bergen', 'Rebecka Martinsson',
-    'Kommissar Dupin', 'Kommissar Wallander', 'Harter Brocken Krimireihe',
-    'Zimmer mit Stall', 'Pfarrer Braun', 'Anna und ihr Untermieter', 'Wolfsland',
+    'Der Usedom-Krimi', 'Filme im Ersten',
+    'Krause',
+    'Kommissar Dupin', 'Harter Brocken Krimireihe',
+    'Zimmer mit Stall', 'Anna und ihr Untermieter', 'Wolfsland',
     'Utta Danella', 'Steirerkrimi', 'Ein Krimi aus Passau',
-    'Der Ranger - Paradies Heimat', 'Spielfilm in 3sat', 'Liebe am Fjord',
+    'Spielfilm in 3sat', 'Liebe am Fjord',
     'Käthe und ich', 'Kluftingerkrimis', 'Die drei von der Müllabfuhr',
-    'Der Wien-Krimi: Blind ermittelt', 'Mankells Wallander', 'Die Diplomatin',
-    'Die Bestatterin', 'Der Pate', 'Der Kommissar und die Alpen',
-    'Toni, männlich, Hebamme', 'Nord bei Nordwest', 'Mordkommission Istanbul',
-    'Mord in bester Gesellschaft', 'Krimis im Ersten', 'Die Inselärztin',
+    'Der Wien-Krimi: Blind ermittelt', 'Mankells Wallander',
+    'Die Bestatterin', 'Der Pate',
+    'Toni, männlich, Hebamme',
+    'Krimis im Ersten')}
+
+# Known TMDB *series* topics (B): a fiction Reihe that TMDB catalogs as a TV
+# series, not individual movies. Unlike FICTION_TOPICS (Movie lift), a topic here
+# forces category 'Episode' (overriding a Movie label/lift, so these drain out of
+# the movie match pool). It fires on a NULL/Movie medium only -- a short clip/
+# trailer keeps its Clip medium, an explicit Sxx/Exx already reads Episode. The
+# match layer handles episode matching (needs season/episode) later (phase 13).
+# Verified per-topic against TMDB search/multi media_type; movie-cataloged Reihen
+# (Mankells Wallander, Der Usedom-Krimi, ...) deliberately stay in FICTION_TOPICS.
+# Matched casefold == topic. Extended by config['series_topics'].
+SERIES_TOPICS = {t.casefold() for t in (
+    'Tatort', 'Polizeiruf 110', 'Donna Leon', 'Praxis mit Meerblick',
+    'Der Kroatien-Krimi', 'Daheim in den Bergen', 'Rebecka Martinsson',
+    'Kommissar Wallander', 'Pfarrer Braun', 'Der Ranger - Paradies Heimat',
+    'Die Diplomatin', 'Der Kommissar und die Alpen', 'Nord bei Nordwest',
+    'Mordkommission Istanbul', 'Mord in bester Gesellschaft', 'Die Inselärztin',
     'Der Bozen-Krimi')}
 
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
@@ -337,17 +353,18 @@ ENRICH_COLS = ['clean_title', 'series_name', 'genre', 'slot', 'season', 'episode
 
 def _confidence(kat_src, category):
     """Deterministic confidence from how the category was found."""
-    if kat_src in ('metazeile', 'arte-topic'): return 0.9
-    if kat_src in ('topic', 'event'):           return 0.8
+    if kat_src in ('metazeile', 'arte-topic'):        return 0.9
+    if kat_src in ('topic', 'event', 'series-topic'): return 0.8
     return 0.2 if category is None else 0.5
 
 
 def enrich(sender, topic, title, description, duration,
-            fiction_topics=FICTION_TOPICS) -> dict:
+            fiction_topics=FICTION_TOPICS, series_topics=SERIES_TOPICS) -> dict:
     """A mediathek row -> extracted metadata dict (keys == ENRICH_COLS).
 
-    fiction_topics is the casefolded fiction-Reihe allowlist (built-in default;
-    the CLI passes the default unioned with config['fiction_topics'])."""
+    fiction_topics is the casefolded fiction-Reihe allowlist (Movie lift);
+    series_topics the casefolded TMDB-series allowlist (Episode). The CLI passes
+    each built-in default unioned with config['fiction_topics']/['series_topics']."""
     t = title or ''; d = (description or '').strip(); tp = topic or ''
     flags = set()
     genres = set()
@@ -493,6 +510,10 @@ def enrich(sender, topic, title, description, duration,
         elif r['season'] is not None or r['episode'] is not None:
             if r['category'] in (None, 'Clip'):
                 r['category'] = 'Episode'; kat_src = 'episodic'
+
+    if (r['category'] in (None, 'Movie') and 'T' not in flags     # B: known TMDB-series
+            and tp.casefold() in series_topics):                  # topic -> Episode (drains movie pool)
+        r['category'] = 'Episode'; kat_src = 'series-topic'
 
     if (r['category'] is None and (duration or 0) >= 1800         # known fiction Reihe,
             and tp.casefold() in fiction_topics):                 # film-length, no medium signal

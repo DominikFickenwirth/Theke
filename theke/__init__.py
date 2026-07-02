@@ -31,7 +31,7 @@ from theke.core import (Config, ConfigError, CONFIG_DEFAULT_PATH, load_config,
                         write_default_config, set_config_value, unset_config_value,
                         DbError, DbLockedError, MIGRATIONS,
                         db_connect, db_get_meta, db_set_meta)
-from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS
+from theke.enrich import enrich, looks_like_country, GENRE_SET, ENRICH_COLS, CATWORD, FICTION_TOPICS, SERIES_TOPICS
 from theke.match import (tmdb_movie, find_matches, tmdb_tv, find_episode_matches,
                          arte_anchor_ids, find_arte_links, tmdb_list,
                          bulk_match, search_movies, resolve_one)
@@ -409,10 +409,11 @@ def _enrich_run(conn, cfg, args) -> dict:
     sql = _ENRICH_READ if not args.force else _ENRICH_READ.replace(
         " WHERE status='0'", "")
     fiction = FICTION_TOPICS | {t.casefold() for t in cfg.fiction_topics}
+    series = SERIES_TOPICS | {t.casefold() for t in cfg.series_topics}
     log.info("enriching rows")
     conn.execute("BEGIN")
     try:
-        count = _enrich_rows(conn, conn.execute(sql), fiction)
+        count = _enrich_rows(conn, conn.execute(sql), fiction, series)
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -439,7 +440,8 @@ def _reset(conn, sets, where) -> dict:
     return {"reset": count}
 
 
-def _enrich_rows(conn, rows, fiction_topics=FICTION_TOPICS, batch=5000) -> int:
+def _enrich_rows(conn, rows, fiction_topics=FICTION_TOPICS,
+                 series_topics=SERIES_TOPICS, batch=5000) -> int:
     """Stream rows through enrich(), write updates in batches; log every 50k."""
     count = 0
     reported = 0
@@ -458,7 +460,7 @@ def _enrich_rows(conn, rows, fiction_topics=FICTION_TOPICS, batch=5000) -> int:
 
     for row in rows:
         meta = enrich(row["sender"], row["topic"], row["title"],
-                        row["description"], row["duration"], fiction_topics)
+                        row["description"], row["duration"], fiction_topics, series_topics)
         meta["mediathek_id"] = row["mediathek_id"]
         params.append(meta)
         if len(params) >= batch:
