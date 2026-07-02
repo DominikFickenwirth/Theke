@@ -984,6 +984,60 @@ def test_non_fiction_feature_topic_stays_null():
     assert r["category"] is None
 
 
+# -- bare-title Movie lift: topic==title==clean_title, 75-120 min ------------
+# A standalone film often carries NO signal at all -- topic == title == the bare
+# film name, no metazeile, no marker, no known Reihe (e.g. MDR "Meine wunderbar
+# seltsame Woche mit Tess"). Enrich then leaves it NULL (duration prior) and it
+# never reaches the movie pool. The lift reads topic==title==clean_title (topic
+# is not a container, nothing was extracted) + a feature-length window (4500-7200s
+# = 75-120 min, which cuts the long variety/gala tail above 120 min and the
+# doc-heavy band below 75 min) as a low-confidence Movie signal. It is LOW conf
+# (0.5, same bucket as the duration prior) -- match's TMDB hard gates are the
+# arbiter; non-films just fall to '2'. Measured on the live list this window is
+# ~60% genuine films with only ~0.5% dangerous (series-episode) false positives.
+def test_bare_title_feature_lifts_to_movie():
+    # 76 min = 4560s, in the window; nothing to strip -> clean_title == title.
+    r = enrich("MDR", "Meine wunderbar seltsame Woche mit Tess",
+               "Meine wunderbar seltsame Woche mit Tess", "", 4560)
+    assert r["category"] == "Movie"
+    assert r["series_name"] is None
+    assert r["clean_title"] == "Meine wunderbar seltsame Woche mit Tess"
+    assert r["enrich_confidence"] == 0.5   # else-branch: low-conf, category set
+
+
+def test_bare_title_lift_duration_window_boundaries():
+    # Inclusive window [4500, 7200] (75-120 min); one second outside stays NULL.
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 4499)["category"] is None
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 4500)["category"] == "Movie"
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 7200)["category"] == "Movie"
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 7201)["category"] is None
+
+
+def test_bare_title_lift_requires_topic_equals_title():
+    # A generic slot topic (topic != title) is NOT a bare title -- no lift, the
+    # feature-length row stays NULL for the duration prior.
+    r = enrich("MDR", "Spielfilm am Sonntag", "Ein Film", "", 5400)
+    assert r["category"] is None
+
+
+def test_bare_title_lift_skipped_when_title_was_cleaned():
+    # topic == title, but a stripped marker makes clean_title != title: something
+    # WAS extracted, so the "no signal" premise fails -> no lift, stays NULL.
+    r = enrich("MDR", "Ein Film (Audiodeskription)",
+               "Ein Film (Audiodeskription)", "", 5400)
+    assert "A" in r["flags"]
+    assert r["clean_title"] == "Ein Film"
+    assert r["category"] is None
+
+
+def test_bare_title_lift_does_not_override_episode():
+    # An explicit episodic marker already makes it Episode (and clean_title differs
+    # anyway); the bare-title lift fires only on a still-NULL medium.
+    r = enrich("MDR", "Ein Film", "Ein Film (S1/E5)", "", 5400)
+    assert r["episode"] == 5
+    assert r["category"] == "Episode"
+
+
 def test_midtitle_part_marker_is_episode():
     # "Title N/M - Subtitle": a multi-part marker in the MIDDLE of the title (a
     # nature-doc miniseries) -- NPART is end-anchored and PART needs parens, so
