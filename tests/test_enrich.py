@@ -7,7 +7,7 @@ import pytest
 
 from theke import *
 from theke import _build_show_where
-from theke.enrich import enrich, ENRICH_COLS, FICTION_TOPICS
+from theke.enrich import enrich, ENRICH_COLS, FICTION_TOPICS, SERIES_TOPICS
 
 
 # -- helpers -----------------------------------------------------------------
@@ -939,13 +939,14 @@ def test_standalone_film_without_se_stays_movie():
 
 
 def test_fiction_topic_lifts_null_to_movie():
-    # A known fiction-Reihe topic (Tatort) with NO film metazeile on this airing
-    # leaves category NULL via the duration prior (a 89-min crime film, >1800s).
-    # The fiction-topic allowlist lifts it to Movie with series_name, matching the
-    # labelled airings of the same Reihe (internal consistency).
-    r = enrich("ARD", "Tatort", "Tatort: Seenot", "", 5339)
+    # A known fiction-Reihe topic (Mankells Wallander -- cataloged as individual
+    # movies on TMDB) with NO film metazeile on this airing leaves category NULL
+    # via the duration prior (a 89-min crime film, >1800s). The fiction-topic
+    # allowlist lifts it to Movie with series_name, matching the labelled airings
+    # of the same Reihe (internal consistency).
+    r = enrich("ARD", "Mankells Wallander", "Mankells Wallander: Seenot", "", 5339)
     assert r["category"] == "Movie"
-    assert r["series_name"] == "Tatort"
+    assert r["series_name"] == "Mankells Wallander"
 
 
 def test_fiction_topic_lifts_sub_60min_film_to_movie():
@@ -1177,6 +1178,55 @@ def test_bare_paren_number_does_not_override_existing_episode():
     r = enrich("ARD", "Doku", "Die Story (S02/E06) (3)", "", 3000)
     assert r["episode"] == 6
     assert r["clean_title"] == "Die Story (3)"
+
+
+# -- enrich improvements B: SERIES_TOPICS split (-> category Episode) --------
+
+def test_series_topic_tatort_becomes_episode_not_movie():
+    # B: Tatort is a TMDB series -> a film-length airing with no medium signal is
+    # now Episode (series-topic), no longer lifted to Movie.
+    r = enrich("ARD", "Tatort", "Tatort: Seenot", "", 5339)
+    assert r["category"] == "Episode"
+    assert r["series_name"] == "Tatort"
+
+
+def test_series_topic_overrides_metazeile_movie_label():
+    # A series-topic airing carrying a "Krimi, <Land> <Jahr>" metazeile (which
+    # would otherwise lift to Movie) is still Episode -- the topic is decisive --
+    # but the metazeile year/country/genre are still extracted.
+    r = enrich("ARD", "Polizeiruf 110", "Der Fall",
+                 "Krimi, Deutschland 2020 Ein Fall.", 5400)
+    assert r["category"] == "Episode"
+    assert r["year"] == 2020
+    assert r["country"] == "Deutschland"
+    assert r["genre"] == "Crime"
+
+
+def test_series_topic_short_trailer_stays_clip():
+    # GUARD: series-topic only reclassifies a NULL/Movie medium; a short Tatort
+    # trailer keeps its Clip medium.
+    r = enrich("ARD", "Tatort", "Tatort: Seenot (Trailer)", "", 40)
+    assert r["category"] == "Clip"
+
+
+def test_mankells_wallander_stays_movie():
+    # Mankells Wallander is cataloged as individual movies on TMDB (real movie
+    # matches), so it stays in the Movie fiction lift, NOT in SERIES_TOPICS.
+    r = enrich("ARD", "Mankells Wallander", "Mankells Wallander – Rache", "", 5400)
+    assert r["category"] == "Movie"
+    assert r["series_name"] == "Mankells Wallander"
+
+
+def test_series_topics_extendable_via_param():
+    # SERIES_TOPICS is configurable like fiction_topics: a topic absent from the
+    # built-in default is Movie-lift-eligible, but is forced to Episode when
+    # supplied via the series_topics argument (casefolded).
+    r0 = enrich("ARD", "Mein Serien-Krimi", "Mein Serien-Krimi: Folge X", "", 5000,
+                 fiction_topics=FICTION_TOPICS | {"mein serien-krimi"})
+    assert r0["category"] == "Movie"
+    r1 = enrich("ARD", "Mein Serien-Krimi", "Mein Serien-Krimi: Folge X", "", 5000,
+                 series_topics=SERIES_TOPICS | {"mein serien-krimi"})
+    assert r1["category"] == "Episode"
 
 
 # -- cmd_enrich: DB write side ---------------------------------------------
