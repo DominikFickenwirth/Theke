@@ -54,6 +54,7 @@ class Config:
     queue_auto_approve:   bool  = False
     languages:            list  = dataclasses.field(default_factory=lambda: ["de"])
     fiction_topics:       list  = dataclasses.field(default_factory=list)
+    series_topics:        list  = dataclasses.field(default_factory=list)
     ffmpeg_path:          str   = "ffmpeg"
     ffprobe_path:         str   = "ffprobe"
     download_retries:     int   = 3

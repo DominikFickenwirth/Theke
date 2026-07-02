@@ -143,6 +143,17 @@ def test_config_fiction_topics_from_file(tmp_path):
     assert load_config(str(path)).fiction_topics == ["Mein Regio-Krimi", "Dorf-Saga"]
 
 
+def test_config_series_topics_default_empty(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert load_config(None).series_topics == []
+
+
+def test_config_series_topics_from_file(tmp_path):
+    path = tmp_path / "st.json"
+    write_config(path, {"series_topics": ["Mein Serien-Krimi", "Dorf-Krimi"]})
+    assert load_config(str(path)).series_topics == ["Mein Serien-Krimi", "Dorf-Krimi"]
+
+
 # -- config: env vars (phase 11, third source: defaults < file < env < CLI) --
 
 def test_config_env_overrides_defaults(tmp_path, monkeypatch):

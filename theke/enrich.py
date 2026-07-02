@@ -32,6 +32,7 @@ SE_A    = re.compile(r'\(S(\d+)/E(\d+)\)')                    # ZDF family + thi
 SE_B    = re.compile(r'\((?:Staffel\s*(\d+),\s*)?Folge\s*(\d+)\)')   # SRF
 LEADC   = re.compile(r'^\s*(\d{1,4})\.\s+')                   # KiKA leading "NN."
 PART    = re.compile(r'\((\d{1,2})/(\d{1,2})\)')             # Mehrteiler "(n/m)"
+BAREPART = re.compile(r'\s*\((\d{1,2})\)\s*$')              # bare running "(n)" at end (A4)
 # Paren-less episode notation (B5), all guarded: "Staffel n, Folge m";
 # "- Teil n" (arabic or roman); a bare "n/m" only at the very end (so dates
 # like "10/06/2026" and "3 1/2 Stunden" never match).
@@ -79,7 +80,7 @@ INTERVIEW = re.compile(r'^\s*(?:Interview mit|Rencontre avec|Entretien avec|Gesp
 MARKERS = [
     (re.compile(r'^Audiodeskription$|^Hörfassung$', re.I),                       ('flag', 'A')),
     (re.compile(r'^(?:mit\s+)?Gebärdensprache$|^ÖGS$', re.I),                     ('flag', 'S')),
-    (re.compile(r'^(?:in\s+)?(?:Einfache[r]?|Leichte[r]?)\s+Sprache$', re.I),     ('flag', 'E')),
+    (re.compile(r'^(?:in\s+)?(?:Einfache[r]?|Leichte[r]?|Klare[r]?)\s+Sprache$', re.I), ('flag', 'E')),
     (re.compile(r'^Originalversion mit Untertitel$|^OmU$|^OmdU$', re.I),          ('sub_ov', 'U')),
     (re.compile(r'^mit Untertitel$', re.I),                                       ('flag', 'U')),
     (re.compile(r'^Originalversion$|^OV$', re.I),                                 ('language', 'ov')),
@@ -92,12 +93,13 @@ MARKERS = [
 # parenthetical MARKERS above.
 SUFFIX_MARKERS = [
     (re.compile(r'\s+in\s+Gebärdensprache$', re.I),                          'S'),
-    (re.compile(r'\s+in\s+(?:Einfacher|Leichter)\s+Sprache$', re.I),         'E'),
+    (re.compile(r'\s+in\s+(?:Einfacher|Leichter|Klarer)\s+Sprache$', re.I),  'E'),
+    (re.compile(r'\s*[-–]\s*(?:Audiodeskription|Hörfassung)$', re.I),         'A'),
 ]
 # -- output taxonomy: medium (category) + TMDB genre ------------------------
 # Two orthogonal axes. category is the medium, a small custom set
-# (Movie/Episode/Clip/Event/None); genre is TMDB-only (no custom genres, so a
-# later TMDB lookup stays clean), multiple values comma-joined in this order.
+# (Movie/Episode/Clip/Event/None); genre is filled by enrich, multiple values
+# are comma-joined in this order.
 TMDB_ORDER = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Documentary',
               'Drama', 'Family', 'Kids', 'Fantasy', 'History', 'Horror', 'Music',
               'Mystery', 'News', 'Reality', 'Romance', 'SciFi', 'Soap', 'Talk',
@@ -275,19 +277,35 @@ def route_topic(topic) -> dict:
 # Ersten, ...) keep series_name = slot for now; moving them to FORMAT_TOPICS for a
 # cleaner NULL series_name is a separate later cleanup. Matched casefold == topic.
 FICTION_TOPICS = {t.casefold() for t in (
-    'Tatort', 'Polizeiruf 110', 'Märchen in der ARD', 'Debüt im Dritten',
+    'Märchen in der ARD', 'Debüt im Dritten',
     'Dokumentarfilmzeit', 'FilmMittwoch im Ersten', 'Spielfilm-Highlights',
-    'Der Usedom-Krimi', 'Filme im Ersten', 'Donna Leon', 'Praxis mit Meerblick',
-    'Der Kroatien-Krimi', 'Krause', 'Daheim in den Bergen', 'Rebecka Martinsson',
-    'Kommissar Dupin', 'Kommissar Wallander', 'Harter Brocken Krimireihe',
-    'Zimmer mit Stall', 'Pfarrer Braun', 'Anna und ihr Untermieter', 'Wolfsland',
+    'Der Usedom-Krimi', 'Filme im Ersten',
+    'Krause',
+    'Kommissar Dupin', 'Harter Brocken Krimireihe',
+    'Zimmer mit Stall', 'Anna und ihr Untermieter', 'Wolfsland',
     'Utta Danella', 'Steirerkrimi', 'Ein Krimi aus Passau',
-    'Der Ranger - Paradies Heimat', 'Spielfilm in 3sat', 'Liebe am Fjord',
+    'Spielfilm in 3sat', 'Liebe am Fjord',
     'Käthe und ich', 'Kluftingerkrimis', 'Die drei von der Müllabfuhr',
-    'Der Wien-Krimi: Blind ermittelt', 'Mankells Wallander', 'Die Diplomatin',
-    'Die Bestatterin', 'Der Pate', 'Der Kommissar und die Alpen',
-    'Toni, männlich, Hebamme', 'Nord bei Nordwest', 'Mordkommission Istanbul',
-    'Mord in bester Gesellschaft', 'Krimis im Ersten', 'Die Inselärztin',
+    'Der Wien-Krimi: Blind ermittelt', 'Mankells Wallander',
+    'Die Bestatterin', 'Der Pate',
+    'Toni, männlich, Hebamme',
+    'Krimis im Ersten')}
+
+# Known TMDB *series* topics (B): a fiction Reihe that TMDB catalogs as a TV
+# series, not individual movies. Unlike FICTION_TOPICS (Movie lift), a topic here
+# forces category 'Episode' (overriding a Movie label/lift, so these drain out of
+# the movie match pool). It fires on a NULL/Movie medium only -- a short clip/
+# trailer keeps its Clip medium, an explicit Sxx/Exx already reads Episode. The
+# match layer handles episode matching (needs season/episode) later (phase 13).
+# Verified per-topic against TMDB search/multi media_type; movie-cataloged Reihen
+# (Mankells Wallander, Der Usedom-Krimi, ...) deliberately stay in FICTION_TOPICS.
+# Matched casefold == topic. Extended by config['series_topics'].
+SERIES_TOPICS = {t.casefold() for t in (
+    'Tatort', 'Polizeiruf 110', 'Donna Leon', 'Praxis mit Meerblick',
+    'Der Kroatien-Krimi', 'Daheim in den Bergen', 'Rebecka Martinsson',
+    'Kommissar Wallander', 'Pfarrer Braun', 'Der Ranger - Paradies Heimat',
+    'Die Diplomatin', 'Der Kommissar und die Alpen', 'Nord bei Nordwest',
+    'Mordkommission Istanbul', 'Mord in bester Gesellschaft', 'Die Inselärztin',
     'Der Bozen-Krimi')}
 
 ARTE_LANG = {'ARTE.DE':'de','ARTE.FR':'fr','ARTE.EN':'en','ARTE.ES':'es','ARTE.IT':'it','ARTE.PL':'pl'}
@@ -335,17 +353,18 @@ ENRICH_COLS = ['clean_title', 'series_name', 'genre', 'slot', 'season', 'episode
 
 def _confidence(kat_src, category):
     """Deterministic confidence from how the category was found."""
-    if kat_src in ('metazeile', 'arte-topic'): return 0.9
-    if kat_src in ('topic', 'event'):           return 0.8
+    if kat_src in ('metazeile', 'arte-topic'):        return 0.9
+    if kat_src in ('topic', 'event', 'series-topic'): return 0.8
     return 0.2 if category is None else 0.5
 
 
 def enrich(sender, topic, title, description, duration,
-            fiction_topics=FICTION_TOPICS) -> dict:
+            fiction_topics=FICTION_TOPICS, series_topics=SERIES_TOPICS) -> dict:
     """A mediathek row -> extracted metadata dict (keys == ENRICH_COLS).
 
-    fiction_topics is the casefolded fiction-Reihe allowlist (built-in default;
-    the CLI passes the default unioned with config['fiction_topics'])."""
+    fiction_topics is the casefolded fiction-Reihe allowlist (Movie lift);
+    series_topics the casefolded TMDB-series allowlist (Episode). The CLI passes
+    each built-in default unioned with config['fiction_topics']/['series_topics']."""
     t = title or ''; d = (description or '').strip(); tp = topic or ''
     flags = set()
     genres = set()
@@ -368,9 +387,12 @@ def enrich(sender, topic, title, description, duration,
         return re.sub(r'\s*\(([^()]{1,40})\)', repl, s)
 
     def take_suffix(s):                        # bare accessibility suffix (no parens)
-        for rx, flag in SUFFIX_MARKERS:
-            m = rx.search(s)
-            if m: flags.add(flag); s = s[:m.start()]
+        changed = True
+        while changed:                         # repeat: a suffix may appear twice
+            changed = False
+            for rx, flag in SUFFIX_MARKERS:
+                m = rx.search(s)
+                if m: flags.add(flag); s = s[:m.start()]; changed = True
         return s
     t = take_suffix(take_parens(t))
     tp = take_suffix(take_parens(tp))          # markers also live in the topic
@@ -432,6 +454,9 @@ def enrich(sender, topic, title, description, duration,
         elif mn and int(mn.group(1)) <= int(mn.group(2)) <= 50:   # n<=m, no dates
             r['episode'] = int(mn.group(1)); r['episode_count'] = int(mn.group(2))
             t = t[:mn.start()]
+    if r['episode'] is None:                   # A4: bare running "(n)" at title end
+        mb = BAREPART.search(t)
+        if mb: r['episode'] = int(mb.group(1)); t = t[:mb.start()]
 
     # -- Pass 3: metazeile (category + country + year) --------------------
     src = t if sender in TITLE_META_SENDERS else d
@@ -486,6 +511,10 @@ def enrich(sender, topic, title, description, duration,
             if r['category'] in (None, 'Clip'):
                 r['category'] = 'Episode'; kat_src = 'episodic'
 
+    if (r['category'] in (None, 'Movie') and 'T' not in flags     # B: known TMDB-series
+            and tp.casefold() in series_topics):                  # topic -> Episode (drains movie pool)
+        r['category'] = 'Episode'; kat_src = 'series-topic'
+
     if (r['category'] is None and (duration or 0) >= 1800         # known fiction Reihe,
             and tp.casefold() in fiction_topics):                 # film-length, no medium signal
         r['category'] = 'Movie'; kat_src = 'topic-fiction'
@@ -512,7 +541,21 @@ def enrich(sender, topic, title, description, duration,
     if my:
         if not r['year']: r['year'] = int(my.group(0).strip('() '))
         t = t[:my.start()]
+
+    if r['series_name']:                                 # A1: redundant reihe suffix
+        redun = re.search(r'\s*[-–]\s*' + re.escape(r['series_name']) + r'$', t, re.I)
+        if redun and t[:redun.start()].strip(' -–|:,·'):  # keep a non-empty head
+            t = t[:redun.start()]
+
     r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:,·') or None
+
+    # Bare-title Movie lift: topic == title == clean_title (topic is no container,
+    # nothing was extracted) + a 75-120 min window is a low-conf standalone-film
+    # signal. Fires on a still-NULL medium only; match's TMDB gates arbitrate.
+    if (r['category'] is None and title and title == topic == r['clean_title']
+            and 4500 <= (duration or 0) <= 7200):
+        r['category'] = 'Movie'; kat_src = 'bare-title'
+        r['series_name'] = None                # topic is the film, not a Reihe
 
     r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
     r['flags'] = ''.join(sorted(flags))        # canonical alphabetical order (A<S<T<U)

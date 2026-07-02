@@ -7,7 +7,7 @@ import pytest
 
 from theke import *
 from theke import _build_show_where
-from theke.enrich import enrich, ENRICH_COLS, FICTION_TOPICS
+from theke.enrich import enrich, ENRICH_COLS, FICTION_TOPICS, SERIES_TOPICS
 
 
 # -- helpers -----------------------------------------------------------------
@@ -765,8 +765,7 @@ def test_topic_routing_plain_series_unchanged():
 
 
 # -- category/genre split: medium (category) vs TMDB genre -------------------
-# category in {Movie, Episode, Clip, Event, NULL}; genre is TMDB-only, multiple
-# values comma-joined in canonical TMDB order.
+# category in {Movie, Episode, Clip, Event, NULL}
 
 def test_genre_word_maps_to_movie_plus_tmdb_genre():
     # A bare fiction genre word as topic -> Movie medium + the TMDB genre.
@@ -940,13 +939,14 @@ def test_standalone_film_without_se_stays_movie():
 
 
 def test_fiction_topic_lifts_null_to_movie():
-    # A known fiction-Reihe topic (Tatort) with NO film metazeile on this airing
-    # leaves category NULL via the duration prior (a 89-min crime film, >1800s).
-    # The fiction-topic allowlist lifts it to Movie with series_name, matching the
-    # labelled airings of the same Reihe (internal consistency).
-    r = enrich("ARD", "Tatort", "Tatort: Seenot", "", 5339)
+    # A known fiction-Reihe topic (Mankells Wallander -- cataloged as individual
+    # movies on TMDB) with NO film metazeile on this airing leaves category NULL
+    # via the duration prior (a 89-min crime film, >1800s). The fiction-topic
+    # allowlist lifts it to Movie with series_name, matching the labelled airings
+    # of the same Reihe (internal consistency).
+    r = enrich("ARD", "Mankells Wallander", "Mankells Wallander: Seenot", "", 5339)
     assert r["category"] == "Movie"
-    assert r["series_name"] == "Tatort"
+    assert r["series_name"] == "Mankells Wallander"
 
 
 def test_fiction_topic_lifts_sub_60min_film_to_movie():
@@ -982,6 +982,60 @@ def test_non_fiction_feature_topic_stays_null():
     # allowlist, so it stays NULL -- the lift never guesses beyond known Reihen.
     r = enrich("ARD", "phoenix vor ort", "phoenix vor ort: Bundestag", "", 5000)
     assert r["category"] is None
+
+
+# -- bare-title Movie lift: topic==title==clean_title, 75-120 min ------------
+# A standalone film often carries NO signal at all -- topic == title == the bare
+# film name, no metazeile, no marker, no known Reihe (e.g. MDR "Meine wunderbar
+# seltsame Woche mit Tess"). Enrich then leaves it NULL (duration prior) and it
+# never reaches the movie pool. The lift reads topic==title==clean_title (topic
+# is not a container, nothing was extracted) + a feature-length window (4500-7200s
+# = 75-120 min, which cuts the long variety/gala tail above 120 min and the
+# doc-heavy band below 75 min) as a low-confidence Movie signal. It is LOW conf
+# (0.5, same bucket as the duration prior) -- match's TMDB hard gates are the
+# arbiter; non-films just fall to '2'. Measured on the live list this window is
+# ~60% genuine films with only ~0.5% dangerous (series-episode) false positives.
+def test_bare_title_feature_lifts_to_movie():
+    # 76 min = 4560s, in the window; nothing to strip -> clean_title == title.
+    r = enrich("MDR", "Meine wunderbar seltsame Woche mit Tess",
+               "Meine wunderbar seltsame Woche mit Tess", "", 4560)
+    assert r["category"] == "Movie"
+    assert r["series_name"] is None
+    assert r["clean_title"] == "Meine wunderbar seltsame Woche mit Tess"
+    assert r["enrich_confidence"] == 0.5   # else-branch: low-conf, category set
+
+
+def test_bare_title_lift_duration_window_boundaries():
+    # Inclusive window [4500, 7200] (75-120 min); one second outside stays NULL.
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 4499)["category"] is None
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 4500)["category"] == "Movie"
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 7200)["category"] == "Movie"
+    assert enrich("MDR", "Ein Film", "Ein Film", "", 7201)["category"] is None
+
+
+def test_bare_title_lift_requires_topic_equals_title():
+    # A generic slot topic (topic != title) is NOT a bare title -- no lift, the
+    # feature-length row stays NULL for the duration prior.
+    r = enrich("MDR", "Spielfilm am Sonntag", "Ein Film", "", 5400)
+    assert r["category"] is None
+
+
+def test_bare_title_lift_skipped_when_title_was_cleaned():
+    # topic == title, but a stripped marker makes clean_title != title: something
+    # WAS extracted, so the "no signal" premise fails -> no lift, stays NULL.
+    r = enrich("MDR", "Ein Film (Audiodeskription)",
+               "Ein Film (Audiodeskription)", "", 5400)
+    assert "A" in r["flags"]
+    assert r["clean_title"] == "Ein Film"
+    assert r["category"] is None
+
+
+def test_bare_title_lift_does_not_override_episode():
+    # An explicit episodic marker already makes it Episode (and clean_title differs
+    # anyway); the bare-title lift fires only on a still-NULL medium.
+    r = enrich("MDR", "Ein Film", "Ein Film (S1/E5)", "", 5400)
+    assert r["episode"] == 5
+    assert r["category"] == "Episode"
 
 
 def test_midtitle_part_marker_is_episode():
@@ -1060,6 +1114,173 @@ def test_fiction_topics_extendable_via_param():
     r1 = enrich("ARD", "Mein Regio-Krimi", "Mein Regio-Krimi: Folge X", "", 5000,
                  fiction_topics=FICTION_TOPICS | {"mein regio-krimi"})
     assert r1["category"] == "Movie"
+
+
+# -- enrich improvements A3: "(klare Sprache)" -> flag E ---------------------
+
+def test_klare_sprache_marker_sets_flag_e_and_strips():
+    # A3: "(klare Sprache)" is a plain-language edition marker (like einfache/
+    # leichte Sprache); it sets flag E and is stripped from the title.
+    r = enrich("ARD", "Tatort", "Siebte Etage (2024) (klare Sprache)", "", 5400)
+    assert "E" in r["flags"]
+    assert r["clean_title"] == "Siebte Etage"
+    assert r["year"] == 2024              # stripping unblocks the trailing (YYYY)
+
+
+def test_klare_sprache_marker_capitalized():
+    # Also the capitalized "(Klare Sprache)" spelling.
+    r = enrich("ARD", "Tatort", "Hubertys Rache (2022) (Klare Sprache)", "", 5400)
+    assert "E" in r["flags"]
+    assert r["clean_title"] == "Hubertys Rache"
+    assert r["year"] == 2022
+
+
+# -- enrich improvements A2: " - Audiodeskription" bare suffix -> flag A ------
+
+def test_audiodeskription_bare_suffix_sets_flag_a_and_strips():
+    # A2: the common bare " - Audiodeskription" suffix (no parens) must flag A and
+    # be stripped, like the parenthetical "(Audiodeskription)" form already does.
+    r = enrich("ARD", "Spielfilm", "Exil - Audiodeskription", "", 5400)
+    assert r["flags"] == "A"
+    assert r["clean_title"] == "Exil"
+
+
+def test_hoerfassung_bare_suffix_sets_flag_a():
+    r = enrich("ARD", "Spielfilm", "Haus ohne Dach - Hörfassung", "", 5400)
+    assert r["flags"] == "A"
+    assert r["clean_title"] == "Haus ohne Dach"
+
+
+def test_audiodeskription_doubled_suffix_fully_stripped():
+    # The suffix sometimes appears twice; strip repeatedly until none remains.
+    r = enrich("ARD", "Spielfilm",
+                 "Räuberhände - Audiodeskription - Audiodeskription", "", 5400)
+    assert r["flags"] == "A"
+    assert r["clean_title"] == "Räuberhände"
+
+
+# -- enrich improvements A1: redundant "<Title> - <series_name>" suffix -------
+
+def test_redundant_series_suffix_stripped():
+    # A1: ARD-Degeto reihe form "<Episode> - <Serienname>" where the tail exactly
+    # duplicates the routed series_name -> strip the tail, keep the episode head.
+    # (separator is the en-dash U+2013, as in the raw data)
+    r = enrich("ARD", "Anna und ihr Untermieter",
+                 "Volles Haus – Anna und ihr Untermieter", "", 5400)
+    assert r["series_name"] == "Anna und ihr Untermieter"
+    assert r["clean_title"] == "Volles Haus"
+
+
+def test_redundant_series_suffix_case_insensitive():
+    # The tail == series_name check is case-insensitive.
+    r = enrich("ARD", "Billy Kuckuck", "Mutterliebe – billy kuckuck", "", 5400)
+    assert r["clean_title"] == "Mutterliebe"
+
+
+def test_redundant_series_suffix_hyphen_separator():
+    r = enrich("ARD", "Billy Kuckuck", "Aber bitte mit Sahne! - Billy Kuckuck", "", 5400)
+    assert r["clean_title"] == "Aber bitte mit Sahne!"
+
+
+def test_non_redundant_title_subtitle_dash_is_kept():
+    # NEGATIVE: a title/subtitle dash whose tail is NOT the series_name must stay
+    # untouched (documentary "<Title> - <Subtitle>"); series_name here is the slot.
+    r = enrich("ARD", "Dokumentarfilmzeit",
+                 "Stealing Giants – Der grausame Handel mit lebenden Elefanten",
+                 "", 5400)
+    assert r["clean_title"] == "Stealing Giants – Der grausame Handel mit lebenden Elefanten"
+
+
+def test_redundant_series_suffix_not_stripped_without_series_name():
+    # GUARD: with no series_name (slot/format topic) the suffix rule never fires.
+    r = enrich("ARD", "Spielfilm", "Volles Haus – Anna und ihr Untermieter", "", 5400)
+    assert r["series_name"] is None
+    assert r["clean_title"] == "Volles Haus – Anna und ihr Untermieter"
+
+
+# -- enrich improvements A4: bare "(n)" running number -> episode ------------
+
+def test_bare_paren_number_becomes_episode_and_episode_category():
+    # A4: a bare "(n)" (1-2 digits) at the title end is a running episode number.
+    # Extract it as episode, strip it, and let the episodic rule set Episode.
+    r = enrich("ARD", "Das Konto", "Das Konto (2)", "", 5400)
+    assert r["episode"] == 2
+    assert r["clean_title"] == "Das Konto"
+    assert r["category"] == "Episode"
+
+
+def test_bare_paren_number_with_redundant_series_suffix():
+    # A4 + A1 together: strip the bare "(n)" first, then the redundant reihe suffix.
+    r = enrich("ARD", "Anna und ihr Untermieter",
+                 "Volles Haus – Anna und ihr Untermieter (5)", "", 5400)
+    assert r["episode"] == 5
+    assert r["series_name"] == "Anna und ihr Untermieter"
+    assert r["clean_title"] == "Volles Haus"
+    assert r["category"] == "Episode"
+
+
+def test_bare_paren_number_does_not_take_a_year():
+    # GUARD: a 4-digit "(YYYY)" is a year disambiguation, never a bare episode.
+    r = enrich("ARD", "Spielfilm", "Der Fall (2019)", "", 5400)
+    assert r["episode"] is None
+    assert r["year"] == 2019
+    assert r["clean_title"] == "Der Fall"
+
+
+def test_bare_paren_number_does_not_override_existing_episode():
+    # GUARD: an explicit (Sxx/Exx) wins; the bare "(n)" only fills an unset episode.
+    r = enrich("ARD", "Doku", "Die Story (S02/E06) (3)", "", 3000)
+    assert r["episode"] == 6
+    assert r["clean_title"] == "Die Story (3)"
+
+
+# -- enrich improvements B: SERIES_TOPICS split (-> category Episode) --------
+
+def test_series_topic_tatort_becomes_episode_not_movie():
+    # B: Tatort is a TMDB series -> a film-length airing with no medium signal is
+    # now Episode (series-topic), no longer lifted to Movie.
+    r = enrich("ARD", "Tatort", "Tatort: Seenot", "", 5339)
+    assert r["category"] == "Episode"
+    assert r["series_name"] == "Tatort"
+
+
+def test_series_topic_overrides_metazeile_movie_label():
+    # A series-topic airing carrying a "Krimi, <Land> <Jahr>" metazeile (which
+    # would otherwise lift to Movie) is still Episode -- the topic is decisive --
+    # but the metazeile year/country/genre are still extracted.
+    r = enrich("ARD", "Polizeiruf 110", "Der Fall",
+                 "Krimi, Deutschland 2020 Ein Fall.", 5400)
+    assert r["category"] == "Episode"
+    assert r["year"] == 2020
+    assert r["country"] == "Deutschland"
+    assert r["genre"] == "Crime"
+
+
+def test_series_topic_short_trailer_stays_clip():
+    # GUARD: series-topic only reclassifies a NULL/Movie medium; a short Tatort
+    # trailer keeps its Clip medium.
+    r = enrich("ARD", "Tatort", "Tatort: Seenot (Trailer)", "", 40)
+    assert r["category"] == "Clip"
+
+
+def test_mankells_wallander_stays_movie():
+    # Mankells Wallander is cataloged as individual movies on TMDB (real movie
+    # matches), so it stays in the Movie fiction lift, NOT in SERIES_TOPICS.
+    r = enrich("ARD", "Mankells Wallander", "Mankells Wallander – Rache", "", 5400)
+    assert r["category"] == "Movie"
+    assert r["series_name"] == "Mankells Wallander"
+
+
+def test_series_topics_extendable_via_param():
+    # SERIES_TOPICS is configurable like fiction_topics: a topic absent from the
+    # built-in default is Movie-lift-eligible, but is forced to Episode when
+    # supplied via the series_topics argument (casefolded).
+    r0 = enrich("ARD", "Mein Serien-Krimi", "Mein Serien-Krimi: Folge X", "", 5000,
+                 fiction_topics=FICTION_TOPICS | {"mein serien-krimi"})
+    assert r0["category"] == "Movie"
+    r1 = enrich("ARD", "Mein Serien-Krimi", "Mein Serien-Krimi: Folge X", "", 5000,
+                 series_topics=SERIES_TOPICS | {"mein serien-krimi"})
+    assert r1["category"] == "Episode"
 
 
 # -- cmd_enrich: DB write side ---------------------------------------------

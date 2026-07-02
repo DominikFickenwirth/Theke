@@ -190,18 +190,23 @@ theke --db build/theke.db enrich run            # enriched = N
 theke --db build/theke.db enrich run --force    # alles neu
 ```
 
-Bekannte Spielfilm-/Krimi-Reihen-Topics (Tatort, Polizeiruf 110, die benannten
-Krimi-/Fernsehfilm-Reihen) heben eine sonst leere `category` auf `Movie` an, damit
-eine Reihe einheitlich bleibt -- auch Ausstrahlungen ohne Film-Metazeile. Die
-eingebaute Liste ist über die Konfiguration erweiterbar:
+Bekannte Spielfilm-/Krimi-Reihen-Topics (die benannten Krimi-/Fernsehfilm-Reihen,
+die TMDB als Einzelfilme führt, z. B. Mankells Wallander, Der Usedom-Krimi) heben
+eine sonst leere `category` auf `Movie` an, damit eine Reihe einheitlich bleibt --
+auch Ausstrahlungen ohne Film-Metazeile. Reihen, die TMDB dagegen als **Serie**
+führt (Tatort, Polizeiruf 110, ...), setzen `category` auf `Episode` (auch gegen
+ein Film-Label), damit sie aus dem Movie-Match-Pool fallen (Episoden-Matching folgt
+in Phase 13). Beide eingebauten Listen sind über die Konfiguration erweiterbar:
 
 | Schlüssel        | Wirkung                                                            |
 | ---------------- | ----------------------------------------------------------------- |
-| `fiction_topics` | Zusätzliche Reihen-Topics (Liste), ergänzen die eingebaute Liste (Std. `[]`). |
+| `fiction_topics` | Zusätzliche Movie-Reihen-Topics (Liste), ergänzen die eingebaute Liste (Std. `[]`). |
+| `series_topics`  | Zusätzliche Serien-Reihen-Topics (Liste) -> `Episode`, ergänzen die eingebaute Liste (Std. `[]`). |
 
-`flags` ist ein sortierter Buchstaben-String: `A` Audiodeskription, `E` Einfache/
-Leichte Sprache, `I` Interview/Gespräch (Begleitstück), `M` Making-of, `S`
-Gebärdensprache, `T` Trailer/Vorschau, `U` eingebrannte Untertitel. Ein kurzes
+`flags` ist ein sortierter Buchstaben-String: `A` Audiodeskription/Hörfassung,
+`E` Einfache/Leichte/Klare Sprache, `I` Interview/Gespräch (Begleitstück),
+`M` Making-of, `S` Gebärdensprache, `T` Trailer/Vorschau, `U` eingebrannte
+Untertitel. Ein kurzes
 Begleitstück (Trailer/Interview/Making-of, < 300s bzw. < 900s) wird auf `Clip`
 herabgestuft, statt als Film/Episode zu zählen.
 `enrich_confidence` ist deterministisch: `0.9` (Metazeile/ARTE-Topic), `0.8`
