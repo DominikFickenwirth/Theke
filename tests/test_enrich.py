@@ -1370,8 +1370,8 @@ def test_cmd_enrich_preserves_phase3_ids(tmp_path):
 
 # -- enrich reset (status 1/2 -> 0) ----------------------------------------
 
-def reset_args(status_only=False):
-    return SimpleNamespace(enrich_cmd="reset", status_only=status_only)
+def reset_args(status_only=False, status=None):
+    return SimpleNamespace(enrich_cmd="reset", status_only=status_only, status=status)
 
 
 def test_cmd_enrich_reset_flips_status_and_clears_columns(tmp_path):
@@ -1425,6 +1425,52 @@ def test_cmd_enrich_reset_leaves_new_rows(tmp_path):
         assert cmd_enrich(conn, Config(), reset_args())["reset"] == 1
         n = conn.execute("SELECT status FROM mediathek WHERE mediathek_id='n'").fetchone()
         assert n["status"] == "0"   # already new -> untouched
+    finally:
+        conn.close()
+
+
+def test_cmd_enrich_reset_status_selects_single(tmp_path):
+    # --status 2 resets only bulk-attempted rows, leaving '1' and '3' intact.
+    conn = open_db(tmp_path)
+    try:
+        insert_enriched(conn, "a", clean_title="A")                     # status '1'
+        insert_enriched(conn, "b", clean_title="B")
+        insert_enriched(conn, "c", clean_title="C")
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='b'")
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='c'")
+        assert cmd_enrich(conn, Config(), reset_args(status="2"))["reset"] == 1
+        rows = {r["mediathek_id"]: r["status"]
+                for r in conn.execute("SELECT mediathek_id, status FROM mediathek")}
+        assert rows == {"a": "1", "b": "0", "c": "3"}
+    finally:
+        conn.close()
+
+
+def test_cmd_enrich_reset_status_selects_multiple(tmp_path):
+    # --status 23 resets '2' and '3', leaving '1'.
+    conn = open_db(tmp_path)
+    try:
+        insert_enriched(conn, "a", clean_title="A")                     # status '1'
+        insert_enriched(conn, "b", clean_title="B")
+        insert_enriched(conn, "c", clean_title="C")
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='b'")
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='c'")
+        assert cmd_enrich(conn, Config(), reset_args(status="23"))["reset"] == 2
+        rows = {r["mediathek_id"]: r["status"]
+                for r in conn.execute("SELECT mediathek_id, status FROM mediathek")}
+        assert rows == {"a": "1", "b": "0", "c": "0"}
+    finally:
+        conn.close()
+
+
+def test_cmd_enrich_reset_status_rejects_out_of_range(tmp_path):
+    conn = open_db(tmp_path)
+    try:
+        insert_enriched(conn, "a", clean_title="A")
+        with pytest.raises(ValueError):
+            cmd_enrich(conn, Config(), reset_args(status="0"))
+        with pytest.raises(ValueError):
+            cmd_enrich(conn, Config(), reset_args(status="4"))
     finally:
         conn.close()
 

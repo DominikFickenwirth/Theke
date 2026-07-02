@@ -802,8 +802,8 @@ def test_cmd_match_show_is_read_only(tmp_path, monkeypatch):
 
 # -- match reset (status 2/3 -> 1) -------------------------------------------
 
-def reset_margs(status_only=False):
-    return SimpleNamespace(match_cmd="reset", status_only=status_only)
+def reset_margs(status_only=False, status=None):
+    return SimpleNamespace(match_cmd="reset", status_only=status_only, status=status)
 
 
 def test_cmd_match_reset_flips_status_and_clears_id(tmp_path):
@@ -870,6 +870,34 @@ def test_cmd_match_reset_needs_no_api_key(tmp_path):
         insert_movie(conn, "m1", "Das Boot", 1981, 8940)
         conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='m1'")
         assert cmd_match(conn, Config(), reset_margs()) == {"reset": 1}
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_status_selects_single(tmp_path):
+    # --status 3 resets only matched rows, leaving bulk-attempted ('2') alone.
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        insert_movie(conn, "m2", "Der Fall", 2003, 5400)
+        conn.execute("UPDATE mediathek SET status='2' WHERE mediathek_id='m1'")
+        conn.execute("UPDATE mediathek SET status='3' WHERE mediathek_id='m2'")
+        assert cmd_match(conn, CFG, reset_margs(status="3")) == {"reset": 1}
+        assert status_of(conn, "m1") == "2"   # untouched
+        assert status_of(conn, "m2") == "1"
+    finally:
+        conn.close()
+
+
+def test_cmd_match_reset_status_rejects_out_of_range(tmp_path):
+    # match reset only owns '2'/'3'; '1' (enriched) and '0' are not resettable.
+    conn = open_db(tmp_path)
+    try:
+        insert_movie(conn, "m1", "Das Boot", 1981, 8940)
+        with pytest.raises(ValueError):
+            cmd_match(conn, CFG, reset_margs(status="1"))
+        with pytest.raises(ValueError):
+            cmd_match(conn, CFG, reset_margs(status="0"))
     finally:
         conn.close()
 

@@ -215,18 +215,20 @@ herabgestuft, statt als Film/Episode zu zählen.
 
 ### `enrich reset`
 
-Macht das Anreichern rückgängig: setzt angereicherte/gematchte Zeilen
-(`status='1'`/`'2'`) zurück auf `'0'`, als wären sie frisch geholt. Leert dabei
-die enrich-Spalten **und** die match-Spalten (`tmdb_id`, `match_confidence`).
-Gibt `reset = N` (Anzahl betroffener Zeilen) aus.
+Macht das Anreichern rückgängig: setzt angereicherte/bulk-versuchte/gematchte
+Zeilen (`status='1'`/`'2'`/`'3'`) zurück auf `'0'`, als wären sie frisch geholt.
+Leert dabei die enrich-Spalten **und** die match-Spalten (`tmdb_id`,
+`match_confidence`). Gibt `reset = N` (Anzahl betroffener Zeilen) aus.
 
-| Option                | Wirkung                                                      |
-| --------------------- | ----------------------------------------------------------- |
-| `-s`, `--status-only` | Nur `status` zurücksetzen, alle Spalten unverändert lassen. |
+| Option                | Wirkung                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `-s`, `--status-only` | Nur `status` zurücksetzen, alle Spalten unverändert lassen.                                   |
+| `--status DIGITS`     | Nur die genannten Status zurücksetzen (Ziffernstring, z. B. `23` = Status 2 und 3; Std. `123`). |
 
 ```powershell
-theke --db build/theke.db enrich reset                # reset = N (Spalten geleert)
-theke --db build/theke.db enrich reset --status-only  # nur status 1/2 -> 0
+theke --db build/theke.db enrich reset                # reset = N (Spalten geleert, 1/2/3 -> 0)
+theke --db build/theke.db enrich reset --status-only  # nur status 1/2/3 -> 0
+theke --db build/theke.db enrich reset --status 23    # nur status 2 und 3 -> 0
 ```
 
 ### `enrich report`
@@ -383,13 +385,15 @@ bulk-versuchte (`status='2'`) Zeilen zurück auf `'1'` (angereichert). Leert dab
 `tmdb_id` und `match_confidence`. Reine DB-Operation -- kein TMDB-Key nötig. Gibt
 `reset = N` aus.
 
-| Option                | Wirkung                                                       |
-| --------------------- | ------------------------------------------------------------- |
-| `-s`, `--status-only` | Nur `status` zurücksetzen, `tmdb_id`/`match_confidence` lassen. |
+| Option                | Wirkung                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| `-s`, `--status-only` | Nur `status` zurücksetzen, `tmdb_id`/`match_confidence` lassen.                             |
+| `--status DIGITS`     | Nur die genannten Status zurücksetzen (Ziffernstring, z. B. `3` = nur Status 3; Std. `23`). |
 
 ```powershell
-theke --db build/theke.db match reset                # reset = N (IDs geleert)
-theke --db build/theke.db match reset --status-only  # nur status 2 -> 1
+theke --db build/theke.db match reset                # reset = N (IDs geleert, 2/3 -> 1)
+theke --db build/theke.db match reset --status-only  # nur status 2/3 -> 1
+theke --db build/theke.db match reset --status 3     # nur status 3 -> 1
 ```
 
 ### `match bulk`
