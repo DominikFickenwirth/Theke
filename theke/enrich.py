@@ -549,6 +549,14 @@ def enrich(sender, topic, title, description, duration,
 
     r['clean_title'] = re.sub(r'\s{2,}', ' ', t).strip(' -–|:,·') or None
 
+    # Bare-title Movie lift: topic == title == clean_title (topic is no container,
+    # nothing was extracted) + a 75-120 min window is a low-conf standalone-film
+    # signal. Fires on a still-NULL medium only; match's TMDB gates arbitrate.
+    if (r['category'] is None and title and title == topic == r['clean_title']
+            and 4500 <= (duration or 0) <= 7200):
+        r['category'] = 'Movie'; kat_src = 'bare-title'
+        r['series_name'] = None                # topic is the film, not a Reihe
+
     r['genre'] = _genre_str(genres)            # TMDB genres, canonical order
     r['flags'] = ''.join(sorted(flags))        # canonical alphabetical order (A<S<T<U)
     r['enrich_confidence'] = _confidence(kat_src, r['category'])
